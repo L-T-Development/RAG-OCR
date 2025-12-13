@@ -10,4 +10,8 @@ urlpatterns = [
     
     # The AI Chat Endpoint
     path('api/chat/<str:thread_id>/', views.chat_thread, name='chat_thread'),
+
+    # Delete Endpoints
+    path('api/delete-thread/<str:thread_id>/', views.delete_thread, name='delete_thread'),
+    path('api/delete-document/<str:doc_id>/', views.delete_document, name='delete_document'),
 ]

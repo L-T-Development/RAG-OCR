@@ -1,0 +1,5 @@
+Each uploaded file is first saved in a temporary location on the server, before it is actually saved 
+to its ultimate location. Name of destination file can be hard-coded or can be obtained from 
+filename property of request.files[file] object. However, it is recommended to obtain a secure 
+version of it using the secure_filename() function. 
+les[] object and saves it to the desired location.ÿÿÿÿÿ

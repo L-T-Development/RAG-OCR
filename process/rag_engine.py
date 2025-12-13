@@ -105,6 +105,7 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
     - If the user asks for a summary, summarize the context.
     - If the user asks about a keyword, define it and explain its relationships in the text.
     - Cite the provided sources.
+    - If the text or context is not present in the provided context, say "I don't know" and dont say anything else.
     """
     
     prompt = f"Context:\n{context_text}\nUser Query: {query_text}"
@@ -113,7 +114,8 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
         "model": LLM_MODEL,
         "prompt": prompt,
         "system": system_prompt,
-        "stream": False
+        "stream": False,
+        "temperature": 0.1,
     }
 
     try:
@@ -123,3 +125,30 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
         answer = f"Error connecting to Ollama: {str(e)}"
 
     return {"answer": answer, "sources": list(set(sources))}
+
+def delete_from_chroma(doc_id=None, thread_id=None):
+    """
+    Deletes vectors from ChromaDB based on doc_id or thread_id.
+    """
+    if not doc_id and not thread_id:
+        return 0
+
+    where_filter = {}
+    if doc_id:
+        where_filter["doc_id"] = str(doc_id)
+    
+    # If thread_id is provided, we might want to delete everything for that thread
+    # NOTE: In a recursive delete scenario, you might call this for each doc, 
+    # or you could try to delete by thread_id if your metadata supports it.
+    # Our metadata has 'thread_id', so we can use that.
+    if thread_id:
+        where_filter["thread_id"] = str(thread_id)
+
+    # Perform deletion
+    try:
+        # ChromaDB delete expects a 'where' clause matching metadata
+        collection.delete(where=where_filter)
+        return True
+    except Exception as e:
+        print(f"Error deleting from Chroma: {e}")
+        return False

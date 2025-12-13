@@ -3,7 +3,8 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.db.models import Q
 from .models import Thread, Document
-# from .rag_engine import process_pdf, query_rag  # Import our engine
+from django.views.decorators.http import require_http_methods
+from .rag_engine import process_pdf, query_rag, delete_from_chroma  # Import our engine
 import json
 
 def home(request):
@@ -115,3 +116,52 @@ def chat_thread(request, thread_id):
             return JsonResponse({'error': str(e)}, status=500)
             
     return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+# --- Delete Endpoints ---
+
+@csrf_exempt
+@require_http_methods(["DELETE"])
+def delete_thread(request, thread_id):
+    try:
+        thread = get_object_or_404(Thread, id=thread_id)
+        
+        # 1. Collect all threads to be deleted (including self and children)
+        # Helper to get all descendant IDs
+        def get_all_descendant_ids(t):
+            ids = [t.id]
+            for child in t.sub_threads.all():
+                ids.extend(get_all_descendant_ids(child))
+            return ids
+
+        all_ids = get_all_descendant_ids(thread)
+        
+        # Delete from Chroma for each thread
+        for t_id in all_ids:
+            delete_from_chroma(thread_id=t_id)
+
+        # 2. Delete from SQL (Cascade will handle children and documents)
+        thread.delete()
+        
+        return JsonResponse({'message': 'Thread and associated data deleted successfully'})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({'error': f'Delete failed: {str(e)}'}, status=500)
+
+@csrf_exempt
+@require_http_methods(["DELETE"])
+def delete_document(request, doc_id):
+    try:
+        doc = get_object_or_404(Document, id=doc_id)
+        
+        # 1. Delete from Chroma
+        delete_from_chroma(doc_id=doc.id)
+        
+        # 2. Delete from SQL
+        doc.delete()
+        
+        return JsonResponse({'message': 'Document deleted successfully'})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({'error': f'Delete failed: {str(e)}'}, status=500)
