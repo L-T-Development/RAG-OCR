@@ -19,10 +19,13 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
     """
     Reads PDF -> Chunks -> Embeds -> Stores in Vector DB
     """
+    print(f"\n[RAG] Processing PDF: {filename} (Doc ID: {doc_id})")
     doc = fitz.open(file_path)
     text_chunks = []
     metadatas = []
     ids = []
+    
+    print(f"[RAG] Total Pages: {len(doc)}")
 
     for page_num, page in enumerate(doc):
         text = page.get_text()
@@ -30,10 +33,13 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
         # You can make this more complex with LangChain splitters if needed
         chunks = [c.strip() for c in text.split('\n\n') if len(c) > 50]
         
+        print(f"[RAG] Page {page_num+1}: Found {len(chunks)} chunks")
+        
         for i, chunk in enumerate(chunks):
             chunk_id = f"{doc_id}_{page_num}_{i}"
             text_chunks.append(chunk)
             ids.append(chunk_id)
+            print(f"  -> Chunk {i}: {chunk[:50]}...")
             
             # Store hierarchy info in metadata for filtering later
             metadatas.append({
@@ -45,8 +51,12 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
             })
 
     if text_chunks:
+        print(f"[RAG] Embedding {len(text_chunks)} chunks...")
         # Batch embedding (Fastest method)
         embeddings = embed_model.encode(text_chunks).tolist()
+        print("[RAG] Embeddings generated.")
+        
+        print(f"[RAG] Adding to Vector DB (Collection: {collection.name})...")
         
         collection.add(
             documents=text_chunks,
@@ -54,6 +64,9 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
             metadatas=metadatas,
             ids=ids
         )
+        print("[RAG] Added to Vector DB successfully.")
+    else:
+        print("[RAG] No valid text chunks found to process.")
     
     return len(text_chunks)
 
@@ -75,15 +88,20 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
         }
     else:
         where_filter = {"thread_id": {"$eq": str(current_thread_id)}}
+    print(f"[RAG] Filter: {where_filter}")
 
     # --- 2. VECTOR SEARCH ---
+    print("[RAG] Generating query embedding...")
     query_vec = embed_model.encode([query_text]).tolist()
+    
+    print("[RAG] Searching Vector DB...")
     
     results = collection.query(
         query_embeddings=query_vec,
         n_results=5, # Top 5 relevant chunks
         where=where_filter
     )
+    print(f"[RAG] Found {len(results['documents'][0]) if results['documents'] else 0} relevant chunks.")
 
     # --- 3. CONTEXT ASSEMBLY ---
     context_text = ""
@@ -95,9 +113,11 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
             source_str = f"{meta['source']} (Page {meta['page']})"
             context_text += f"--- Source: {source_str} ---\n{doc}\n\n"
             sources.append(source_str)
+            print(f"  -> Context {i+1}: {doc[:100]}... (Source: {source_str})")
 
     # --- 4. LLM GENERATION ---
     if not context_text:
+        print("[RAG] No context found. Returning early.")
         return {"answer": "No relevant documents found in this thread context.", "sources": []}
 
     system_prompt = """
@@ -109,6 +129,7 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
     """
     
     prompt = f"Context:\n{context_text}\nUser Query: {query_text}"
+    print(f"[RAG] Sending to LLM (Model: {LLM_MODEL})...")
 
     payload = {
         "model": LLM_MODEL,
@@ -121,8 +142,10 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
     try:
         response = requests.post(OLLAMA_API, json=payload).json()
         answer = response.get("response", "Error: No response from LLM.")
+        print(f"[RAG] LLM Response: {answer[:100]}...")
     except Exception as e:
         answer = f"Error connecting to Ollama: {str(e)}"
+        print(f"[RAG] Error: {e}")
 
     return {"answer": answer, "sources": list(set(sources))}
 
