@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RagOcr | AI Workspace</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --primary: #0f4c81;
+            --primary-light: #e0f2fe;
+            --accent: #3b82f6;
+            --bg: #f8fafc;
+            --border: #e2e8f0;
+            --text: #334155;
+            --text-light: #64748b;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg);
+            margin: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            color: var(--text);
+        }
+
+        /* Navbar */
+        .navbar {
+            height: 60px;
+            background: white;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            font-weight: 700;
+            color: var(--primary);
+            font-size: 1.2rem;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02);
+        }
+
+        /* Main Layout */
+        .app-container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        /* --- 1. Sidebar (Threads) --- */
+        .sidebar {
+            width: 260px;
+            background: white;
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sidebar-header {
+            padding: 15px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .thread-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+        }
+
+        .thread-item {
+            padding: 10px 12px;
+            cursor: pointer;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            margin-bottom: 2px;
+            color: var(--text);
+        }
+
+        .thread-item:hover {
+            background: #f1f5f9;
+        }
+
+        .thread-item.active {
+            background: var(--primary-light);
+            color: var(--primary);
+            font-weight: 600;
+        }
+
+        .sub-thread {
+            margin-left: 15px;
+            border-left: 2px solid var(--border);
+            padding-left: 10px;
+            font-size: 0.85rem;
+        }
+
+        /* --- 2. Chat Area (Center) --- */
+        .chat-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: #fff;
+            position: relative;
+        }
+
+        .chat-header {
+            padding: 15px 20px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+            color: var(--primary);
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .messages-box {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            background: #fdfdfd;
+        }
+
+        .message {
+            max-width: 80%;
+            line-height: 1.5;
+            font-size: 0.95rem;
+        }
+
+        .message.user {
+            align-self: flex-end;
+        }
+
+        .message.ai {
+            align-self: flex-start;
+        }
+
+        .bubble {
+            padding: 12px 16px;
+            border-radius: 12px;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+        }
+
+        .user .bubble {
+            background: var(--primary);
+            color: white;
+            border-bottom-right-radius: 2px;
+        }
+
+        .ai .bubble {
+            background: white;
+            border: 1px solid var(--border);
+            color: var(--text);
+            border-bottom-left-radius: 2px;
+        }
+
+        .source-citation {
+            font-size: 0.75rem;
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid #eee;
+            color: var(--text-light);
+        }
+
+        .source-item {
+            display: inline-block;
+            background: #f1f5f9;
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin-right: 5px;
+            margin-top: 2px;
+        }
+
+        .input-area {
+            padding: 20px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 10px;
+            background: white;
+        }
+
+        .chat-input {
+            flex: 1;
+            padding: 12px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            outline: none;
+            font-family: inherit;
+        }
+
+        .chat-input:focus {
+            border-color: var(--accent);
+        }
+
+        /* --- 3. Right Panel (Files) --- */
+        .files-panel {
+            width: 300px;
+            background: #f8fafc;
+            border-left: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .files-header {
+            padding: 15px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+            color: var(--text-light);
+            font-size: 0.9rem;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .file-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .file-card {
+            background: white;
+            padding: 10px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.85rem;
+        }
+
+        .file-icon {
+            color: #ef4444;
+            font-size: 1.2rem;
+        }
+
+        .file-info {
+            flex: 1;
+            overflow: hidden;
+        }
+
+        .file-name {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            font-weight: 500;
+        }
+
+        .file-origin {
+            font-size: 0.7rem;
+            color: var(--text-light);
+        }
+
+        .inherited-tag {
+            font-size: 0.65rem;
+            background: #e0f2fe;
+            color: var(--primary);
+            padding: 1px 4px;
+            border-radius: 3px;
+            margin-left: 5px;
+        }
+
+        /* Buttons & Utility */
+        .btn {
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: none;
+            cursor: pointer;
+            font-size: 0.85rem;
+            transition: 0.2s;
+            font-weight: 500;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--accent);
+        }
+
+        .btn-icon {
+            background: transparent;
+            color: var(--text-light);
+            font-size: 1.1rem;
+            padding: 5px;
+        }
+
+        .btn-icon:hover {
+            color: var(--primary);
+        }
+
+        .hidden {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+            opacity: 0;
+        }
+
+        /* Modal */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.3);
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+        }
+
+        .modal-content {
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            width: 350px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+        }
+    </style>
+</head>
+
+<body>
+
+    <nav class="navbar">
+        <i class="fa-solid fa-brain" style="margin-right: 10px; color: var(--accent);"></i> RagOcr
+    </nav>
+
+    <div class="app-container">
+
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <span>Threads</span>
+                <button class="btn btn-primary" onclick="showCreateModal()">+ New</button>
+            </div>
+            <div class="thread-list" id="threadList">
+            </div>
+        </aside>
+
+        <main class="chat-area">
+            <div class="chat-header">
+                <span id="chatTitle">Select a Thread</span>
+                <div>
+                    <button class="btn-icon" title="Clear Chat" onclick="clearChatUI()"><i
+                            class="fa-solid fa-eraser"></i></button>
+                </div>
+            </div>
+
+            <div class="messages-box" id="messagesBox">
+                <div style="text-align: center; color: #94a3b8; margin-top: 50px;">
+                    <i class="fa-regular fa-comments" style="font-size: 2rem; margin-bottom: 10px;"></i><br>
+                    Select a thread to start chatting with your documents.
+                </div>
+            </div>
+
+            <div class="input-area">
+                <input type="text" class="chat-input" id="chatInput" placeholder="Ask about the documents..." disabled
+                    onkeypress="handleEnter(event)">
+                <button class="btn btn-primary" id="sendBtn" onclick="sendMessage()" disabled>
+                    <i class="fa-solid fa-paper-plane"></i>
+                </button>
+            </div>
+        </main>
+
+        <aside class="files-panel">
+            <div class="files-header">
+                <span>Documents</span>
+                <button class="btn-icon" title="Upload PDF" onclick="triggerUpload()" id="uploadBtnIcon" disabled>
+                    <i class="fa-solid fa-cloud-arrow-up"></i>
+                </button>
+                <input type="file" id="fileInput" class="hidden" onchange="handleFileUpload(this)">
+            </div>
+            <div class="file-list" id="fileList">
+            </div>
+        </aside>
+
+    </div>
+
+    <div class="modal" id="createModal">
+        <div class="modal-content">
+            <h3 style="margin-top:0; color:var(--primary);">New Thread</h3>
+            <input type="text" id="newThreadName" placeholder="Thread Name"
+                style="width: 100%; padding: 10px; margin: 10px 0; border: 1px solid var(--border); border-radius: 6px; box-sizing: border-box;">
+            <div style="margin-bottom: 20px;">
+                <label style="font-size: 0.85rem; color: var(--text-light); display: block; margin-bottom: 5px;">Parent
+                    Thread:</label>
+                <select id="parentSelect"
+                    style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border);">
+                    <option value="">None (Top Level)</option>
+                </select>
+            </div>
+            <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                <button class="btn"
+                    onclick="document.getElementById('createModal').style.display='none'">Cancel</button>
+                <button class="btn btn-primary" onclick="createThread()">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentThreadId = null;
+        let threadsData = [];
+
+        // --- Initialization ---
+        document.addEventListener('DOMContentLoaded', () => {
+            fetchThreads();
+        });
+
+        // --- API Interactions ---
+        async function fetchThreads() {
+            try {
+                const res = await fetch('/api/list-threads/');
+                const data = await res.json();
+                threadsData = data.threads;
+                renderThreads();
+                updateParentDropdown();
+            } catch (e) { console.error("Error fetching threads:", e); }
+        }
+
+        async function loadThreadContext(threadId, threadName) {
+            currentThreadId = threadId;
+            document.getElementById('chatTitle').innerText = threadName;
+
+            // Enable Controls
+            document.getElementById('chatInput').disabled = false;
+            document.getElementById('sendBtn').disabled = false;
+            document.getElementById('uploadBtnIcon').disabled = false;
+            document.getElementById('uploadBtnIcon').style.color = 'var(--primary)';
+
+            // UI Updates
+            document.querySelectorAll('.thread-item').forEach(el => el.classList.remove('active'));
+            const activeEl = document.getElementById(`t-${threadId}`);
+            if (activeEl) activeEl.classList.add('active');
+
+            // Load Files
+            fetchFiles(threadId);
+
+            // Reset Chat (or load history if you implemented the history model)
+            document.getElementById('messagesBox').innerHTML = `
+            <div class="message ai">
+                <div class="bubble">
+                    Hello! I'm ready to answer questions about documents in <b>${threadName}</b> and its parent threads.
+                </div>
+            </div>`;
+        }
+
+        async function fetchFiles(threadId) {
+            const res = await fetch(`/api/files/${threadId}/`);
+            const data = await res.json();
+            renderFiles(data.files, data.thread_name);
+        }
+
+        async function createThread() {
+            const name = document.getElementById('newThreadName').value;
+            const parentId = document.getElementById('parentSelect').value;
+
+            if (!name) return;
+
+            await fetch('/api/create-thread/', {
+                method: 'POST',
+                body: JSON.stringify({ name: name, parent_id: parentId || null })
+            });
+
+            document.getElementById('createModal').style.display = 'none';
+            document.getElementById('newThreadName').value = '';
+            fetchThreads();
+        }
+
+        // --- File Upload ---
+        function triggerUpload() {
+            console.log("Triggering upload click...");
+            const input = document.getElementById('fileInput');
+            if (input) {
+                input.click();
+            } else {
+                console.error("File input element not found!");
+                alert("Error: File upload input missing.");
+            }
+        }
+
+        async function handleFileUpload(input) {
+            if (!currentThreadId || !input.files[0]) return;
+
+            const file = input.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+
+            // Optimistic UI Update
+            const fileList = document.getElementById('fileList');
+            fileList.insertAdjacentHTML('afterbegin', `
+            <div class="file-card" id="uploading-temp" style="opacity: 0.5;">
+                <i class="fa-solid fa-spinner fa-spin file-icon"></i>
+                <div class="file-info"><div class="file-name">Uploading ${file.name}...</div></div>
+            </div>
+        `);
+
+            try {
+                await fetch(`/api/upload/${currentThreadId}/`, { method: 'POST', body: formData });
+                fetchFiles(currentThreadId); // Refresh list
+            } catch (e) {
+                alert("Upload failed");
+                document.getElementById('uploading-temp').remove();
+            }
+            input.value = ''; // Reset
+        }
+
+        // --- Chat Logic ---
+        async function sendMessage() {
+            const input = document.getElementById('chatInput');
+            const text = input.value.trim();
+            if (!text || !currentThreadId) return;
+
+            // 1. Add User Message
+            appendMessage('user', text);
+            input.value = '';
+
+            // 2. Show Loading
+            const loadingId = appendLoading();
+
+            try {
+                const res = await fetch(`/api/chat/${currentThreadId}/`, {
+                    method: 'POST',
+                    body: JSON.stringify({ query: text })
+                });
+                const data = await res.json();
+
+                // 3. Remove Loading & Add AI Response
+                removeMessage(loadingId);
+                appendMessage('ai', data.answer, data.sources);
+            } catch (e) {
+                removeMessage(loadingId);
+                appendMessage('ai', "Error connecting to AI service.");
+            }
+        }
+
+        // --- Render Helpers ---
+        function renderThreads() {
+            const container = document.getElementById('threadList');
+            container.innerHTML = '';
+
+            threadsData.forEach(parent => {
+                const pDiv = document.createElement('div');
+                pDiv.className = 'thread-item';
+                pDiv.id = `t-${parent.id}`;
+                pDiv.innerHTML = `
+                <div style="display:flex; justify-content:space-between; align-items:center; width:100%;">
+                    <span><i class="fa-solid fa-folder"></i> ${parent.name}</span>
+                    <i class="fa-solid fa-trash btn-icon" style="font-size:0.8rem; color:#ef4444;" onclick="deleteThread(event, '${parent.id}')" title="Delete Thread"></i>
+                </div>
+            `;
+                pDiv.onclick = (e) => {
+                    if (e.target.classList.contains('fa-trash')) return;
+                    loadThreadContext(parent.id, parent.name);
+                };
+                container.appendChild(pDiv);
+
+                parent.sub_threads.forEach(sub => {
+                    const sDiv = document.createElement('div');
+                    sDiv.className = 'thread-item sub-thread';
+                    sDiv.id = `t-${sub.id}`;
+                    sDiv.innerHTML = `
+                    <div style="display:flex; justify-content:space-between; align-items:center; width:100%;">
+                        <span><i class="fa-solid fa-turn-up" style="transform: rotate(90deg); margin-right:5px;"></i> ${sub.name}</span>
+                        <i class="fa-solid fa-trash btn-icon" style="font-size:0.8rem; color:#ef4444;" onclick="deleteThread(event, '${sub.id}')" title="Delete Thread"></i>
+                    </div>
+                `;
+                    sDiv.onclick = (e) => {
+                        if (e.target.classList.contains('fa-trash')) return;
+                        loadThreadContext(sub.id, sub.name);
+                    };
+                    container.appendChild(sDiv);
+                });
+            });
+        }
+
+        function renderFiles(files, currentName) {
+            const container = document.getElementById('fileList');
+            container.innerHTML = '';
+
+            if (files.length === 0) {
+                container.innerHTML = '<div style="color:#cbd5e1; text-align:center; margin-top:20px; font-size:0.8rem;">No files yet</div>';
+                return;
+            }
+
+            files.forEach(file => {
+                const inheritedHtml = file.is_inherited
+                    ? `<span class="inherited-tag" title="Inherited from ${file.source_thread}">From Parent</span>`
+                    : '';
+
+                const html = `
+                <div class="file-card">
+                    <i class="fa-solid fa-file-pdf file-icon"></i>
+                    <div class="file-info">
+                        <div class="file-name" title="${file.name}">${file.name} ${inheritedHtml}</div>
+                        <div class="file-origin">${file.is_inherited ? file.source_thread : 'This Thread'}</div>
+                    </div>
+                    <a href="${file.url}" target="_blank" class="btn-icon" style="font-size:0.9rem;"><i class="fa-solid fa-download"></i></a>
+                    ${!file.is_inherited ? `<i class="fa-solid fa-trash btn-icon" style="font-size:0.9rem; color:#ef4444; margin-left:5px;" onclick="deleteFile('${file.id}')" title="Delete File"></i>` : ''}
+                </div>
+            `;
+                container.innerHTML += html;
+            });
+        }
+
+        function appendMessage(role, text, sources = []) {
+            const box = document.getElementById('messagesBox');
+            let sourceHtml = '';
+
+            if (sources && sources.length > 0) {
+                sourceHtml = `<div class="source-citation">Sources: ${sources.map(s => `<span class="source-item">${s}</span>`).join('')}</div>`;
+            }
+
+            const html = `
+            <div class="message ${role}">
+                <div class="bubble">
+                    ${text.replace(/\n/g, '<br>')}
+                    ${sourceHtml}
+                </div>
+            </div>
+        `;
+            box.insertAdjacentHTML('beforeend', html);
+            box.scrollTop = box.scrollHeight;
+        }
+
+        function appendLoading() {
+            const id = 'msg-' + Date.now();
+            const box = document.getElementById('messagesBox');
+            box.insertAdjacentHTML('beforeend', `
+            <div class="message ai" id="${id}">
+                <div class="bubble" style="color:#94a3b8;">
+                    <i class="fa-solid fa-circle-notch fa-spin"></i> Thinking...
+                </div>
+            </div>
+        `);
+            box.scrollTop = box.scrollHeight;
+            return id;
+        }
+
+        function removeMessage(id) {
+            const el = document.getElementById(id);
+            if (el) el.remove();
+        }
+
+        function updateParentDropdown() {
+            const select = document.getElementById('parentSelect');
+            select.innerHTML = '<option value="">None (Top Level)</option>';
+            threadsData.forEach(p => {
+                const opt = document.createElement('option');
+                opt.value = p.id;
+                opt.innerText = p.name;
+                select.appendChild(opt);
+            });
+        }
+
+        function showCreateModal() { document.getElementById('createModal').style.display = 'flex'; }
+        function handleEnter(e) { if (e.key === 'Enter') sendMessage(); }
+        function clearChatUI() {
+            document.getElementById('messagesBox').innerHTML = `
+            <div class="message ai">
+                <div class="bubble">Chat cleared. Context reset.</div>
+            </div>`;
+        }
+
+        // --- Delete Functions ---
+        async function deleteThread(event, threadId) {
+            event.stopPropagation(); // Prevent clicking the thread item
+            if (!confirm("Are you sure you want to delete this thread? This will delete all sub-threads and documents within it!")) return;
+
+            try {
+                const res = await fetch(`/api/delete-thread/${threadId}/`, { method: 'DELETE' });
+                if (res.ok) {
+                    // If the deleted thread was active, clear the view
+                    if (currentThreadId == threadId) {
+                        currentThreadId = null;
+                        document.getElementById('chatTitle').innerText = "Select a Thread";
+                        document.getElementById('chatInput').disabled = true;
+                        document.getElementById('sendBtn').disabled = true;
+                        document.getElementById('uploadBtnIcon').disabled = true;
+                        document.getElementById('fileList').innerHTML = '';
+                        document.getElementById('messagesBox').innerHTML = `
+                        <div style="text-align: center; color: #94a3b8; margin-top: 50px;">
+                            <i class="fa-regular fa-comments" style="font-size: 2rem; margin-bottom: 10px;"></i><br>
+                            Select a thread to start chatting with your documents.
+                        </div>`;
+                    }
+                    fetchThreads(); // Refresh list
+                } else {
+                    const data = await res.json();
+                    alert("Failed to delete thread: " + (data.error || res.statusText));
+                }
+            } catch (e) { console.error(e); alert("Error deleting thread: " + e.message); }
+        }
+
+        async function deleteFile(docId) {
+            if (!confirm("Are you sure you want to delete this document?")) return;
+
+            try {
+                const res = await fetch(`/api/delete-document/${docId}/`, { method: 'DELETE' });
+                if (res.ok) {
+                    fetchFiles(currentThreadId); // Refresh list
+                } else {
+                    const data = await res.json();
+                    alert("Failed to delete document: " + (data.error || res.statusText));
+                }
+            } catch (e) { console.error(e); alert("Error deleting document: " + e.message); }
+        }
+
+    </script>
+</body>
+
+</html>
