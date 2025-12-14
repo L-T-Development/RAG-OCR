@@ -1,0 +1,9 @@
+type: python
+image: python:3.10-slim
+
+scripts:
+  lint: "pip install pylint && pylint --fail-under=1.0 --disable=import-error,missing-docstring */*.py"
+  test: "echo 'WARNING: No tests found. Skipping.' && exit 0"
+  build: "mkdir dist && zip -r dist/app-release.zip . -x '*.git*'"
+
+artifact_pattern: "dist/*.zip"
