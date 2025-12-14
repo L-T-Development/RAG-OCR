@@ -450,13 +450,8 @@
             // Load Files
             fetchFiles(threadId);
 
-            // Reset Chat (or load history if you implemented the history model)
-            document.getElementById('messagesBox').innerHTML = `
-            <div class="message ai">
-                <div class="bubble">
-                    Hello! I'm ready to answer questions about documents in <b>${threadName}</b> and its parent threads.
-                </div>
-            </div>`;
+            loadChatHistory(threadId);
+
         }
 
         async function fetchFiles(threadId) {
@@ -547,6 +542,38 @@
                 appendMessage('ai', "Error connecting to AI service.");
             }
         }
+
+
+        async function loadChatHistory(threadId) {
+    const box = document.getElementById('messagesBox');
+    box.innerHTML = '';
+
+    try {
+        const res = await fetch(`/api/chat/history/${threadId}/`);
+        const data = await res.json();
+
+        if (data.messages.length === 0) {
+            box.innerHTML = `
+                <div class="message ai">
+                    <div class="bubble">
+                        No previous messages. Start asking questions.
+                    </div>
+                </div>`;
+            return;
+        }
+
+        data.messages.forEach(msg => {
+            appendMessage(msg.role, msg.content);
+        });
+    } catch (e) {
+        box.innerHTML = `
+            <div class="message ai">
+                <div class="bubble">
+                    Failed to load chat history.
+                </div>
+            </div>`;
+    }
+}
 
         // --- Render Helpers ---
         function renderThreads() {

@@ -8,6 +8,8 @@ urlpatterns = [
     path('api/upload/<str:thread_id>/', views.upload_file, name='upload_file'),
     path('api/files/<str:thread_id>/', views.get_thread_files, name='get_thread_files'),
     
+    path("api/chat/history/<uuid:thread_id>/", views.get_chat_history),
+
     # The AI Chat Endpoint
     path('api/chat/<str:thread_id>/', views.chat_thread, name='chat_thread'),
 

@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+.env
+
+# Django / Databases
+db.sqlite3
+*.sqlite3
+
+# Vector DB (Chroma)
+local_chroma_db/
+
+# OS
+.DS_Store
+
+

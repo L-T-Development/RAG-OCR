@@ -2,7 +2,7 @@ from django.shortcuts import render, get_object_or_404
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.db.models import Q
-from .models import Thread, Document
+from .models import Thread, Document, ChatMessage
 from django.views.decorators.http import require_http_methods
 from .rag_engine import process_pdf, query_rag, delete_from_chroma  # Import our engine
 import json
@@ -97,25 +97,68 @@ def get_thread_files(request, thread_id):
     
     return JsonResponse({'files': file_list, 'thread_name': current_thread.name})
 
-# --- AI Chat / Search Endpoint (NEW) ---
+
+
+
 @csrf_exempt
 def chat_thread(request, thread_id):
     if request.method == 'POST':
         try:
             data = json.loads(request.body)
             query = data.get('query')
-            
+
+            if not query:
+                return JsonResponse({'error': 'Query is required'}, status=400)
+
             thread = get_object_or_404(Thread, id=thread_id)
             parent_id = thread.parent.id if thread.parent else None
 
-            # Execute RAG Logic
-            result = query_rag(query, current_thread_id=thread.id, parent_thread_id=parent_id)
-            
+            # Save user message
+            ChatMessage.objects.create(
+                thread=thread,
+                role='user',
+                content=query
+            )
+
+            # Run RAG
+            result = query_rag(
+                query,
+                current_thread_id=thread.id,
+                parent_thread_id=parent_id
+            )
+
+            answer = result.get('answer') or result.get('response') or ""
+
+            # Save AI message
+            ChatMessage.objects.create(
+                thread=thread,
+                role='ai',
+                content=answer
+            )
+
             return JsonResponse(result)
+
         except Exception as e:
             return JsonResponse({'error': str(e)}, status=500)
-            
+
     return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+def get_chat_history(request, thread_id):
+    messages = ChatMessage.objects.filter(
+        thread_id=thread_id
+    ).order_by("timestamp")
+
+    return JsonResponse({
+        "messages": [
+            {
+                "role": m.role,
+                "content": m.content
+            }
+            for m in messages
+        ]
+    })
+
 
 # --- Delete Endpoints ---
 
@@ -156,7 +199,9 @@ def delete_document(request, doc_id):
         
         # 1. Delete from Chroma
         delete_from_chroma(doc_id=doc.id)
-        
+         #2 delete file from disk
+        if doc.file:
+            doc.file.delete(save=False)
         # 2. Delete from SQL
         doc.delete()
         
