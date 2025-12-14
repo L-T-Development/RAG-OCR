@@ -11,16 +11,24 @@ from .eval_utils import (
     context_recall
 )
 
+import torch
+
 # --- CONFIGURATION ---
 CHROMA_PATH = "./local_chroma_db"
 EMBED_MODEL = "all-MiniLM-L6-v2"  # Fast, lightweight model
 OLLAMA_API = "http://localhost:11434/api/generate"
 LLM_MODEL = "llama3.2"  # Ensure you have this pulled in Ollama
 
+# Determine Device
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"[RAG] Using Device: {device.upper()}")
+if device == "cuda":
+    print(f"[RAG] GPU Name: {torch.cuda.get_device_name(0)}")
+
 # Initialize components once (Singleton pattern for speed)
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 collection = chroma_client.get_or_create_collection(name="rag_knowledge_base")
-embed_model = SentenceTransformer(EMBED_MODEL)
+embed_model = SentenceTransformer(EMBED_MODEL, device=device)
 print("TOTAL CHUNKS IN DB:", collection.count())
 
 
@@ -309,22 +317,6 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
                 "error": "LLM call failed"
             }
         }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 def delete_from_chroma(doc_id=None, thread_id=None):
     """

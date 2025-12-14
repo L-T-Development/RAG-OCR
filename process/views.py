@@ -65,14 +65,18 @@ def upload_file(request, thread_id):
             # We need the parent ID to tag the vector for access control
             p_id = thread.parent.id if thread.parent else None
             
-            process_pdf(
+            chunk_count = process_pdf(
                 file_path=doc.file.path, 
                 doc_id=doc.id, 
                 thread_id=thread.id,
                 parent_id=p_id,
                 filename=doc.filename
             )
-            return JsonResponse({'message': 'File uploaded and vectorized successfully', 'filename': doc.filename})
+            return JsonResponse({
+                'message': 'File uploaded and vectorized successfully', 
+                'filename': doc.filename,
+                'chunk_count': chunk_count
+            })
         except Exception as e:
             # If vectorization fails, you might want to delete the SQL doc or log the error
             return JsonResponse({'error': f'Vectorization failed: {str(e)}'}, status=500)

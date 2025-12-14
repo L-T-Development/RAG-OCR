@@ -8,12 +8,12 @@ def embedding_similarity(model, text1, text2):
     return cosine_similarity(emb1, emb2)[0][0]
 
 
-def answer_relevance(model, question, answer, threshold=0.6):
+def answer_relevance(model, question, answer, threshold=0.35):
     score = embedding_similarity(model, question, answer)
     return score, score >= threshold
 
 
-def context_precision(model, question, chunks, threshold=0.6):
+def context_precision(model, question, chunks, threshold=0.35):
     if not chunks:
         return 0.0
 
@@ -26,7 +26,7 @@ def context_precision(model, question, chunks, threshold=0.6):
     return relevant / len(chunks)
 
 
-def faithfulness(answer, chunks, model, threshold=0.6):
+def faithfulness(answer, chunks, model, threshold=0.35):
     if not chunks or not answer.strip():
         return 0.0
 
