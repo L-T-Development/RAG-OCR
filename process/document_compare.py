@@ -4,31 +4,61 @@ from docx import Document
 from openpyxl import load_workbook
 
 
-# ---------- COMMON HELPERS ----------
+# ---------------- COMMON HELPERS ----------------
 
 def normalize_lines(text: str):
     """
     Simple normalization.
-    Keeps logic intentionally weak.
+    Intentionally weak rules as suggested.
     """
     lines = text.splitlines()
     return [line.strip().lower() for line in lines if line.strip()]
 
 
 def diff_lines(old_lines, new_lines):
-    diff = difflib.ndiff(old_lines, new_lines)
+    """
+    Core deterministic diff using SequenceMatcher.
+    Correctly pairs modified (replaced) lines for clear reporting.
+    """
+    matcher = difflib.SequenceMatcher(None, old_lines, new_lines)
 
     added = []
     removed = []
     modified = []
 
-    for line in diff:
-        if line.startswith("+ "):
-            added.append(line[2:])
-        elif line.startswith("- "):
-            removed.append(line[2:])
-        elif line.startswith("? "):
-            modified.append(line[2:])
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            continue
+
+        elif tag == 'insert':
+            # Lines present in new but not old
+            added.extend(new_lines[j1:j2])
+
+        elif tag == 'delete':
+            # Lines present in old but not new
+            removed.extend(old_lines[i1:i2])
+
+        elif tag == 'replace':
+            # Modified lines
+            old_part = old_lines[i1:i2]
+            new_part = new_lines[j1:j2]
+
+            for k in range(max(len(old_part), len(new_part))):
+                old_val = old_part[k] if k < len(old_part) else None
+                new_val = new_part[k] if k < len(new_part) else None
+
+                if old_val and new_val:
+                    modified.append(
+                        f"OLD: '{old_val}' -> NEW: '{new_val}'"
+                    )
+                elif old_val:
+                    removed.append(
+                        f"REPLACED/DELETED: '{old_val}'"
+                    )
+                elif new_val:
+                    added.append(
+                        f"REPLACED/ADDED: '{new_val}'"
+                    )
 
     return {
         "added": added,
@@ -37,7 +67,7 @@ def diff_lines(old_lines, new_lines):
     }
 
 
-# ---------- PDF ----------
+# ---------------- PDF ----------------
 
 def extract_pdf(path):
     doc = fitz.open(path)
@@ -54,7 +84,7 @@ def compare_pdfs(old_pdf, new_pdf):
     )
 
 
-# ---------- DOCX ----------
+# ---------------- DOCX ----------------
 
 def extract_docx(path):
     doc = Document(path)
@@ -69,13 +99,15 @@ def compare_docx(old_docx, new_docx):
     )
 
 
-# ---------- EXCEL ----------
+# ---------------- EXCEL ----------------
 
 def compare_excels(old_xlsx, new_xlsx):
     wb_old = load_workbook(old_xlsx)
     wb_new = load_workbook(new_xlsx)
 
-    changes = []
+    added = []
+    removed = []
+    modified = []
 
     for sheet in wb_old.sheetnames:
         if sheet not in wb_new.sheetnames:
@@ -84,17 +116,30 @@ def compare_excels(old_xlsx, new_xlsx):
         ws_old = wb_old[sheet]
         ws_new = wb_new[sheet]
 
-        for row in ws_old.iter_rows():
-            for cell in row:
-                old_val = cell.value
-                new_val = ws_new[cell.coordinate].value
-                if old_val != new_val:
-                    changes.append(
-                        f"{sheet} {cell.coordinate}: {old_val} → {new_val}"
+        max_row = max(ws_old.max_row, ws_new.max_row)
+        max_col = max(ws_old.max_column, ws_new.max_column)
+
+        for r in range(1, max_row + 1):
+            for c in range(1, max_col + 1):
+                old_val = ws_old.cell(row=r, column=c).value
+                new_val = ws_new.cell(row=r, column=c).value
+
+                if old_val == new_val:
+                    continue
+
+                cell_ref = f"{sheet} ({r},{c})"
+
+                if old_val is None and new_val is not None:
+                    added.append(f"{cell_ref}: {new_val}")
+                elif old_val is not None and new_val is None:
+                    removed.append(f"{cell_ref}: {old_val}")
+                else:
+                    modified.append(
+                        f"{cell_ref}: {old_val} -> {new_val}"
                     )
 
     return {
-        "added": [],
-        "removed": [],
-        "modified": changes
+        "added": added,
+        "removed": removed,
+        "modified": modified
     }

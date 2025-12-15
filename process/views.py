@@ -6,9 +6,22 @@ from .models import Thread, Document, ChatMessage
 from django.views.decorators.http import require_http_methods
 from .rag_engine import process_pdf, query_rag, delete_from_chroma  # Import our engine
 import json
+import os
+import time
+import tempfile
+from process.document_compare import (
+    compare_pdfs,
+    compare_docx,
+    compare_excels
+)
+
+from process.llm_summary import summarize_diff
 
 def home(request):
     return render(request, 'home.html')
+def compare_page(request):
+    return render(request, "compare.html")
+
 
 # --- Thread Creation (Same as before) ---
 @csrf_exempt
@@ -107,6 +120,8 @@ def get_thread_files(request, thread_id):
 @csrf_exempt
 def chat_thread(request, thread_id):
     if request.method == 'POST':
+        start_time = time.perf_counter()
+
         try:
             data = json.loads(request.body)
             query = data.get('query')
@@ -130,6 +145,8 @@ def chat_thread(request, thread_id):
                 current_thread_id=thread.id,
                 parent_thread_id=parent_id
             )
+            processing_time = round(time.perf_counter() - start_time, 3)
+            print(f"[API] Chat processing time: {processing_time}s")
 
             answer = result.get('answer') or result.get('response') or ""
 
@@ -139,6 +156,9 @@ def chat_thread(request, thread_id):
                 role='ai',
                 content=answer
             )
+           
+            result["processing_time_seconds"] = processing_time
+
 
             return JsonResponse(result)
 
@@ -214,3 +234,66 @@ def delete_document(request, doc_id):
         import traceback
         traceback.print_exc()
         return JsonResponse({'error': f'Delete failed: {str(e)}'}, status=500)
+    
+#comparison 
+@csrf_exempt
+def compare_documents(request):
+    start_time = time.perf_counter()
+    if request.method != "POST":
+        return JsonResponse({"error": "POST method required"}, status=405)
+
+    old_file = request.FILES.get("old_file")
+    new_file = request.FILES.get("new_file")
+
+    if not old_file or not new_file:
+        return JsonResponse({"error": "Both files are required"}, status=400)
+
+    old_ext = os.path.splitext(old_file.name)[1].lower()
+    new_ext = os.path.splitext(new_file.name)[1].lower()
+
+    if old_ext != new_ext:
+        return JsonResponse({"error": "Files must be of same type"}, status=400)
+
+    old_path = None
+    new_path = None
+
+    try:
+        # Save temp files
+        with tempfile.NamedTemporaryFile(delete=False, suffix=old_ext) as f_old:
+            f_old.write(old_file.read())
+            old_path = f_old.name
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=new_ext) as f_new:
+            f_new.write(new_file.read())
+            new_path = f_new.name
+
+        # ---- Deterministic comparison ----
+        if old_ext == ".pdf":
+            diff_result = compare_pdfs(old_path, new_path)
+        elif old_ext == ".docx":
+            diff_result = compare_docx(old_path, new_path)
+        elif old_ext == ".xlsx":
+            diff_result = compare_excels(old_path, new_path)
+        else:
+            return JsonResponse({"error": "Unsupported file type"}, status=400)
+
+        # ---- Optional LLM summary ----
+        summary = summarize_diff(diff_result)
+        processing_time = round(time.perf_counter() - start_time, 3)
+
+        return JsonResponse({
+            "summary": summary,
+            "diff": diff_result,
+            "processing_time_seconds": processing_time
+        })
+
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+    finally:
+        # Cleanup temp files safely
+        if old_path and os.path.exists(old_path):
+            os.remove(old_path)
+        if new_path and os.path.exists(new_path):
+            os.remove(new_path)
+

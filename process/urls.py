@@ -1,8 +1,12 @@
 from django.urls import path
 from . import views
 
+
+
+
 urlpatterns = [
     path('', views.home, name='home'),
+    path("compare/", views.compare_page, name="compare"),
     path('api/create-thread/', views.create_thread, name='create_thread'),
     path('api/list-threads/', views.list_threads, name='list_threads'),
     path('api/upload/<str:thread_id>/', views.upload_file, name='upload_file'),
@@ -16,4 +20,6 @@ urlpatterns = [
     # Delete Endpoints
     path('api/delete-thread/<str:thread_id>/', views.delete_thread, name='delete_thread'),
     path('api/delete-document/<str:doc_id>/', views.delete_document, name='delete_document'),
+
+    path("api/compare-documents/", views.compare_documents),
 ]

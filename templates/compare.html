@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Document Comparison | RagOcr</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <!-- CSRF TOKEN FOR FETCH -->
+    <meta name="csrf-token" content="{{ csrf_token }}">
+
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        :root {
+            --primary: #0f4c81;
+            --accent: #3b82f6;
+            --bg: #f8fafc;
+            --border: #e2e8f0;
+            --text: #334155;
+            --text-light: #64748b;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg);
+            padding: 40px;
+            color: var(--text);
+        }
+
+        .container {
+            max-width: 900px;
+            margin: auto;
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+        }
+
+        h2 {
+            color: var(--primary);
+            margin-top: 0;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 15px;
+        }
+
+        .file-row {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 25px;
+        }
+
+        .file-box {
+            flex: 1;
+            padding: 20px;
+            border: 2px dashed var(--border);
+            border-radius: 8px;
+            background: #f1f5f9;
+            text-align: center;
+        }
+
+        .file-box label {
+            font-weight: 600;
+            display: block;
+        }
+
+        .file-name {
+            font-size: 0.85rem;
+            color: var(--text-light);
+            margin-top: 6px;
+        }
+
+        .btn {
+            margin-top: 10px;
+            background: var(--accent);
+            color: white;
+            padding: 8px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            display: inline-block;
+            font-size: 0.9rem;
+        }
+
+        .btn:hover {
+            background: #2563eb;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .action-btn {
+            background: var(--primary);
+            padding: 10px 18px;
+            border-radius: 6px;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        .action-btn:disabled {
+            background: #cbd5e1;
+            cursor: not-allowed;
+        }
+
+        .status {
+            margin-top: 15px;
+            font-weight: 500;
+        }
+
+        .output {
+            margin-top: 30px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px;
+            background: #fefefe;
+            white-space: pre-wrap;
+            font-size: 0.95rem;
+        }
+
+        .summary {
+            background: #eef6ff;
+            border-left: 4px solid var(--accent);
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="container">
+    <h2><i class="fa-solid fa-code-compare"></i> Document Comparison</h2>
+
+    <div class="file-row">
+        <div class="file-box">
+            <label>Old Version</label>
+            <input type="file" id="oldFile" accept=".pdf,.docx,.xlsx" onchange="setFile('old')">
+            <div class="btn" onclick="document.getElementById('oldFile').click()">Choose File</div>
+            <div class="file-name" id="oldName">No file selected</div>
+        </div>
+
+        <div class="file-box">
+            <label>New Version</label>
+            <input type="file" id="newFile" accept=".pdf,.docx,.xlsx" onchange="setFile('new')">
+            <div class="btn" onclick="document.getElementById('newFile').click()">Choose File</div>
+            <div class="file-name" id="newName">No file selected</div>
+        </div>
+    </div>
+
+    <button id="compareBtn" class="action-btn" onclick="compareDocs()" disabled>
+        Generate Comparison
+    </button>
+
+    <div class="status" id="status"></div>
+
+    <div class="output" id="output">
+        Upload two versions of the same document to generate a comparison.
+    </div>
+</div>
+
+<script>
+    let oldFile = null;
+    let newFile = null;
+
+    function getCSRFToken() {
+        return document
+            .querySelector('meta[name="csrf-token"]')
+            .getAttribute('content');
+    }
+
+    function setFile(type) {
+        const fileInput = document.getElementById(type + "File");
+        const file = fileInput.files[0];
+
+        document.getElementById(type + "Name").innerText =
+            file ? file.name : "No file selected";
+
+        if (type === "old") oldFile = file;
+        else newFile = file;
+
+        validateFiles();
+    }
+
+    function validateFiles() {
+        const btn = document.getElementById("compareBtn");
+        const status = document.getElementById("status");
+
+        if (oldFile && newFile) {
+            const ext1 = oldFile.name.split('.').pop();
+            const ext2 = newFile.name.split('.').pop();
+
+            if (ext1 === ext2) {
+                btn.disabled = false;
+                status.innerText = "";
+            } else {
+                btn.disabled = true;
+                status.innerText = "Files must be of the same type.";
+            }
+        } else {
+            btn.disabled = true;
+            status.innerText = "";
+        }
+    }
+async function compareDocs() {
+    const output = document.getElementById("output");
+    const status = document.getElementById("status");
+    const btn = document.getElementById("compareBtn");
+
+    btn.disabled = true;
+    status.innerHTML = "<i class='fa-solid fa-spinner fa-spin'></i> Processing...";
+    output.innerHTML = "";
+
+    const formData = new FormData();
+    formData.append("old_file", oldFile);
+    formData.append("new_file", newFile);
+
+    try {
+        const res = await fetch("/api/compare-documents/", {
+            method: "POST",
+            headers: {
+                "X-CSRFToken": getCSRFToken()
+            },
+            body: formData
+        });
+
+        const data = await res.json();
+
+        if (res.ok) {
+            output.innerHTML = `
+                <div class="summary">
+                    <strong>Summary:</strong><br>
+                    ${data.summary || "No summary available."}
+                </div>
+            `;
+            status.innerText = "Comparison completed successfully.";
+        } else {
+            status.innerText = data.error || "Comparison failed.";
+        }
+
+    } catch (err) {
+        status.innerText = "Network error: Could not connect to comparison service.";
+        output.innerHTML = "";
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+</script>
+
+</body>
+</html>

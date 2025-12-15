@@ -390,9 +390,27 @@
 
 <body>
 
-    <nav class="navbar">
+    <!-- <nav class="navbar">
         <i class="fa-solid fa-brain" style="margin-right: 10px; color: var(--accent);"></i> RagOcr Workspace
-    </nav>
+    </nav> -->
+
+    <nav class="navbar" style="display:flex; justify-content:space-between;">
+    
+    <!-- LEFT: App Title -->
+    <div>
+        <i class="fa-solid fa-brain" style="margin-right: 10px; color: var(--accent);"></i>
+        RagOcr Workspace
+    </div>
+
+    <!-- RIGHT: Compare Button -->
+    <a href="/compare/" style="text-decoration:none;">
+        <button class="btn btn-primary" style="font-size:0.8rem;">
+            <i class="fa-solid fa-code-compare" style="margin-right:6px;"></i>
+            Compare Documents
+        </button>
+    </a>
+
+</nav>
 
     <div class="app-container">
 
