@@ -17,7 +17,7 @@ OLLAMA_API = "http://localhost:11434/api/generate"
 LLM_MODEL = "llama3.2"
 
 # Retrieval tuning (SAFE DEFAULTS)
-CANDIDATE_K = 20
+CANDIDATE_K = 10
 SIMILARITY_THRESHOLD = 0.55
 MAX_FINAL_CHUNKS = 5
 
