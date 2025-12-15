@@ -70,11 +70,14 @@ def diff_lines(old_lines, new_lines):
 # ---------------- PDF ----------------
 
 def extract_pdf(path):
+    print(f"[PDF] Extracting text from: {path}")
     doc = fitz.open(path)
     text = ""
     for page in doc:
         text += page.get_text()
-    return normalize_lines(text)
+    lines = normalize_lines(text)
+    print(f"[PDF] Extracted {len(lines)} normalized lines")
+    return lines
 
 
 def compare_pdfs(old_pdf, new_pdf):
@@ -87,9 +90,12 @@ def compare_pdfs(old_pdf, new_pdf):
 # ---------------- DOCX ----------------
 
 def extract_docx(path):
+    print(f"[DOCX] Extracting text from: {path}")
     doc = Document(path)
     text = "\n".join(p.text for p in doc.paragraphs)
-    return normalize_lines(text)
+    lines = normalize_lines(text)
+    print(f"[DOCX] Extracted {len(lines)} normalized lines")
+    return lines
 
 
 def compare_docx(old_docx, new_docx):

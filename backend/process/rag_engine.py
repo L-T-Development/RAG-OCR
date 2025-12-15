@@ -6,6 +6,7 @@ import json
 import os
 import time
 import psutil
+import torch
 
 from .eval_utils import (
     answer_relevance,
@@ -19,7 +20,7 @@ CHROMA_PATH = "./local_chroma_db"
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EMBED_MODEL = os.path.join(BASE_DIR, "models", "all-MiniLM-L6-v2")
 OLLAMA_API = "http://localhost:11434/api/generate"
-LLM_MODEL = "llama3.2"
+LLM_MODEL = "llama3.2:1b"
 
 # Retrieval tuning (SAFE DEFAULTS)
 CANDIDATE_K = 10
@@ -32,7 +33,16 @@ os.environ["ANONYMIZED_TELEMETRY"] = "False"
 # Initialize components
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 collection = chroma_client.get_or_create_collection(name="rag_knowledge_base")
-embed_model = SentenceTransformer(EMBED_MODEL)
+
+# Initialize embedding model with CUDA support
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+embed_model = SentenceTransformer(EMBED_MODEL, device=device)
+
+if torch.cuda.is_available():
+    print(f"[RAG] CUDA Available: {torch.cuda.get_device_name(0)}")
+    print(f"[RAG] CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+print(f"[RAG] Embedding model loaded on: {device.upper()}")
 
 # print("TOTAL CHUNKS IN DB:", collection.count())
 
@@ -216,6 +226,12 @@ If the answer is not present, say "I don't know".
         "system": system_prompt,
         "stream": False,
         "temperature": 0,
+        "options": {
+            "num_gpu": 99,        # Offload all layers to GPU (99 = auto-detect max)
+            "num_thread": 8,      # CPU threads for non-GPU operations
+            "num_ctx": 4096,      # Context window size
+        },
+        "keep_alive": "5m",     # Keep model in GPU memory for 5 minutes
     }
 
     try:

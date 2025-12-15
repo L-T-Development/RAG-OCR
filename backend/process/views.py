@@ -238,20 +238,31 @@ def delete_document(request, doc_id):
 #comparison 
 @csrf_exempt
 def compare_documents(request):
+    print("\n" + "="*60)
+    print("[COMPARE] Document comparison request received")
     start_time = time.perf_counter()
+    
     if request.method != "POST":
+        print("[COMPARE] ERROR: Invalid method:", request.method)
         return JsonResponse({"error": "POST method required"}, status=405)
 
     old_file = request.FILES.get("old_file")
     new_file = request.FILES.get("new_file")
+    
+    print(f"[COMPARE] Old file: {old_file.name if old_file else 'None'}")
+    print(f"[COMPARE] New file: {new_file.name if new_file else 'None'}")
 
     if not old_file or not new_file:
+        print("[COMPARE] ERROR: Missing files")
         return JsonResponse({"error": "Both files are required"}, status=400)
 
     old_ext = os.path.splitext(old_file.name)[1].lower()
     new_ext = os.path.splitext(new_file.name)[1].lower()
+    
+    print(f"[COMPARE] File extensions: {old_ext} vs {new_ext}")
 
     if old_ext != new_ext:
+        print("[COMPARE] ERROR: Extension mismatch")
         return JsonResponse({"error": "Files must be of same type"}, status=400)
 
     old_path = None
@@ -259,15 +270,19 @@ def compare_documents(request):
 
     try:
         # Save temp files
+        print("[COMPARE] Saving temporary files...")
         with tempfile.NamedTemporaryFile(delete=False, suffix=old_ext) as f_old:
             f_old.write(old_file.read())
             old_path = f_old.name
+            print(f"[COMPARE] Old file saved to: {old_path}")
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=new_ext) as f_new:
             f_new.write(new_file.read())
             new_path = f_new.name
+            print(f"[COMPARE] New file saved to: {new_path}")
 
         # ---- Deterministic comparison ----
+        print(f"[COMPARE] Starting {old_ext} comparison...")
         if old_ext == ".pdf":
             diff_result = compare_pdfs(old_path, new_path)
         elif old_ext == ".docx":
@@ -275,11 +290,25 @@ def compare_documents(request):
         elif old_ext == ".xlsx":
             diff_result = compare_excels(old_path, new_path)
         else:
+            print(f"[COMPARE] ERROR: Unsupported file type: {old_ext}")
             return JsonResponse({"error": "Unsupported file type"}, status=400)
+        
+        print(f"[COMPARE] Diff complete - Added: {len(diff_result.get('added', []))}, "
+              f"Removed: {len(diff_result.get('removed', []))}, "
+              f"Modified: {len(diff_result.get('modified', []))}")
 
         # ---- Optional LLM summary ----
+        print("[COMPARE] Generating LLM summary...")
         summary = summarize_diff(diff_result)
+        if summary:
+            print(f"[COMPARE] Summary generated ({len(summary)} chars)")
+        else:
+            print("[COMPARE] WARNING: LLM summary failed, using raw diff")
+            summary = "LLM unavailable. Raw diff available in response."
+        
         processing_time = round(time.perf_counter() - start_time, 3)
+        print(f"[COMPARE] ✓ Comparison completed in {processing_time}s")
+        print("="*60 + "\n")
 
         return JsonResponse({
             "summary": summary,
@@ -288,12 +317,17 @@ def compare_documents(request):
         })
 
     except Exception as e:
+        print(f"[COMPARE] ERROR: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return JsonResponse({"error": str(e)}, status=500)
 
     finally:
         # Cleanup temp files safely
         if old_path and os.path.exists(old_path):
             os.remove(old_path)
+            print(f"[COMPARE] Cleaned up: {old_path}")
         if new_path and os.path.exists(new_path):
             os.remove(new_path)
+            print(f"[COMPARE] Cleaned up: {new_path}")
 
