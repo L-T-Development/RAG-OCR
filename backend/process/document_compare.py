@@ -6,64 +6,114 @@ from openpyxl import load_workbook
 
 # ---------------- COMMON HELPERS ----------------
 
-def normalize_lines(text: str):
+def extract_lines(text: str):
     """
-    Simple normalization.
-    Intentionally weak rules as suggested.
+    Extract lines preserving original content (not normalized).
+    Returns list of lines with whitespace stripped.
     """
     lines = text.splitlines()
-    return [line.strip().lower() for line in lines if line.strip()]
+    return [line.strip() for line in lines if line.strip()]
 
 
-def diff_lines(old_lines, new_lines):
+def unified_line_diff(old_lines, new_lines):
     """
-    Core deterministic diff using SequenceMatcher.
-    Correctly pairs modified (replaced) lines for clear reporting.
+    Generate unified line-by-line diff with status for each line.
+    Returns list of dicts: {line_num, status, old_text, new_text}
+    Status: 'equal', 'added', 'removed', 'modified'
     """
+    diff_result = []
+    
+    # Use difflib to get unified diff
     matcher = difflib.SequenceMatcher(None, old_lines, new_lines)
-
-    added = []
-    removed = []
-    modified = []
-
+    
+    line_num = 1
+    stats = {"added": 0, "removed": 0, "modified": 0, "equal": 0}
+    
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == 'equal':
-            continue
-
+            # Lines are the same
+            for i in range(i1, i2):
+                diff_result.append({
+                    "line": line_num,
+                    "status": "equal",
+                    "text": old_lines[i],
+                    "old_text": None,
+                    "new_text": None
+                })
+                stats["equal"] += 1
+                line_num += 1
+                
         elif tag == 'insert':
-            # Lines present in new but not old
-            added.extend(new_lines[j1:j2])
-
+            # Lines added in new file
+            for j in range(j1, j2):
+                diff_result.append({
+                    "line": line_num,
+                    "status": "added",
+                    "text": new_lines[j],
+                    "old_text": None,
+                    "new_text": new_lines[j]
+                })
+                stats["added"] += 1
+                line_num += 1
+                
         elif tag == 'delete':
-            # Lines present in old but not new
-            removed.extend(old_lines[i1:i2])
-
+            # Lines removed from old file
+            for i in range(i1, i2):
+                diff_result.append({
+                    "line": line_num,
+                    "status": "removed",
+                    "text": old_lines[i],
+                    "old_text": old_lines[i],
+                    "new_text": None
+                })
+                stats["removed"] += 1
+                line_num += 1
+                
         elif tag == 'replace':
-            # Modified lines
+            # Lines modified
             old_part = old_lines[i1:i2]
             new_part = new_lines[j1:j2]
-
-            for k in range(max(len(old_part), len(new_part))):
+            
+            max_len = max(len(old_part), len(new_part))
+            
+            for k in range(max_len):
                 old_val = old_part[k] if k < len(old_part) else None
                 new_val = new_part[k] if k < len(new_part) else None
-
+                
                 if old_val and new_val:
-                    modified.append(
-                        f"OLD: '{old_val}' -> NEW: '{new_val}'"
-                    )
-                elif old_val:
-                    removed.append(
-                        f"REPLACED/DELETED: '{old_val}'"
-                    )
+                    diff_result.append({
+                        "line": line_num,
+                        "status": "modified",
+                        "text": new_val,
+                        "old_text": old_val,
+                        "new_text": new_val
+                    })
+                    stats["modified"] += 1
                 elif new_val:
-                    added.append(
-                        f"REPLACED/ADDED: '{new_val}'"
-                    )
-
+                    diff_result.append({
+                        "line": line_num,
+                        "status": "added",
+                        "text": new_val,
+                        "old_text": None,
+                        "new_text": new_val
+                    })
+                    stats["added"] += 1
+                elif old_val:
+                    diff_result.append({
+                        "line": line_num,
+                        "status": "removed",
+                        "text": old_val,
+                        "old_text": old_val,
+                        "new_text": None
+                    })
+                    stats["removed"] += 1
+                    
+                line_num += 1
+    
     return {
-        "added": added,
-        "removed": removed,
-        "modified": modified
+        "lines": diff_result,
+        "stats": stats,
+        "total_lines": len(diff_result)
     }
 
 
@@ -75,13 +125,13 @@ def extract_pdf(path):
     text = ""
     for page in doc:
         text += page.get_text()
-    lines = normalize_lines(text)
-    print(f"[PDF] Extracted {len(lines)} normalized lines")
+    lines = extract_lines(text)
+    print(f"[PDF] Extracted {len(lines)} lines")
     return lines
 
 
 def compare_pdfs(old_pdf, new_pdf):
-    return diff_lines(
+    return unified_line_diff(
         extract_pdf(old_pdf),
         extract_pdf(new_pdf)
     )
@@ -93,13 +143,13 @@ def extract_docx(path):
     print(f"[DOCX] Extracting text from: {path}")
     doc = Document(path)
     text = "\n".join(p.text for p in doc.paragraphs)
-    lines = normalize_lines(text)
-    print(f"[DOCX] Extracted {len(lines)} normalized lines")
+    lines = extract_lines(text)
+    print(f"[DOCX] Extracted {len(lines)} lines")
     return lines
 
 
 def compare_docx(old_docx, new_docx):
-    return diff_lines(
+    return unified_line_diff(
         extract_docx(old_docx),
         extract_docx(new_docx)
     )
@@ -107,45 +157,28 @@ def compare_docx(old_docx, new_docx):
 
 # ---------------- EXCEL ----------------
 
+def extract_excel(path):
+    """Extract Excel content as lines (row by row)"""
+    print(f"[XLSX] Extracting content from: {path}")
+    wb = load_workbook(path)
+    lines = []
+    
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        lines.append(f"[Sheet: {sheet_name}]")
+        
+        for row in ws.iter_rows(values_only=True):
+            # Convert row to string, filtering None values
+            row_str = " | ".join(str(cell) if cell is not None else "" for cell in row)
+            if row_str.strip() and row_str.replace("|", "").replace(" ", ""):
+                lines.append(row_str)
+    
+    print(f"[XLSX] Extracted {len(lines)} lines")
+    return lines
+
+
 def compare_excels(old_xlsx, new_xlsx):
-    wb_old = load_workbook(old_xlsx)
-    wb_new = load_workbook(new_xlsx)
-
-    added = []
-    removed = []
-    modified = []
-
-    for sheet in wb_old.sheetnames:
-        if sheet not in wb_new.sheetnames:
-            continue
-
-        ws_old = wb_old[sheet]
-        ws_new = wb_new[sheet]
-
-        max_row = max(ws_old.max_row, ws_new.max_row)
-        max_col = max(ws_old.max_column, ws_new.max_column)
-
-        for r in range(1, max_row + 1):
-            for c in range(1, max_col + 1):
-                old_val = ws_old.cell(row=r, column=c).value
-                new_val = ws_new.cell(row=r, column=c).value
-
-                if old_val == new_val:
-                    continue
-
-                cell_ref = f"{sheet} ({r},{c})"
-
-                if old_val is None and new_val is not None:
-                    added.append(f"{cell_ref}: {new_val}")
-                elif old_val is not None and new_val is None:
-                    removed.append(f"{cell_ref}: {old_val}")
-                else:
-                    modified.append(
-                        f"{cell_ref}: {old_val} -> {new_val}"
-                    )
-
-    return {
-        "added": added,
-        "removed": removed,
-        "modified": modified
-    }
+    return unified_line_diff(
+        extract_excel(old_xlsx),
+        extract_excel(new_xlsx)
+    )

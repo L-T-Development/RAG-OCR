@@ -357,6 +357,253 @@
   font-weight: 600;
 }
 
+.output-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 1rem 1.5rem;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  color: white;
+}
+
+.output-header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.toggle-changes {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.toggle-changes input {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: #14b8a6;
+}
+
+/* Diff Stats Summary */
+.diff-stats {
+  display: flex;
+  gap: 12px;
+  padding: 1rem 1.5rem;
+  background: rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  flex-wrap: wrap;
+}
+
+.stat-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.stat-item.equal {
+  background: rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
+
+.stat-item.added {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.stat-item.modified {
+  background: rgba(234, 179, 8, 0.15);
+  color: #eab308;
+  border: 1px solid rgba(234, 179, 8, 0.3);
+}
+
+.stat-item.removed {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.stat-item.total {
+  background: rgba(99, 102, 241, 0.15);
+  color: #818cf8;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+}
+
+/* Unified Diff View */
+.diff-unified {
+  max-height: 500px;
+  overflow-y: auto;
+}
+
+.diff-unified::-webkit-scrollbar {
+  width: 8px;
+}
+
+.diff-unified::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.diff-unified::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+}
+
+/* Diff Lines */
+.diff-line {
+  display: flex;
+  align-items: stretch;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.8rem;
+  line-height: 1.6;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  transition: background 0.15s;
+}
+
+.diff-line:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+/* Line Number */
+.diff-line-number {
+  min-width: 50px;
+  padding: 8px 12px;
+  text-align: right;
+  color: rgba(255, 255, 255, 0.3);
+  background: rgba(0, 0, 0, 0.2);
+  border-right: 1px solid rgba(255, 255, 255, 0.05);
+  user-select: none;
+  font-size: 0.75rem;
+}
+
+/* Status Icon */
+.diff-line-status {
+  min-width: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+}
+
+/* Content */
+.diff-line-content {
+  flex: 1;
+  padding: 8px 16px;
+  word-break: break-word;
+}
+
+/* Status Colors */
+.diff-line.equal {
+  background: transparent;
+}
+
+.diff-line.equal .diff-line-status {
+  color: rgba(148, 163, 184, 0.5);
+}
+
+.diff-line.equal .diff-line-content {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.diff-line.added {
+  background: rgba(34, 197, 94, 0.1);
+  border-left: 3px solid #22c55e;
+}
+
+.diff-line.added .diff-line-status {
+  color: #22c55e;
+}
+
+.diff-line.added .diff-line-content {
+  color: #86efac;
+}
+
+.diff-line.removed {
+  background: rgba(239, 68, 68, 0.1);
+  border-left: 3px solid #ef4444;
+}
+
+.diff-line.removed .diff-line-status {
+  color: #ef4444;
+}
+
+.diff-line.removed .diff-line-content {
+  color: #fca5a5;
+  text-decoration: line-through;
+  text-decoration-color: rgba(252, 165, 165, 0.5);
+}
+
+.diff-line.modified {
+  background: rgba(234, 179, 8, 0.1);
+  border-left: 3px solid #eab308;
+}
+
+.diff-line.modified .diff-line-status {
+  color: #eab308;
+}
+
+.diff-line.modified .diff-line-content {
+  color: #fde047;
+}
+
+/* Modified Content */
+.modified-content {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.modified-content .old-value {
+  color: #fca5a5;
+  text-decoration: line-through;
+  background: rgba(239, 68, 68, 0.15);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.modified-content .new-value {
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.15);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.modified-content i {
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 0.7rem;
+}
+
+/* No Changes */
+.no-changes {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 3rem;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.no-changes i {
+  font-size: 2.5rem;
+  color: #22c55e;
+}
+
+.no-changes span {
+  font-size: 1rem;
+}
+
 .output-content {
   padding: 1.5rem;
   margin: 0;

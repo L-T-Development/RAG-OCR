@@ -7,13 +7,14 @@ function Compare() {
   const [oldFile, setOldFile] = useState(null);
   const [newFile, setNewFile] = useState(null);
   const [status, setStatus] = useState('');
-  const [output, setOutput] = useState('');
+  const [diffResult, setDiffResult] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [showOnlyChanges, setShowOnlyChanges] = useState(false);
 
   const validateFiles = () => {
     if (!oldFile || !newFile) return false;
-    const ext1 = oldFile.name.split('.').pop();
-    const ext2 = newFile.name.split('.').pop();
+    const ext1 = oldFile.name.split('.').pop().toLowerCase();
+    const ext2 = newFile.name.split('.').pop().toLowerCase();
     return ext1 === ext2;
   };
 
@@ -25,24 +26,37 @@ function Compare() {
 
     setIsLoading(true);
     setStatus('Processing...');
-    setOutput('');
+    setDiffResult(null);
 
     try {
       const { ok, data } = await api.compareDocuments(oldFile, newFile);
       
       if (ok) {
-        setOutput(data.summary || 'No summary available.');
+        setDiffResult(data.diff || null);
         setStatus(`Comparison completed in ${data.processing_time_seconds}s`);
       } else {
         setStatus(data.error || 'Comparison failed.');
       }
     } catch (e) {
       setStatus('Network error: Could not connect to comparison service.');
-      setOutput('');
+      setDiffResult(null);
     } finally {
       setIsLoading(false);
     }
   };
+
+  const getStatusIcon = (status) => {
+    switch(status) {
+      case 'added': return 'fa-plus';
+      case 'removed': return 'fa-minus';
+      case 'modified': return 'fa-pen';
+      default: return 'fa-equals';
+    }
+  };
+
+  const filteredLines = diffResult?.lines?.filter(line => 
+    showOnlyChanges ? line.status !== 'equal' : true
+  ) || [];
 
   return (
     <div className="compare-page">
@@ -180,13 +194,76 @@ function Compare() {
         )}
 
         {/* Output */}
-        {output && (
+        {diffResult && (
           <div className="compare-output">
             <div className="output-header">
-              <i className="fa-solid fa-rectangle-list"></i>
-              <h3>Comparison Results</h3>
+              <div className="output-header-left">
+                <i className="fa-solid fa-rectangle-list"></i>
+                <h3>Line-by-Line Comparison</h3>
+              </div>
+              <label className="toggle-changes">
+                <input 
+                  type="checkbox" 
+                  checked={showOnlyChanges} 
+                  onChange={(e) => setShowOnlyChanges(e.target.checked)}
+                />
+                <span>Show only changes</span>
+              </label>
             </div>
-            <pre className="output-content">{output}</pre>
+            
+            {/* Stats Summary */}
+            <div className="diff-stats">
+              <div className="stat-item equal">
+                <i className="fa-solid fa-equals"></i>
+                <span>{diffResult.stats?.equal || 0} Unchanged</span>
+              </div>
+              <div className="stat-item added">
+                <i className="fa-solid fa-plus"></i>
+                <span>{diffResult.stats?.added || 0} Added</span>
+              </div>
+              <div className="stat-item modified">
+                <i className="fa-solid fa-pen"></i>
+                <span>{diffResult.stats?.modified || 0} Modified</span>
+              </div>
+              <div className="stat-item removed">
+                <i className="fa-solid fa-minus"></i>
+                <span>{diffResult.stats?.removed || 0} Removed</span>
+              </div>
+              <div className="stat-item total">
+                <i className="fa-solid fa-list-ol"></i>
+                <span>{diffResult.total_lines || 0} Total Lines</span>
+              </div>
+            </div>
+
+            {/* Unified Diff View */}
+            <div className="diff-unified">
+              {filteredLines.length > 0 ? (
+                filteredLines.map((line, idx) => (
+                  <div key={idx} className={`diff-line ${line.status}`}>
+                    <span className="diff-line-number">{line.line}</span>
+                    <span className="diff-line-status">
+                      <i className={`fa-solid ${getStatusIcon(line.status)}`}></i>
+                    </span>
+                    <span className="diff-line-content">
+                      {line.status === 'modified' ? (
+                        <span className="modified-content">
+                          <span className="old-value">{line.old_text}</span>
+                          <i className="fa-solid fa-arrow-right"></i>
+                          <span className="new-value">{line.new_text}</span>
+                        </span>
+                      ) : (
+                        <span>{line.text}</span>
+                      )}
+                    </span>
+                  </div>
+                ))
+              ) : (
+                <div className="no-changes">
+                  <i className="fa-solid fa-check-circle"></i>
+                  <span>{showOnlyChanges ? 'No changes to display.' : 'No differences found between the documents.'}</span>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>

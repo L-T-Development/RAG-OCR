@@ -315,9 +315,12 @@ def compare_documents(request):
             print(f"[COMPARE] ERROR: Unsupported file type: {old_ext}")
             return JsonResponse({"error": "Unsupported file type"}, status=400)
         
-        print(f"[COMPARE] Diff complete - Added: {len(diff_result.get('added', []))}, "
-              f"Removed: {len(diff_result.get('removed', []))}, "
-              f"Modified: {len(diff_result.get('modified', []))}")
+        stats = diff_result.get('stats', {})
+        print(f"[COMPARE] Diff complete - Added: {stats.get('added', 0)}, "
+              f"Removed: {stats.get('removed', 0)}, "
+              f"Modified: {stats.get('modified', 0)}, "
+              f"Unchanged: {stats.get('equal', 0)}, "
+              f"Total lines: {diff_result.get('total_lines', 0)}")
 
         # ---- Optional LLM summary ----
         print("[COMPARE] Generating LLM summary...")
