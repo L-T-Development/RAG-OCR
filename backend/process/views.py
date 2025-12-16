@@ -4,7 +4,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.db.models import Q
 from .models import Thread, Document, ChatMessage
 from django.views.decorators.http import require_http_methods
-from .rag_engine import process_pdf, query_rag, delete_from_chroma  # Import our engine
+from .rag_engine import process_pdf, query_rag, delete_from_chroma, summarize_document, get_thread_documents_summary  # Import our engine
 import json
 import os
 import time
@@ -330,4 +330,78 @@ def compare_documents(request):
         if new_path and os.path.exists(new_path):
             os.remove(new_path)
             print(f"[COMPARE] Cleaned up: {new_path}")
+
+
+# ---------------- DOCUMENT SUMMARY ENDPOINTS ----------------
+
+@csrf_exempt
+def summarize_thread_documents(request, thread_id):
+    """Generate an AI summary of all documents in a thread"""
+    if request.method != "GET":
+        return JsonResponse({"error": "GET method required"}, status=405)
+    
+    print(f"\n[API] Summarize thread documents: {thread_id}")
+    
+    try:
+        thread = get_object_or_404(Thread, id=thread_id)
+        
+        # Get document names from DB
+        documents = Document.objects.filter(thread=thread)
+        doc_names = [doc.filename for doc in documents]
+        
+        result = summarize_document(thread_id=thread.id)
+        
+        if "error" in result:
+            return JsonResponse(result, status=500)
+        
+        # Add extra info
+        result["documents"] = doc_names
+        result["documents_count"] = len(doc_names)
+        result["total_chunks"] = result.get("chunk_count", 0)
+        
+        return JsonResponse(result)
+        
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+def summarize_single_document(request, doc_id):
+    """Generate an AI summary of a specific document"""
+    if request.method != "GET":
+        return JsonResponse({"error": "GET method required"}, status=405)
+    
+    print(f"\n[API] Summarize single document: {doc_id}")
+    
+    try:
+        doc = get_object_or_404(Document, id=doc_id)
+        result = summarize_document(doc_id=doc.id)
+        
+        if "error" in result:
+            return JsonResponse(result, status=500)
+        
+        result["filename"] = doc.filename
+        return JsonResponse(result)
+        
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+def get_thread_info(request, thread_id):
+    """Get metadata about documents in a thread (no LLM call)"""
+    if request.method != "GET":
+        return JsonResponse({"error": "GET method required"}, status=405)
+    
+    try:
+        thread = get_object_or_404(Thread, id=thread_id)
+        result = get_thread_documents_summary(thread.id)
+        
+        if "error" in result:
+            return JsonResponse(result, status=500)
+        
+        result["thread_name"] = thread.name
+        return JsonResponse(result)
+        
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
 

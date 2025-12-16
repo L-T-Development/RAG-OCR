@@ -13,6 +13,7 @@ function Home() {
   const [messages, setMessages] = useState([]);
   const [files, setFiles] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isSummarizing, setIsSummarizing] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
 
   // Fetch threads on mount
@@ -104,6 +105,35 @@ function Home() {
     }
   };
 
+  const handleSummarize = async (threadId) => {
+    if (!threadId) return;
+    
+    setIsSummarizing(true);
+    try {
+      const { ok, data } = await api.summarizeThread(threadId);
+      if (ok && data.summary) {
+        // Add summary as an AI message in the chat
+        setMessages(prev => [...prev, {
+          role: 'ai',
+          content: `📄 **Document Summary**\n\n${data.summary}\n\n_Summarized ${data.documents_count || 0} document(s) with ${data.total_chunks || 0} chunks._`,
+          sources: data.documents || []
+        }]);
+      } else {
+        setMessages(prev => [...prev, {
+          role: 'ai',
+          content: data.error || 'No documents found to summarize.'
+        }]);
+      }
+    } catch (e) {
+      setMessages(prev => [...prev, {
+        role: 'ai',
+        content: 'Error generating summary. Please try again.'
+      }]);
+    } finally {
+      setIsSummarizing(false);
+    }
+  };
+
   const handleUpload = async (file) => {
     if (!currentThreadId) return;
     
@@ -152,10 +182,13 @@ function Home() {
           onDeleteThread={handleDeleteThread}
         />
         <ChatArea
+          threadId={currentThreadId}
           threadName={currentThreadName}
           messages={messages}
           onSendMessage={handleSendMessage}
+          onSummarize={handleSummarize}
           isLoading={isLoading}
+          isSummarizing={isSummarizing}
           disabled={!currentThreadId}
         />
         <FilesPanel

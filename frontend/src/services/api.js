@@ -72,5 +72,21 @@ export const api = {
       body: formData
     });
     return { ok: res.ok, data: await res.json() };
+  },
+
+  // Document Summary
+  async summarizeThread(threadId) {
+    const res = await fetch(`${API_BASE}/summarize/thread/${threadId}/`);
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  async summarizeDocument(docId) {
+    const res = await fetch(`${API_BASE}/summarize/document/${docId}/`);
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  async getThreadInfo(threadId) {
+    const res = await fetch(`${API_BASE}/thread-info/${threadId}/`);
+    return { ok: res.ok, data: await res.json() };
   }
 };

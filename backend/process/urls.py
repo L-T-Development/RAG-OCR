@@ -24,4 +24,9 @@ urlpatterns = [
     path('api/delete-document/<str:doc_id>/', views.delete_document, name='delete_document'),
 
     path("api/compare-documents/", views.compare_documents),
+    
+    # Document Summary Endpoints
+    path('api/summarize/thread/<str:thread_id>/', views.summarize_thread_documents, name='summarize_thread'),
+    path('api/summarize/document/<str:doc_id>/', views.summarize_single_document, name='summarize_document'),
+    path('api/thread-info/<str:thread_id>/', views.get_thread_info, name='thread_info'),
 ]

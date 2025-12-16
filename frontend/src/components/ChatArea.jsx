@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import './ChatArea.css';
 
-function ChatArea({ threadName, messages, onSendMessage, isLoading, disabled }) {
+function ChatArea({ threadId, threadName, messages, onSendMessage, onSummarize, isLoading, isSummarizing, disabled }) {
   const [input, setInput] = useState('');
   const messagesEndRef = useRef(null);
 
@@ -23,10 +23,36 @@ function ChatArea({ threadName, messages, onSendMessage, isLoading, disabled }) 
     if (e.key === 'Enter') handleSend();
   };
 
+  const handleSummarize = () => {
+    if (threadId && onSummarize) {
+      onSummarize(threadId);
+    }
+  };
+
   return (
     <main className="chat-area">
       <div className="chat-header">
         <span>{threadName || 'Select a Thread'}</span>
+        {threadId && (
+          <button 
+            className="btn-summarize"
+            onClick={handleSummarize}
+            disabled={isSummarizing || disabled}
+            title="Generate AI summary of all documents in this thread"
+          >
+            {isSummarizing ? (
+              <>
+                <i className="fa-solid fa-circle-notch fa-spin"></i>
+                <span>Summarizing...</span>
+              </>
+            ) : (
+              <>
+                <i className="fa-solid fa-wand-magic-sparkles"></i>
+                <span>Summarize Docs</span>
+              </>
+            )}
+          </button>
+        )}
       </div>
 
       <div className="messages-box">

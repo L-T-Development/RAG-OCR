@@ -217,7 +217,7 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
     system_prompt = """
 You are a helpful assistant.
 Answer strictly from the provided context.
-If the answer is not present, say "I don't know".
+If the answer is not present, say "I don't know" dont halucinate.
 """
 
     payload = {
@@ -315,5 +315,163 @@ def delete_from_chroma(doc_id=None, thread_id=None):
     except Exception as e:
         print("Delete error:", e)
         return False
+
+
+# ---------------- DOCUMENT SUMMARY ----------------
+def summarize_document(doc_id=None, thread_id=None):
+    """
+    Generate a summary of document(s) in the RAG system.
+    Can summarize a specific document or all documents in a thread.
+    """
+    start_time = time.time()
+    print(f"\n[SUMMARY] Generating document summary...")
+    print(f"[SUMMARY] doc_id: {doc_id}, thread_id: {thread_id}")
+    
+    # Build filter
+    where_filter = {}
+    if doc_id:
+        where_filter["doc_id"] = str(doc_id)
+    elif thread_id:
+        where_filter["thread_id"] = str(thread_id)
+    else:
+        return {"error": "Either doc_id or thread_id is required"}
+    
+    try:
+        # Get all chunks for the document/thread
+        results = collection.get(
+            where=where_filter,
+            include=["documents", "metadatas"]
+        )
+        
+        docs = results.get("documents", [])
+        metas = results.get("metadatas", [])
+        
+        if not docs:
+            return {
+                "summary": "No documents found to summarize.",
+                "chunk_count": 0,
+                "sources": []
+            }
+        
+        print(f"[SUMMARY] Found {len(docs)} chunks to summarize")
+        
+        # Get unique sources
+        sources = list(set(f"{m['source']} (Page {m['page']})" for m in metas if m))
+        
+        # Combine text (limit to first 15 chunks for reasonable LLM context)
+        combined_text = "\n\n".join(docs[:15])
+        
+        # Generate summary via LLM
+        system_prompt = """You are a document summarization expert. 
+Generate a comprehensive yet concise summary of the document content provided.
+
+INSTRUCTIONS:
+- Identify the main topic/purpose of the document
+- List key points and important information
+- Highlight any critical data, dates, or numbers
+- Keep the summary structured and easy to read
+- Use bullet points for clarity
+- Limit to 200-300 words
+
+FORMAT YOUR RESPONSE AS:
+📄 **Document Overview:**
+[Brief 1-2 sentence overview]
+
+📌 **Key Points:**
+- Point 1
+- Point 2
+- Point 3
+
+📊 **Important Details:**
+[Any specific data, dates, or critical information]
+
+💡 **Summary:**
+[2-3 sentence concluding summary]
+"""
+
+        payload = {
+            "model": LLM_MODEL,
+            "prompt": f"Document Content:\n{combined_text}\n\nPlease provide a comprehensive summary:",
+            "system": system_prompt,
+            "stream": False,
+            "temperature": 0.3,
+            "options": {
+                "num_gpu": 99,
+                "num_thread": 8,
+                "num_ctx": 4096,
+            },
+            "keep_alive": "5m",
+        }
+        
+        llm_start = time.time()
+        response = requests.post(OLLAMA_API, json=payload, timeout=60).json()
+        llm_time = time.time() - llm_start
+        
+        summary = response.get("response", "Unable to generate summary.")
+        
+        total_time = time.time() - start_time
+        print(f"[SUMMARY] ✓ Summary generated in {total_time:.2f}s (LLM: {llm_time:.2f}s)")
+        
+        return {
+            "summary": summary,
+            "chunk_count": len(docs),
+            "sources": sources[:10],  # Limit sources shown
+            "processing_time": round(total_time, 2)
+        }
+        
+    except requests.exceptions.Timeout:
+        return {"error": "LLM timeout - document may be too large"}
+    except requests.exceptions.ConnectionError:
+        return {"error": "Cannot connect to Ollama. Make sure it's running."}
+    except Exception as e:
+        print(f"[SUMMARY] Error: {e}")
+        return {"error": str(e)}
+
+
+def get_thread_documents_summary(thread_id):
+    """
+    Get a quick overview of all documents in a thread without LLM.
+    Returns document list with metadata.
+    """
+    try:
+        results = collection.get(
+            where={"thread_id": str(thread_id)},
+            include=["metadatas"]
+        )
+        
+        metas = results.get("metadatas", [])
+        
+        # Group by document
+        docs_info = {}
+        for m in metas:
+            doc_id = m.get("doc_id", "unknown")
+            if doc_id not in docs_info:
+                docs_info[doc_id] = {
+                    "filename": m.get("source", "Unknown"),
+                    "pages": set(),
+                    "chunk_count": 0
+                }
+            docs_info[doc_id]["pages"].add(m.get("page", 0))
+            docs_info[doc_id]["chunk_count"] += 1
+        
+        # Format response
+        documents = []
+        for doc_id, info in docs_info.items():
+            documents.append({
+                "doc_id": doc_id,
+                "filename": info["filename"],
+                "total_pages": len(info["pages"]),
+                "chunk_count": info["chunk_count"]
+            })
+        
+        return {
+            "thread_id": str(thread_id),
+            "document_count": len(documents),
+            "documents": documents,
+            "total_chunks": len(metas)
+        }
+        
+    except Exception as e:
+        return {"error": str(e)}
 
 
