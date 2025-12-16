@@ -98,6 +98,144 @@
   font-weight: 500;
 }
 
+/* Confidence Badge */
+.confidence-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 6px 12px;
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.1), rgba(118, 75, 162, 0.1));
+  border-radius: 8px;
+  border-left: 3px solid #667eea;
+}
+
+.confidence-label {
+  font-weight: 600;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: white;
+}
+
+.confidence-label.high {
+  color: #10b981;
+  border: 1px solid #10b981;
+}
+
+.confidence-label.medium {
+  color: #f59e0b;
+  border: 1px solid #f59e0b;
+}
+
+.confidence-label.low {
+  color: #ef4444;
+  border: 1px solid #ef4444;
+}
+
+.confidence-label.error {
+  color: #6b7280;
+  border: 1px solid #6b7280;
+}
+
+.confidence-value {
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: #667eea;
+}
+
+/* Sources Section with Chunks */
+.source-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+  font-size: 0.85rem;
+}
+
+.source-section > strong {
+  display: block;
+  margin-bottom: 8px;
+  color: #4b5563;
+}
+
+.chunks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chunk-item {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  overflow: hidden;
+  transition: all 0.2s ease;
+}
+
+.chunk-item:hover {
+  border-color: #667eea;
+  background: #f3f4f6;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.1);
+}
+
+.chunk-header {
+  padding: 10px 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  user-select: none;
+  transition: background 0.2s;
+}
+
+.chunk-header:hover {
+  background: white;
+}
+
+.chunk-header i {
+  font-size: 0.7rem;
+  color: #667eea;
+  transition: transform 0.2s;
+  width: 12px;
+}
+
+.source-name {
+  flex: 1;
+  font-weight: 600;
+  color: #2d3748;
+}
+
+.source-page {
+  font-size: 0.75rem;
+  background: #e0e7ff;
+  color: #667eea;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-weight: 500;
+}
+
+.similarity-score {
+  font-size: 0.75rem;
+  color: #10b981;
+  font-weight: 600;
+}
+
+.chunk-content {
+  padding: 12px;
+  background: white;
+  border-top: 1px solid #e5e7eb;
+  max-height: 300px;
+  overflow-y: auto;
+  color: #374151;
+  line-height: 1.6;
+  font-size: 0.8rem;
+  word-wrap: break-word;
+  white-space: pre-wrap;
+  text-align: justify;
+}
+
 .input-area {
   padding: 20px;
   border-top: 1px solid var(--border);

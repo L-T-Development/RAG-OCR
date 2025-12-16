@@ -93,7 +93,10 @@ function Home() {
       setMessages(prev => [...prev, {
         role: 'ai',
         content: data.answer || data.response || 'No response',
-        sources: data.sources || []
+        sources: data.sources || [],
+        chunks: data.chunks || [],
+        confidence: data.confidence,
+        confidence_label: data.confidence_label
       }]);
     } catch (e) {
       setMessages(prev => [...prev, {

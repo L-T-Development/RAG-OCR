@@ -35,3 +35,9 @@ class ChatMessage(models.Model):
     role = models.CharField(max_length=10, choices=[('user', 'User'), ('ai', 'AI')])
     content = models.TextField()
     timestamp = models.DateTimeField(auto_now_add=True)
+    
+    # AI response metadata (only for AI messages)
+    sources = models.JSONField(default=list, blank=True)  # List of source strings
+    chunks = models.JSONField(default=list, blank=True)   # List of chunk objects with text, source, page, similarity
+    confidence = models.FloatField(null=True, blank=True)  # Confidence percentage 0-100
+    confidence_label = models.CharField(max_length=20, blank=True, default='')  # HIGH/MEDIUM/LOW

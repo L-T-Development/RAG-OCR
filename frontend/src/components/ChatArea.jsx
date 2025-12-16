@@ -3,6 +3,8 @@ import './ChatArea.css';
 
 function ChatArea({ threadId, threadName, messages, onSendMessage, onSummarize, isLoading, isSummarizing, disabled }) {
   const [input, setInput] = useState('');
+  const [selectedChunks, setSelectedChunks] = useState(null);
+  const [expandedSources, setExpandedSources] = useState(new Set());
   const messagesEndRef = useRef(null);
 
   const scrollToBottom = () => {
@@ -27,6 +29,16 @@ function ChatArea({ threadId, threadName, messages, onSendMessage, onSummarize, 
     if (threadId && onSummarize) {
       onSummarize(threadId);
     }
+  };
+
+  const toggleChunkExpansion = (index) => {
+    const newSet = new Set(expandedSources);
+    if (newSet.has(index)) {
+      newSet.delete(index);
+    } else {
+      newSet.add(index);
+    }
+    setExpandedSources(newSet);
   };
 
   return (
@@ -72,7 +84,46 @@ function ChatArea({ threadId, threadName, messages, onSendMessage, onSummarize, 
             <div key={idx} className={`message ${msg.role}`}>
               <div className="bubble">
                 <span dangerouslySetInnerHTML={{ __html: msg.content.replace(/\n/g, '<br>') }} />
-                {msg.sources && msg.sources.length > 0 && (
+                
+                {/* Confidence Score Badge */}
+                {msg.confidence !== undefined && msg.role === 'ai' && (
+                  <div className="confidence-badge">
+                    <span className={`confidence-label ${msg.confidence_label?.toLowerCase() || 'unknown'}`}>
+                      {msg.confidence_label || 'N/A'}
+                    </span>
+                    <span className="confidence-value">{msg.confidence}%</span>
+                  </div>
+                )}
+                
+                {/* Source Citations with Chunks */}
+                {msg.chunks && msg.chunks.length > 0 && (
+                  <div className="source-section">
+                    <strong>Sources:</strong>
+                    <div className="chunks-list">
+                      {msg.chunks.map((chunk, chunkIdx) => (
+                        <div key={chunkIdx} className="chunk-item">
+                          <div 
+                            className="chunk-header"
+                            onClick={() => toggleChunkExpansion(idx * 100 + chunkIdx)}
+                          >
+                            <i className={`fa-solid fa-chevron-${expandedSources.has(idx * 100 + chunkIdx) ? 'down' : 'right'}`}></i>
+                            <span className="source-name">{chunk.source}</span>
+                            <span className="source-page">p. {chunk.page}</span>
+                          </div>
+                          
+                          {expandedSources.has(idx * 100 + chunkIdx) && (
+                            <div className="chunk-content">
+                              {chunk.text}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Fallback for old source format */}
+                {(!msg.chunks || msg.chunks.length === 0) && msg.sources && msg.sources.length > 0 && (
                   <div className="source-citation">
                     <strong>Sources:</strong>{' '}
                     {msg.sources.map((s, i) => (

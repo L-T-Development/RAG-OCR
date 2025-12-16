@@ -149,20 +149,38 @@ def chat_thread(request, thread_id):
             print(f"[API] Chat processing time: {processing_time}s")
 
             answer = result.get('answer') or result.get('response') or ""
+            sources = result.get('sources', [])
+            chunks = result.get('chunks', [])
+            confidence = result.get('confidence', 0)
+            confidence_label = result.get('confidence_label', '')
 
-            # Save AI message
+            # Save AI message with metadata
             ChatMessage.objects.create(
                 thread=thread,
                 role='ai',
-                content=answer
+                content=answer,
+                sources=sources,
+                chunks=chunks,
+                confidence=confidence,
+                confidence_label=confidence_label
             )
            
-            result["processing_time_seconds"] = processing_time
+            # Ensure all data is JSON serializable
+            response_data = {
+                "answer": answer,
+                "sources": sources,
+                "chunks": chunks,
+                "confidence": confidence,
+                "confidence_label": confidence_label,
+                "processing_time_seconds": processing_time
+            }
 
-
-            return JsonResponse(result)
+            return JsonResponse(response_data)
 
         except Exception as e:
+            print(f"[ERROR] Chat endpoint error: {type(e).__name__}: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return JsonResponse({'error': str(e)}, status=500)
 
     return JsonResponse({'error': 'Method not allowed'}, status=405)
@@ -177,7 +195,11 @@ def get_chat_history(request, thread_id):
         "messages": [
             {
                 "role": m.role,
-                "content": m.content
+                "content": m.content,
+                "sources": m.sources if m.role == 'ai' else [],
+                "chunks": m.chunks if m.role == 'ai' else [],
+                "confidence": m.confidence if m.role == 'ai' else None,
+                "confidence_label": m.confidence_label if m.role == 'ai' else ''
             }
             for m in messages
         ]

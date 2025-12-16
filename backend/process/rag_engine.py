@@ -166,7 +166,7 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
     results = collection.query(
         query_embeddings=query_vec,
         n_results=CANDIDATE_K,
-        # wher
+        where=where_filter
     )
     search_time = time.time() - search_start
 
@@ -199,19 +199,31 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
     if len(final_chunks) < 2:
         return {
             "answer": "I don't know based on the uploaded documents.",
-            "sources": []
+            "sources": [],
+            "chunks": [],
+            "confidence": 0,
+            "confidence_label": "LOW"
         }
 
     # --- CONTEXT ASSEMBLY ---
     context_text = ""
     sources = []
     used_docs = []
+    chunks_with_metadata = []
 
     for doc, meta, sim in final_chunks:
         source_str = f"{meta['source']} (Page {meta['page']})"
         context_text += f"--- Source: {source_str} ---\n{doc}\n\n"
         sources.append(source_str)
         used_docs.append(doc)
+        
+        # Store chunk with metadata for frontend
+        chunks_with_metadata.append({
+            "text": doc,
+            "source": meta['source'],
+            "page": meta['page'],
+            "similarity_score": round(float(1 - sim), 3)  # Convert to Python float for JSON
+        })
 
     # --- LLM CALL ---
     system_prompt = """
@@ -247,6 +259,11 @@ If the answer is not present, say "I don't know" dont halucinate.
         faithfulness_score = faithfulness(answer, used_docs, embed_model)
         eval_time = time.time() - eval_start
 
+        # Convert numpy floats to Python floats for JSON serialization
+        rel_score = float(rel_score)
+        ctx_precision = float(ctx_precision)
+        faithfulness_score = float(faithfulness_score)
+
         confidence = (
             (rel_score * 0.4) +
             (faithfulness_score * 0.4) +
@@ -278,13 +295,19 @@ If the answer is not present, say "I don't know" dont halucinate.
 
         return {
             "answer": answer,
-            "sources": list(set(sources))
+            "sources": list(set(sources)),
+            "chunks": chunks_with_metadata,
+            "confidence": round(confidence, 1),
+            "confidence_label": label
         }
 
     except Exception as e:
         return {
             "answer": f"Error connecting to Ollama: {str(e)}",
-            "sources": []
+            "sources": [],
+            "chunks": [],
+            "confidence": 0,
+            "confidence_label": "ERROR"
         }
 
 
