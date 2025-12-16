@@ -27,6 +27,9 @@ CANDIDATE_K = 10
 SIMILARITY_THRESHOLD = 0.55
 MAX_FINAL_CHUNKS = 5
 
+# ChromaDB batch size limit (default is 5461)
+CHROMA_BATCH_SIZE = 5000
+
 # Disable ChromaDB telemetry (PostHog)
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
@@ -114,13 +117,36 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
     embed_time = time.time() - embed_start
     print(f"[RAG] Embedding completed in {embed_time:.2f}s")
 
+    # Batch insert to handle large documents (ChromaDB has ~5461 limit per add())
     db_start = time.time()
-    collection.add(
-        documents=text_chunks,
-        embeddings=embeddings,
-        metadatas=metadatas,
-        ids=ids
-    )
+    total_chunks = len(text_chunks)
+    
+    if total_chunks <= CHROMA_BATCH_SIZE:
+        # Single batch insert
+        collection.add(
+            documents=text_chunks,
+            embeddings=embeddings,
+            metadatas=metadatas,
+            ids=ids
+        )
+        print(f"[RAG] Inserted {total_chunks} chunks in single batch")
+    else:
+        # Multiple batch inserts
+        for i in range(0, total_chunks, CHROMA_BATCH_SIZE):
+            end_idx = min(i + CHROMA_BATCH_SIZE, total_chunks)
+            batch_docs = text_chunks[i:end_idx]
+            batch_embeds = embeddings[i:end_idx]
+            batch_metas = metadatas[i:end_idx]
+            batch_ids = ids[i:end_idx]
+            
+            collection.add(
+                documents=batch_docs,
+                embeddings=batch_embeds,
+                metadatas=batch_metas,
+                ids=batch_ids
+            )
+            print(f"[RAG] Batch {i//CHROMA_BATCH_SIZE + 1}: Inserted chunks {i+1}-{end_idx} ({len(batch_docs)} chunks)")
+    
     db_time = time.time() - db_start
     
     end_time = time.time()
