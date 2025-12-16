@@ -14,3 +14,9 @@ package-lock.json
 .DS_Store
 
 models/
+
+*.bin
+*.pickle
+pdfs/
+
+backend/local_chroma_db/
