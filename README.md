@@ -19,6 +19,40 @@ RAG-OCR is a compact, production-minded reference for a Retrieval-Augmented Gene
 
 Use a virtual environment (venv, virtualenv, or conda).
 
+
+## Local LLM (Ollama) — recommended setup
+
+This project is tested with local LLM services such as Ollama. Below are practical steps and recommended environment variables to make the integration explicit and configurable.
+
+1) Install Ollama
+
+Download and install from the official site:
+
+https://ollama.com/download
+
+After installation verify it is available on your PATH:
+
+```bash
+ollama --version
+```
+
+2) Pull a model (one-time)
+
+Example:
+
+```bash
+ollama pull llama3.2:1b
+```
+
+3) Run/test the model
+
+Quick smoke test:
+
+```bash
+ollama run llama3.2:1b
+```
+
+
 ## Quick Start (Development)
 
 Clone and install:
@@ -138,4 +172,5 @@ File references:
 - `backend/` — backend code
 - `frontend/` — frontend code
 - `requirements.txt` — Python dependencies
+
 
