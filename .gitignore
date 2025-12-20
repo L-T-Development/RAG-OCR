@@ -13,10 +13,8 @@ package-lock.json
 # OS
 .DS_Store
 
-models/
 
 *.bin
 *.pickle
 pdfs/
 
-backend/local_chroma_db/
