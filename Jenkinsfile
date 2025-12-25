@@ -58,15 +58,15 @@ pipeline {
                     if (gitleaksExit != 0) error "SECURITY BREACH: Secrets detected!"
                 }
 
-                // D. Vulnerability Scan (Trivy)
-//                 script {
-//                     echo "--- [SECURITY] Starting Vulnerability Scan ---"
-//                     def trivyExit = sh(
-//     script: "docker run --rm -v ${WORKSPACE}:/code aquasec/trivy:latest fs --timeout 15m --severity HIGH,CRITICAL --exit-code 1 /code",
-//     returnStatus: true
-// )
-//                     if (trivyExit != 0) error "SECURITY BREACH: Critical vulnerabilities found!"
-//                 }
+                D. Vulnerability Scan (Trivy)
+                script {
+                    echo "--- [SECURITY] Starting Vulnerability Scan ---"
+                    def trivyExit = sh(
+    script: "docker run --rm -v ${WORKSPACE}:/code aquasec/trivy:latest fs --timeout 15m --severity HIGH,CRITICAL --exit-code 1 /code",
+    returnStatus: true
+)
+                    if (trivyExit != 0) error "SECURITY BREACH: Critical vulnerabilities found!"
+                }
             }
         }
 
