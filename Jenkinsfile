@@ -58,7 +58,7 @@ pipeline {
                     if (gitleaksExit != 0) error "SECURITY BREACH: Secrets detected!"
                 }
 
-                D. Vulnerability Scan (Trivy)
+                // D. Vulnerability Scan (Trivy)
                 script {
                     echo "--- [SECURITY] Starting Vulnerability Scan ---"
                     def trivyExit = sh(
