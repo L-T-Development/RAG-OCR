@@ -6,7 +6,6 @@ import json
 import os
 import time
 import psutil
-import torch
 import threading
 
 from .eval_utils import (
@@ -57,7 +56,7 @@ class EmbeddingModelManager:
             return
         self._model = None
         self._model_path = None
-        self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._device = "cpu"
         self._status = {
             "loaded": False,
             "path": None,
@@ -65,10 +64,6 @@ class EmbeddingModelManager:
             "device": self._device
         }
         self._initialized = True
-        
-        if torch.cuda.is_available():
-            print(f"[RAG] CUDA Available: {torch.cuda.get_device_name(0)}")
-            print(f"[RAG] CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
     
     def _get_model_path_from_db(self):
         """Get model path from database configuration"""
@@ -139,8 +134,6 @@ class EmbeddingModelManager:
                 if self._model is not None:
                     del self._model
                     self._model = None
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
                 
                 self._model = SentenceTransformer(model_path, device=self._device)
                 self._model_path = model_path
@@ -515,11 +508,10 @@ INSTRUCTIONS:
         "stream": False,
         "temperature": 0,
         "options": {
-            "num_gpu": 99,        # Offload all layers to GPU (99 = auto-detect max)
-            "num_thread": 8,      # CPU threads for non-GPU operations
-            "num_ctx": 4096,      # Context window size
+            "num_thread": 8,
+            "num_ctx": 4096,
         },
-        "keep_alive": "5m",     # Keep model in GPU memory for 5 minutes
+        "keep_alive": "5m",
     }
 
     try:
@@ -696,7 +688,6 @@ FORMAT YOUR RESPONSE AS:
             "stream": False,
             "temperature": 0.3,
             "options": {
-                "num_gpu": 99,
                 "num_thread": 8,
                 "num_ctx": 4096,
             },

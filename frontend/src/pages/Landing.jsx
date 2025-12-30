@@ -48,8 +48,8 @@ function Landing() {
     },
     {
       icon: 'fa-solid fa-bolt',
-      title: 'GPU Accelerated',
-      description: 'CUDA-powered embeddings for lightning-fast processing',
+      title: 'Fast Processing',
+      description: 'Optimized embeddings for lightning-fast document indexing',
       color: '#f59e0b'
     }
   ];
@@ -57,7 +57,7 @@ function Landing() {
   const stats = [
     { value: '10x', label: 'Faster Search' },
     { value: '99%', label: 'Accuracy' },
-    { value: 'GPU', label: 'Accelerated' },
+    { value: 'Fast', label: 'Processing' },
     { value: '∞', label: 'Documents' }
   ];
 
@@ -118,7 +118,7 @@ function Landing() {
         <p className="hero-subtitle">
           Transform your documents into a searchable knowledge base. 
           Ask questions, compare versions, and extract insights with 
-          <span className="highlight"> GPU-accelerated AI</span>.
+          <span className="highlight"> AI-powered analysis</span>.
         </p>
 
         <div className="hero-actions">
@@ -198,7 +198,7 @@ function Landing() {
             <div className="step-number">02</div>
             <div className="step-content">
               <h3>AI Processing</h3>
-              <p>GPU-accelerated embeddings index your content instantly</p>
+              <p>Smart embeddings index your content instantly</p>
             </div>
             <div className="step-icon">
               <i className="fa-solid fa-microchip"></i>
@@ -252,7 +252,7 @@ function Landing() {
             <span className="tech-badge"><i className="fa-brands fa-python"></i> Python</span>
             <span className="tech-badge"><i className="fa-brands fa-react"></i> React</span>
             <span className="tech-badge"><i className="fa-solid fa-database"></i> ChromaDB</span>
-            <span className="tech-badge"><i className="fa-solid fa-bolt"></i> CUDA</span>
+            <span className="tech-badge"><i className="fa-solid fa-brain"></i> Ollama</span>
           </div>
         </div>
       </footer>
