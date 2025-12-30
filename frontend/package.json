@@ -2,6 +2,7 @@
   "name": "ragocr-frontend",
   "private": true,
   "version": "1.0.0",
+  "description": "RAG-OCR Frontend Application",
   "type": "module",
   "scripts": {
     "dev": "vite",

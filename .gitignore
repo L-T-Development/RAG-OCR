@@ -8,13 +8,20 @@ __pycache__/
 venv/
 .env
 
+# Node
 node_modules/
 package-lock.json
+
 # OS
 .DS_Store
 
-
+# Application specific
 *.bin
 *.pickle
 pdfs/
+
+# Local data (don't commit large files)
+backend/local_chroma_db/
+backend/local_chroma_db/*
+
 

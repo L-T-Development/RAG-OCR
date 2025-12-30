@@ -96,3 +96,23 @@
   background: linear-gradient(135deg, #818cf8, #a78bfa);
   box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
 }
+
+.nav-action-btn.nav-settings {
+  position: relative;
+}
+
+.model-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  border: 1px solid rgba(0, 0, 0, 0.3);
+  animation: statusPulse 2s infinite;
+}
+
+@keyframes statusPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}

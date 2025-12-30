@@ -7,6 +7,7 @@ import os
 import time
 import psutil
 import torch
+import threading
 
 from .eval_utils import (
     answer_relevance,
@@ -16,9 +17,6 @@ from .eval_utils import (
 
 # --- CONFIGURATION ---
 CHROMA_PATH = "./local_chroma_db"
-# Use local offline model path instead of downloading from HuggingFace
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EMBED_MODEL = os.path.join(BASE_DIR, "models", "all-MiniLM-L6-v2")
 OLLAMA_API = "http://localhost:11434/api/generate"
 LLM_MODEL = "llama3.2:1b"
 
@@ -33,21 +31,252 @@ CHROMA_BATCH_SIZE = 5000
 # Disable ChromaDB telemetry (PostHog)
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
-# Initialize components
+# Initialize ChromaDB (always available)
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 collection = chroma_client.get_or_create_collection(name="rag_knowledge_base")
 
-# Initialize embedding model with CUDA support
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-embed_model = SentenceTransformer(EMBED_MODEL, device=device)
+class EmbeddingModelManager:
+    """
+    Singleton manager for embedding model with lazy loading and configurable path.
+    Model is only loaded when needed and can be reloaded with a different path.
+    """
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self):
+        if self._initialized:
+            return
+        self._model = None
+        self._model_path = None
+        self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._status = {
+            "loaded": False,
+            "path": None,
+            "error": None,
+            "device": self._device
+        }
+        self._initialized = True
+        
+        if torch.cuda.is_available():
+            print(f"[RAG] CUDA Available: {torch.cuda.get_device_name(0)}")
+            print(f"[RAG] CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+    
+    def _get_model_path_from_db(self):
+        """Get model path from database configuration"""
+        try:
+            from .models import AppConfig
+            return AppConfig.get_value('embedding_model_path', None)
+        except Exception as e:
+            print(f"[RAG] Could not read model path from DB: {e}")
+            return None
+    
+    def _get_default_model_path(self):
+        """Get default model path (legacy support)"""
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(base_dir, "models", "all-MiniLM-L6-v2")
+    
+    def load_model(self, model_path=None, force_reload=False):
+        """
+        Load the embedding model from specified path.
+        
+        Args:
+            model_path: Path to the model directory. If None, tries DB config then default.
+            force_reload: If True, reloads even if already loaded.
+        
+        Returns:
+            bool: True if model loaded successfully
+        """
+        with self._lock:
+            # Determine which path to use
+            if model_path is None:
+                model_path = self._get_model_path_from_db()
+            
+            if model_path is None:
+                model_path = self._get_default_model_path()
+            
+            # Check if we need to reload
+            if self._model is not None and self._model_path == model_path and not force_reload:
+                return True
+            
+            # Validate path exists
+            if not os.path.exists(model_path):
+                self._status = {
+                    "loaded": False,
+                    "path": model_path,
+                    "error": f"Model path does not exist: {model_path}",
+                    "device": self._device
+                }
+                print(f"[RAG] ERROR: Model path does not exist: {model_path}")
+                return False
+            
+            # Check for required model files
+            required_files = ["config.json"]
+            missing_files = [f for f in required_files if not os.path.exists(os.path.join(model_path, f))]
+            if missing_files:
+                self._status = {
+                    "loaded": False,
+                    "path": model_path,
+                    "error": f"Invalid model directory. Missing files: {missing_files}",
+                    "device": self._device
+                }
+                print(f"[RAG] ERROR: Invalid model directory. Missing: {missing_files}")
+                return False
+            
+            try:
+                print(f"[RAG] Loading embedding model from: {model_path}")
+                start_time = time.time()
+                
+                # Unload previous model to free memory
+                if self._model is not None:
+                    del self._model
+                    self._model = None
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                
+                self._model = SentenceTransformer(model_path, device=self._device)
+                self._model_path = model_path
+                
+                load_time = time.time() - start_time
+                self._status = {
+                    "loaded": True,
+                    "path": model_path,
+                    "error": None,
+                    "device": self._device,
+                    "load_time": round(load_time, 2)
+                }
+                
+                print(f"[RAG] ✓ Embedding model loaded on {self._device.upper()} in {load_time:.2f}s")
+                return True
+                
+            except Exception as e:
+                self._status = {
+                    "loaded": False,
+                    "path": model_path,
+                    "error": str(e),
+                    "device": self._device
+                }
+                print(f"[RAG] ERROR loading model: {e}")
+                return False
+    
+    def get_model(self):
+        """
+        Get the embedding model, loading it if necessary.
+        
+        Returns:
+            SentenceTransformer or None if not available
+        """
+        if self._model is None:
+            self.load_model()
+        return self._model
+    
+    def get_status(self):
+        """Get current model status"""
+        return self._status.copy()
+    
+    def is_ready(self):
+        """Check if model is loaded and ready"""
+        return self._model is not None
+    
+    def encode(self, texts):
+        """
+        Encode texts to embeddings.
+        
+        Args:
+            texts: List of strings to encode
+            
+        Returns:
+            List of embeddings
+            
+        Raises:
+            RuntimeError if model not loaded
+        """
+        model = self.get_model()
+        if model is None:
+            raise RuntimeError("Embedding model not loaded. Please configure model path in Settings.")
+        return model.encode(texts)
 
-if torch.cuda.is_available():
-    print(f"[RAG] CUDA Available: {torch.cuda.get_device_name(0)}")
-    print(f"[RAG] CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
-print(f"[RAG] Embedding model loaded on: {device.upper()}")
 
-# print("TOTAL CHUNKS IN DB:", collection.count())
+# Global singleton instance
+model_manager = EmbeddingModelManager()
+
+
+def get_model_status():
+    """Get the current embedding model status"""
+    return model_manager.get_status()
+
+
+def configure_model_path(path):
+    """
+    Configure and load the embedding model from a new path.
+    
+    Args:
+        path: Path to the model directory
+        
+    Returns:
+        dict with status information
+    """
+    # Save to database
+    try:
+        from .models import AppConfig
+        AppConfig.set_value('embedding_model_path', path)
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to save configuration: {e}"
+        }
+    
+    # Load the model
+    success = model_manager.load_model(path, force_reload=True)
+    status = model_manager.get_status()
+    
+    return {
+        "success": success,
+        "status": status
+    }
+
+
+def validate_model_path(path):
+    """
+    Validate if a path contains a valid embedding model.
+    
+    Args:
+        path: Path to validate
+        
+    Returns:
+        dict with validation result
+    """
+    if not path:
+        return {"valid": False, "error": "Path is empty"}
+    
+    if not os.path.exists(path):
+        return {"valid": False, "error": "Path does not exist"}
+    
+    if not os.path.isdir(path):
+        return {"valid": False, "error": "Path is not a directory"}
+    
+    # Check for required model files
+    required_files = ["config.json"]
+    optional_files = ["model.safetensors", "pytorch_model.bin", "tf_model.h5"]
+    
+    missing_required = [f for f in required_files if not os.path.exists(os.path.join(path, f))]
+    if missing_required:
+        return {"valid": False, "error": f"Missing required files: {missing_required}"}
+    
+    # Check if at least one model file exists
+    has_model_file = any(os.path.exists(os.path.join(path, f)) for f in optional_files)
+    if not has_model_file:
+        return {"valid": False, "error": "No model weights file found (safetensors, bin, or h5)"}
+    
+    return {"valid": True, "error": None}
 
 
 # ---------------- SMART CHUNKING ----------------
@@ -74,6 +303,13 @@ def smart_chunk_text(text, max_words=200, overlap=40):
 
 # ---------------- PDF INGESTION ----------------
 def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
+    # Ensure model is loaded
+    if not model_manager.is_ready():
+        model_manager.load_model()
+    
+    if not model_manager.is_ready():
+        raise RuntimeError("Embedding model not configured. Please set model path in Settings.")
+    
     start_time = time.time()
     process = psutil.Process()
     start_memory = process.memory_info().rss / 1024 / 1024  # MB
@@ -113,7 +349,7 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
 
     print(f"[RAG] Embedding {len(text_chunks)} chunks...")
     embed_start = time.time()
-    embeddings = embed_model.encode(text_chunks).tolist()
+    embeddings = model_manager.encode(text_chunks).tolist()
     embed_time = time.time() - embed_start
     print(f"[RAG] Embedding completed in {embed_time:.2f}s")
 
@@ -157,11 +393,23 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
     print(f"[RESOURCE] Total Time: {end_time - start_time:.2f}s | Embedding: {embed_time:.2f}s | DB Insert: {db_time:.2f}s")
     print(f"[RESOURCE] Memory: {start_memory:.1f}MB → {end_memory:.1f}MB (Δ{end_memory - start_memory:+.1f}MB) | CPU: {end_cpu:.1f}%")
     return len(text_chunks)
-print("AFTER INSERT, TOTAL CHUNKS:", collection.count())
 
 
 # ---------------- QUERY RAG ----------------
 def query_rag(query_text, current_thread_id, parent_thread_id=None):
+    # Ensure model is loaded
+    if not model_manager.is_ready():
+        model_manager.load_model()
+    
+    if not model_manager.is_ready():
+        return {
+            "answer": "Embedding model not configured. Please set model path in Settings.",
+            "sources": [],
+            "chunks": [],
+            "confidence": 0,
+            "confidence_label": "ERROR"
+        }
+    
     start_time = time.time()
     process = psutil.Process()
     start_memory = process.memory_info().rss / 1024 / 1024  # MB
@@ -185,7 +433,7 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
 
     # --- VECTOR SEARCH ---
     embed_start = time.time()
-    query_vec = embed_model.encode([query_text]).tolist()
+    query_vec = model_manager.encode([query_text]).tolist()
     embed_time = time.time() - embed_start
     
     search_start = time.time()
@@ -213,13 +461,10 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
         if dist <= MAX_DISTANCE_THRESHOLD:
             filtered_chunks.append((doc, meta, dist))
 
-# sort by best match (lowest distance first)
+    # sort by best match (lowest distance first)
     filtered_chunks.sort(key=lambda x: x[2])
     final_chunks = filtered_chunks[:MAX_FINAL_CHUNKS]
     print(f"[RAG] Final chunks after filtering: {len(final_chunks)}")
-
-
-    
 
     # --- GUARDRAIL ---
     if len(final_chunks) < 2:
@@ -252,10 +497,15 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
         })
 
     # --- LLM CALL ---
-    system_prompt = """
-You are a helpful assistant.
-Answer strictly from the provided context.
-If the answer is not present, say "I don't know" dont halucinate.
+    system_prompt = """You are a precise and helpful document assistant.
+
+INSTRUCTIONS:
+- Answer questions ONLY using the provided context
+- Be concise but thorough in your responses
+- If the answer is not found in the context, say "I don't know based on the provided documents"
+- Never make up information or hallucinate facts
+- Quote relevant parts when appropriate
+- Structure longer answers with bullet points for clarity
 """
 
     payload = {
@@ -279,6 +529,7 @@ If the answer is not present, say "I don't know" dont halucinate.
         answer = response.get("response", "Error: No response from LLM.")
 
         # --- EVALUATION ---
+        embed_model = model_manager.get_model()
         eval_start = time.time()
         rel_score, _ = answer_relevance(embed_model, query_text, answer)
         ctx_precision = context_precision(embed_model, query_text, used_docs)

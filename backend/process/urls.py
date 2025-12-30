@@ -29,4 +29,10 @@ urlpatterns = [
     path('api/summarize/thread/<str:thread_id>/', views.summarize_thread_documents, name='summarize_thread'),
     path('api/summarize/document/<str:doc_id>/', views.summarize_single_document, name='summarize_document'),
     path('api/thread-info/<str:thread_id>/', views.get_thread_info, name='thread_info'),
+    
+    # Model Configuration Endpoints
+    path('api/model/status/', views.model_status, name='model_status'),
+    path('api/model/configure/', views.model_configure, name='model_configure'),
+    path('api/model/validate/', views.model_validate, name='model_validate'),
+    path('api/config/', views.get_app_config, name='app_config'),
 ]

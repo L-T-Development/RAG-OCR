@@ -2,9 +2,13 @@ from django.shortcuts import render, get_object_or_404
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.db.models import Q
-from .models import Thread, Document, ChatMessage
+from .models import Thread, Document, ChatMessage, AppConfig
 from django.views.decorators.http import require_http_methods
-from .rag_engine import process_pdf, query_rag, delete_from_chroma, summarize_document, get_thread_documents_summary  # Import our engine
+from .rag_engine import (
+    process_pdf, query_rag, delete_from_chroma, summarize_document, 
+    get_thread_documents_summary, get_model_status, configure_model_path, 
+    validate_model_path
+)
 import json
 import os
 import time
@@ -430,3 +434,95 @@ def get_thread_info(request, thread_id):
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
 
+
+# ==================== MODEL CONFIGURATION ENDPOINTS ====================
+
+@csrf_exempt
+def model_status(request):
+    """Get current embedding model status"""
+    if request.method != "GET":
+        return JsonResponse({"error": "GET method required"}, status=405)
+    
+    try:
+        status = get_model_status()
+        # Also get saved path from DB
+        saved_path = AppConfig.get_value('embedding_model_path', None)
+        status['saved_path'] = saved_path
+        return JsonResponse(status)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+def model_configure(request):
+    """Configure the embedding model path"""
+    if request.method != "POST":
+        return JsonResponse({"error": "POST method required"}, status=405)
+    
+    try:
+        data = json.loads(request.body)
+        path = data.get('path', '').strip()
+        
+        if not path:
+            return JsonResponse({"error": "Model path is required"}, status=400)
+        
+        # Normalize path (handle both forward and back slashes)
+        path = os.path.normpath(path)
+        
+        # Configure and load the model
+        result = configure_model_path(path)
+        
+        if result.get('success'):
+            return JsonResponse({
+                "message": "Model configured successfully",
+                "status": result.get('status', {})
+            })
+        else:
+            return JsonResponse({
+                "error": result.get('error', 'Unknown error'),
+                "status": result.get('status', {})
+            }, status=400)
+            
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt  
+def model_validate(request):
+    """Validate a model path without loading it"""
+    if request.method != "POST":
+        return JsonResponse({"error": "POST method required"}, status=405)
+    
+    try:
+        data = json.loads(request.body)
+        path = data.get('path', '').strip()
+        
+        if not path:
+            return JsonResponse({"valid": False, "error": "Path is required"})
+        
+        # Normalize path
+        path = os.path.normpath(path)
+        
+        result = validate_model_path(path)
+        return JsonResponse(result)
+        
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+def get_app_config(request):
+    """Get all app configuration values"""
+    if request.method != "GET":
+        return JsonResponse({"error": "GET method required"}, status=405)
+    
+    try:
+        configs = AppConfig.objects.all()
+        config_dict = {c.key: c.value for c in configs}
+        return JsonResponse({"config": config_dict})
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)

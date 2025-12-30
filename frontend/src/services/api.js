@@ -1,3 +1,4 @@
+// API base URL - proxied through Vite in development
 const API_BASE = '/api';
 
 export const api = {
@@ -87,6 +88,35 @@ export const api = {
 
   async getThreadInfo(threadId) {
     const res = await fetch(`${API_BASE}/thread-info/${threadId}/`);
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  // Model Configuration
+  async getModelStatus() {
+    const res = await fetch(`${API_BASE}/model/status/`);
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  async configureModel(path) {
+    const res = await fetch(`${API_BASE}/model/configure/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path })
+    });
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  async validateModelPath(path) {
+    const res = await fetch(`${API_BASE}/model/validate/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path })
+    });
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  async getAppConfig() {
+    const res = await fetch(`${API_BASE}/config/`);
     return { ok: res.ok, data: await res.json() };
   }
 };

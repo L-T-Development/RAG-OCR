@@ -16,6 +16,38 @@ class Thread(models.Model):
     def __str__(self):
         return self.name
 
+
+class AppConfig(models.Model):
+    """Singleton model for application configuration including model paths"""
+    key = models.CharField(max_length=100, unique=True, primary_key=True)
+    value = models.TextField()
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Application Configuration"
+        verbose_name_plural = "Application Configurations"
+
+    def __str__(self):
+        return f"{self.key}: {self.value[:50]}"
+
+    @classmethod
+    def get_value(cls, key, default=None):
+        """Get a config value by key"""
+        try:
+            return cls.objects.get(key=key).value
+        except cls.DoesNotExist:
+            return default
+
+    @classmethod
+    def set_value(cls, key, value):
+        """Set a config value by key"""
+        obj, created = cls.objects.update_or_create(
+            key=key,
+            defaults={'value': value}
+        )
+        return obj
+
+
 class Document(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     thread = models.ForeignKey(Thread, on_delete=models.CASCADE, related_name='documents')

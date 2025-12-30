@@ -3,8 +3,9 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
+  base: '/',
   server: {
-    port: 3000,
+    port: 5173, // Updated to standard Vite port
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8000',
@@ -15,5 +16,9 @@ export default defineConfig({
         changeOrigin: true,
       }
     }
+  },
+  build: {
+    outDir: 'dist',
+    emptyOutDir: true,
   }
 })
