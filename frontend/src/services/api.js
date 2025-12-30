@@ -75,6 +75,11 @@ export const api = {
     return { ok: res.ok, data: await res.json() };
   },
 
+  async getComparisonStatus(jobId) {
+    const res = await fetch(`${API_BASE}/compare/status/${jobId}/`);
+    return { ok: res.ok, data: await res.json() };
+  },
+
   // Document Summary
   async summarizeThread(threadId) {
     const res = await fetch(`${API_BASE}/summarize/thread/${threadId}/`);

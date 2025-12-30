@@ -7,6 +7,7 @@ import os
 import time
 import psutil
 import threading
+import re
 
 # Optional CUDA support
 try:
@@ -403,6 +404,20 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
     return len(text_chunks)
 
 
+def extract_file_filter(query_text):
+    """
+    Extract @filename from query if present.
+    Returns (clean_query, filename or None)
+    """
+    match = re.search(r'@([^@]+?\.pdf)', query_text, re.IGNORECASE)
+
+    if not match:
+        return query_text, None
+
+    filename = match.group(1).strip()
+    cleaned_query = query_text.replace(f"@{filename}", "").strip()
+    return cleaned_query, filename
+
 # ---------------- QUERY RAG ----------------
 def query_rag(query_text, current_thread_id, parent_thread_id=None):
     # Ensure model is loaded
@@ -426,17 +441,32 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
     print(">>> current_thread_id:", current_thread_id)
     print(">>> parent_thread_id:", parent_thread_id)
 
+    # --- FILE SCOPE FILTER (@filename) ---
+    query_text, file_filter = extract_file_filter(query_text)
+    conditions = []
+
+    if file_filter:
+        print(f"[RAG] File scoped query detected: {file_filter}")
+
     # --- ACCESS CONTROL ---
     if parent_thread_id:
-        where_filter = {
+        base_filter = {
             "$or": [
                 {"thread_id": {"$eq": str(current_thread_id)}},
                 {"thread_id": {"$eq": str(parent_thread_id)}}
             ]
         }
     else:
-        where_filter = {"thread_id": {"$eq": str(current_thread_id)}}
-
+        base_filter = {"thread_id": {"$eq": str(current_thread_id)}}
+    if file_filter:
+        where_filter = {
+        "$and": [
+            base_filter,
+            {"source": {"$eq": file_filter}}
+        ]
+    }
+    else:
+        where_filter = base_filter
     print("[RAG] Filter:", where_filter)
 
     # --- VECTOR SEARCH ---
@@ -460,22 +490,42 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
     print(f"[RAG] Query embedding time: {embed_time:.3f}s")
     print("Distances:", dists)
 
-    # --- DISTANCE-BASED FILTERING (Chroma-safe) ---
-    MAX_DISTANCE_THRESHOLD = 1.0  # lower = more similar
+  
+    # MAX_DISTANCE_THRESHOLD = 2.0 if file_filter else 1.0
 
-    filtered_chunks = []
 
-    for doc, meta, dist in zip(docs, metas, dists):
-        if dist <= MAX_DISTANCE_THRESHOLD:
-            filtered_chunks.append((doc, meta, dist))
+    # filtered_chunks = []
+
+    # for doc, meta, dist in zip(docs, metas, dists):
+    #     if dist <= MAX_DISTANCE_THRESHOLD:
+    #         filtered_chunks.append((doc, meta, dist))
 
     # sort by best match (lowest distance first)
+
+    # --- DISTANCE-BASED FILTERING (adaptive & file-safe) ---
+    filtered_chunks = []
+    if dists:
+        best_distance = dists[0]  # Chroma returns sorted distances
+        RELATIVE_MARGIN = 0.35 if file_filter else 0.25
+        MAX_ABSOLUTE_CAP = 2.2 if file_filter else 1.2
+        for doc, meta, dist in zip(docs, metas, dists):
+            if (
+                dist <= best_distance * (1 + RELATIVE_MARGIN)
+                and dist <= MAX_ABSOLUTE_CAP
+        ):
+                filtered_chunks.append((doc, meta, dist))
+
+# Fallback: never allow empty context if results exist
+    if not filtered_chunks and docs:
+        filtered_chunks = list(zip(docs, metas, dists))[:2]
+
     filtered_chunks.sort(key=lambda x: x[2])
     final_chunks = filtered_chunks[:MAX_FINAL_CHUNKS]
     print(f"[RAG] Final chunks after filtering: {len(final_chunks)}")
 
     # --- GUARDRAIL ---
     if len(final_chunks) < 2:
+        
         return {
             "answer": "I don't know based on the uploaded documents.",
             "sources": [],

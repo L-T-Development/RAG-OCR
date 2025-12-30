@@ -16,7 +16,9 @@ import tempfile
 from process.document_compare import (
     compare_pdfs,
     compare_docx,
-    compare_excels
+    compare_excels,
+    create_comparison_job,
+    get_comparison_status
 )
 
 from process.llm_summary import summarize_diff
@@ -264,9 +266,12 @@ def delete_document(request, doc_id):
 #comparison 
 @csrf_exempt
 def compare_documents(request):
+    """
+    NON-BLOCKING document comparison endpoint.
+    Submits comparison to background worker and returns immediately with job_id.
+    """
     print("\n" + "="*60)
     print("[COMPARE] Document comparison request received")
-    start_time = time.perf_counter()
     
     if request.method != "POST":
         print("[COMPARE] ERROR: Invalid method:", request.method)
@@ -290,9 +295,12 @@ def compare_documents(request):
     if old_ext != new_ext:
         print("[COMPARE] ERROR: Extension mismatch")
         return JsonResponse({"error": "Files must be of same type"}, status=400)
-
-    old_path = None
-    new_path = None
+    
+    # Validate file type
+    supported_types = [".pdf", ".docx", ".xlsx"]
+    if old_ext not in supported_types:
+        print(f"[COMPARE] ERROR: Unsupported file type: {old_ext}")
+        return JsonResponse({"error": f"Unsupported file type. Supported: {', '.join(supported_types)}"}, status=400)
 
     try:
         # Save temp files
@@ -306,59 +314,53 @@ def compare_documents(request):
             f_new.write(new_file.read())
             new_path = f_new.name
             print(f"[COMPARE] New file saved to: {new_path}")
-
-        # ---- Deterministic comparison ----
-        print(f"[COMPARE] Starting {old_ext} comparison...")
-        if old_ext == ".pdf":
-            diff_result = compare_pdfs(old_path, new_path)
-        elif old_ext == ".docx":
-            diff_result = compare_docx(old_path, new_path)
-        elif old_ext == ".xlsx":
-            diff_result = compare_excels(old_path, new_path)
-        else:
-            print(f"[COMPARE] ERROR: Unsupported file type: {old_ext}")
-            return JsonResponse({"error": "Unsupported file type"}, status=400)
         
-        stats = diff_result.get('stats', {})
-        print(f"[COMPARE] Diff complete - Added: {stats.get('added', 0)}, "
-              f"Removed: {stats.get('removed', 0)}, "
-              f"Modified: {stats.get('modified', 0)}, "
-              f"Unchanged: {stats.get('equal', 0)}, "
-              f"Total lines: {diff_result.get('total_lines', 0)}")
-
-        # ---- Optional LLM summary ----
-        print("[COMPARE] Generating LLM summary...")
-        summary = summarize_diff(diff_result)
-        if summary:
-            print(f"[COMPARE] Summary generated ({len(summary)} chars)")
-        else:
-            print("[COMPARE] WARNING: LLM summary failed, using raw diff")
-            summary = "LLM unavailable. Raw diff available in response."
+        # Create background job and return immediately (KEY CHANGE - non-blocking!)
+        job_id = create_comparison_job(
+            old_path=old_path,
+            new_path=new_path,
+            old_filename=old_file.name,
+            new_filename=new_file.name,
+            file_ext=old_ext
+        )
         
-        processing_time = round(time.perf_counter() - start_time, 3)
-        print(f"[COMPARE] ✓ Comparison completed in {processing_time}s")
+        print(f"[COMPARE] ✓ Job {job_id} created and submitted to background worker")
         print("="*60 + "\n")
-
+        
+        # Return immediately with job identifier (HTTP 202 Accepted)
         return JsonResponse({
-            "summary": summary,
-            "diff": diff_result,
-            "processing_time_seconds": processing_time
-        })
-
+            "job_id": job_id,
+            "status": "pending",
+            "message": "Comparison job submitted. Use /api/compare/status/<job_id>/ to check progress."
+        }, status=202)
+        
     except Exception as e:
         print(f"[COMPARE] ERROR: {type(e).__name__}: {str(e)}")
         import traceback
         traceback.print_exc()
         return JsonResponse({"error": str(e)}, status=500)
 
-    finally:
-        # Cleanup temp files safely
-        if old_path and os.path.exists(old_path):
-            os.remove(old_path)
-            print(f"[COMPARE] Cleaned up: {old_path}")
-        if new_path and os.path.exists(new_path):
-            os.remove(new_path)
-            print(f"[COMPARE] Cleaned up: {new_path}")
+
+def compare_status(request, job_id):
+    """
+    Check status of a background comparison job.
+    
+    GET /api/compare/status/<job_id>/
+    
+    Returns:
+    - status: pending | processing | completed | failed
+    - progress: 0-100
+    - result: comparison result (only when status=completed)
+    - error: error message (only when status=failed)
+    """
+    print(f"[COMPARE] Status check for job {job_id}")
+    
+    job = get_comparison_status(job_id)
+    
+    if not job:
+        return JsonResponse({"error": "Job not found"}, status=404)
+    
+    return JsonResponse(job)
 
 
 # ---------------- DOCUMENT SUMMARY ENDPOINTS ----------------

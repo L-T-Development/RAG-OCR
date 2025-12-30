@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import './Compare.css';
@@ -9,7 +9,20 @@ function Compare() {
   const [status, setStatus] = useState('');
   const [diffResult, setDiffResult] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [jobId, setJobId] = useState(null);
   const [showOnlyChanges, setShowOnlyChanges] = useState(false);
+  
+  const pollingTimerRef = useRef(null);
+
+  // Cleanup polling on component unmount
+  useEffect(() => {
+    return () => {
+      if (pollingTimerRef.current) {
+        clearInterval(pollingTimerRef.current);
+        pollingTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const validateFiles = () => {
     if (!oldFile || !newFile) return false;
@@ -24,6 +37,12 @@ function Compare() {
       return;
     }
 
+    // Clear any existing polling before starting new comparison
+    if (pollingTimerRef.current) {
+      clearInterval(pollingTimerRef.current);
+      pollingTimerRef.current = null;
+    }
+
     setIsLoading(true);
     setStatus('Processing...');
     setDiffResult(null);
@@ -31,18 +50,69 @@ function Compare() {
     try {
       const { ok, data } = await api.compareDocuments(oldFile, newFile);
       
-      if (ok) {
-        setDiffResult(data.diff || null);
+      if (ok && data.job_id) {
+        // Backend returned job_id, start polling
+        setJobId(data.job_id);
+        pollComparisonStatus(data.job_id);
+      } else if (ok && data.diff) {
+        // Synchronous response (fallback)
+        setDiffResult(data.diff);
         setStatus(`Comparison completed in ${data.processing_time_seconds}s`);
+        setIsLoading(false);
       } else {
         setStatus(data.error || 'Comparison failed.');
+        setIsLoading(false);
       }
     } catch (e) {
       setStatus('Network error: Could not connect to comparison service.');
       setDiffResult(null);
-    } finally {
       setIsLoading(false);
     }
+  };
+
+  const pollComparisonStatus = (jobId) => {
+    pollingTimerRef.current = setInterval(async () => {
+      try {
+        const res = await api.getComparisonStatus(jobId);
+
+        if (!res.ok) {
+          if (pollingTimerRef.current) {
+            clearInterval(pollingTimerRef.current);
+            pollingTimerRef.current = null;
+          }
+          setIsLoading(false);
+          setStatus('Failed to fetch comparison status');
+          return;
+        }
+
+        const job = res.data;
+
+        if (job.status === 'completed') {
+          if (pollingTimerRef.current) {
+            clearInterval(pollingTimerRef.current);
+            pollingTimerRef.current = null;
+          }
+          setDiffResult(job.result?.diff);
+          const processingTime = job.result?.processing_time_seconds || 0;
+          setStatus(`Comparison completed in ${processingTime.toFixed(2)}s`);
+          setIsLoading(false);
+        } else if (job.status === 'failed') {
+          if (pollingTimerRef.current) {
+            clearInterval(pollingTimerRef.current);
+            pollingTimerRef.current = null;
+          }
+          setIsLoading(false);
+          setStatus(job.error || 'Comparison failed');
+        }
+      } catch (err) {
+        if (pollingTimerRef.current) {
+          clearInterval(pollingTimerRef.current);
+          pollingTimerRef.current = null;
+        }
+        setIsLoading(false);
+        setStatus('Polling error');
+      }
+    }, 1500);
   };
 
   const getStatusIcon = (status) => {

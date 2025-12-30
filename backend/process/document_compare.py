@@ -2,6 +2,13 @@ import fitz  # PyMuPDF
 import difflib
 from docx import Document
 from openpyxl import load_workbook
+import os
+import uuid
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from typing import Dict, Any, Optional
 
 
 # ---------------- COMMON HELPERS ----------------
@@ -182,3 +189,193 @@ def compare_excels(old_xlsx, new_xlsx):
         extract_excel(old_xlsx),
         extract_excel(new_xlsx)
     )
+
+
+# ============================================================================
+# BACKGROUND JOB MANAGEMENT (ThreadPoolExecutor for non-blocking comparison)
+# ============================================================================
+
+# ThreadPoolExecutor for background comparison jobs (max 3 concurrent workers)
+_COMPARISON_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="CompareWorker")
+
+# In-memory job storage with thread-safe access
+_jobs_lock = threading.Lock()
+_jobs_store: Dict[str, dict] = {}
+
+
+def create_comparison_job(old_path: str, new_path: str, old_filename: str, new_filename: str, file_ext: str) -> str:
+    """
+    Create a new background comparison job.
+    
+    Args:
+        old_path: Path to old file (temporary)
+        new_path: Path to new file (temporary)
+        old_filename: Original filename of old file
+        new_filename: Original filename of new file
+        file_ext: File extension (.pdf, .docx, .xlsx)
+    
+    Returns:
+        job_id: Unique identifier for tracking this job
+    
+    Thread-safe: Uses lock when modifying jobs store
+    """
+    job_id = str(uuid.uuid4())
+    
+    # Create job record
+    job = {
+        "job_id": job_id,
+        "status": "pending",  # pending | processing | completed | failed
+        "created_at": datetime.now().isoformat(),
+        "started_at": None,
+        "finished_at": None,
+        "progress": 0,  # 0-100
+        "old_filename": old_filename,
+        "new_filename": new_filename,
+        "file_extension": file_ext,
+        "old_path": old_path,
+        "new_path": new_path,
+        "result": None,
+        "error": None
+    }
+    
+    # Store job in thread-safe manner
+    with _jobs_lock:
+        _jobs_store[job_id] = job
+    
+    # Submit to executor (non-blocking)
+    _COMPARISON_EXECUTOR.submit(_run_comparison_worker, job_id)
+    
+    print(f"[JOB] Created job {job_id} for comparing {old_filename} vs {new_filename}")
+    return job_id
+
+
+def get_comparison_status(job_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Retrieve current status of a comparison job.
+    
+    Args:
+        job_id: Job identifier
+    
+    Returns:
+        Job status dict (without internal file paths) or None if not found
+    
+    Thread-safe: Uses lock for reading
+    """
+    with _jobs_lock:
+        job = _jobs_store.get(job_id)
+        if not job:
+            return None
+        
+        # Return copy without internal paths
+        public_job = {k: v for k, v in job.items() if k not in ['old_path', 'new_path']}
+        return public_job
+
+
+def _run_comparison_worker(job_id: str):
+    """
+    Worker function that performs the actual comparison in background thread.
+    
+    This runs asynchronously - the API returns immediately while this processes.
+    All existing comparison logic remains UNCHANGED.
+    
+    Args:
+        job_id: Job to process
+    
+    Thread-safe: Updates job state with lock protection
+    """
+    print(f"[WORKER] Starting comparison job {job_id}")
+    start_time = time.perf_counter()
+    
+    # Get job details (thread-safe read)
+    with _jobs_lock:
+        job = _jobs_store.get(job_id)
+        if not job:
+            print(f"[WORKER] ERROR: Job {job_id} not found!")
+            return
+    
+    try:
+        # Update status to processing
+        with _jobs_lock:
+            job["status"] = "processing"
+            job["started_at"] = datetime.now().isoformat()
+            job["progress"] = 10
+        
+        print(f"[WORKER] Processing: {job['old_filename']} vs {job['new_filename']}")
+        print(f"[WORKER] File type: {job['file_extension']}")
+        
+        # ============================================================
+        # STEP 1: Run comparison (EXISTING LOGIC - NO CHANGES)
+        # ============================================================
+        with _jobs_lock:
+            job["progress"] = 30
+        
+        file_ext = job["file_extension"]
+        old_path = job["old_path"]
+        new_path = job["new_path"]
+        
+        if file_ext == ".pdf":
+            diff_result = compare_pdfs(old_path, new_path)
+        elif file_ext == ".docx":
+            diff_result = compare_docx(old_path, new_path)
+        elif file_ext == ".xlsx":
+            diff_result = compare_excels(old_path, new_path)
+        else:
+            raise ValueError(f"Unsupported file type: {file_ext}")
+        
+        stats = diff_result.get('stats', {})
+        print(f"[WORKER] Diff complete - Added: {stats.get('added', 0)}, "
+              f"Removed: {stats.get('removed', 0)}, "
+              f"Modified: {stats.get('modified', 0)}, "
+              f"Unchanged: {stats.get('equal', 0)}")
+        
+        # ============================================================
+        # STEP 2: Generate LLM summary (EXISTING LOGIC - NO CHANGES)
+        # ============================================================
+        with _jobs_lock:
+            job["progress"] = 70
+        
+        print(f"[WORKER] Generating LLM summary...")
+        # Import here to avoid circular dependency
+        from process.llm_summary import summarize_diff
+        summary = summarize_diff(diff_result)
+        if not summary:
+            print(f"[WORKER] WARNING: LLM summary failed, using fallback")
+            summary = "LLM unavailable. Raw diff available in response."
+        
+        # ============================================================
+        # STEP 3: Store results
+        # ============================================================
+        processing_time = round(time.perf_counter() - start_time, 3)
+        
+        with _jobs_lock:
+            job["status"] = "completed"
+            job["finished_at"] = datetime.now().isoformat()
+            job["progress"] = 100
+            job["result"] = {
+                "summary": summary,
+                "diff": diff_result,
+                "processing_time_seconds": processing_time
+            }
+        
+        print(f"[WORKER] ✓ Job {job_id} completed in {processing_time}s")
+    
+    except Exception as e:
+        # Handle errors gracefully (thread-safe)
+        print(f"[WORKER] ERROR in job {job_id}: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+        with _jobs_lock:
+            job["status"] = "failed"
+            job["finished_at"] = datetime.now().isoformat()
+            job["error"] = str(e)
+    
+    finally:
+        # Cleanup temporary files
+        for path in [job.get("old_path"), job.get("new_path")]:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                    print(f"[CLEANUP] Removed temp file: {path}")
+                except Exception as e:
+                    print(f"[CLEANUP] WARNING: Failed to remove {path}: {e}")

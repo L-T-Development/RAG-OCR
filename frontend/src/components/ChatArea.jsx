@@ -3,9 +3,11 @@ import './ChatArea.css';
 
 function ChatArea({ threadId, threadName, messages, onSendMessage, onSummarize, isLoading, isSummarizing, disabled }) {
   const [input, setInput] = useState('');
-  const [selectedChunks, setSelectedChunks] = useState(null);
+  // const [selectedChunks, setSelectedChunks] = useState(null);
   const [expandedSources, setExpandedSources] = useState(new Set());
   const messagesEndRef = useRef(null);
+  const [showFileDropdown, setShowFileDropdown] = useState(false);
+  const [threadFiles, setThreadFiles] = useState([]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -15,10 +17,27 @@ function ChatArea({ threadId, threadName, messages, onSendMessage, onSummarize, 
     scrollToBottom();
   }, [messages]);
 
+   /* ---------------- @ FILE HELPERS ---------------- */
+
+  // Detect active "@token" at cursor end
+
+  const fetchThreadFiles = async () => {
+    if (!threadId) return;
+    try {
+      const res = await fetch(`/api/files/${threadId}/`);
+
+      const data = await res.json();
+      setThreadFiles(data.files || []);
+    } catch (err) {
+      console.error("Failed to fetch thread files", err);
+    }
+  };
+
   const handleSend = () => {
     if (!input.trim() || disabled) return;
     onSendMessage(input);
     setInput('');
+    setShowFileDropdown(false);
   };
 
   const handleKeyPress = (e) => {
@@ -40,6 +59,24 @@ function ChatArea({ threadId, threadName, messages, onSendMessage, onSummarize, 
     }
     setExpandedSources(newSet);
   };
+
+//   const fetchThreadFiles = async () => {
+//   if (!threadId) return;
+//   try {
+//     const res = await fetch(`/thread/${threadId}/documents`);
+//     const data = await res.json();
+//     setThreadFiles(data.documents || []);
+//   } catch (err) {
+//     console.error("Failed to fetch thread files", err);
+//   }
+// };
+
+//   // Detect active @token at the end of input
+//   const getActiveAtToken = (text) => {
+//     const match = text.match(/@([^\s]*)$/);
+//     return match ? match[1] : null;
+// };
+
 
   return (
     <main className="chat-area">
@@ -145,6 +182,30 @@ function ChatArea({ threadId, threadName, messages, onSendMessage, onSummarize, 
         )}
         <div ref={messagesEndRef} />
       </div>
+      {showFileDropdown && (
+  <div className="file-dropdown">
+  {threadFiles.length === 0 ? (
+    <div className="file-option">No files found</div>
+  ) : (
+    threadFiles.map((file, idx) => (
+      <div
+        key={idx}
+        className="file-option"
+        onClick={() => {
+          setInput(prev =>
+            prev.replace(/@.*/, `@${file.name} `)
+          );
+          setShowFileDropdown(false);
+        }}
+      >
+        📄 {file.name}
+      </div>
+    ))
+  )}
+</div>
+
+)}
+
 
       <div className="input-area">
         <input
@@ -152,7 +213,22 @@ function ChatArea({ threadId, threadName, messages, onSendMessage, onSummarize, 
           className="chat-input"
           placeholder="Ask about the documents..."
           value={input}
-          onChange={e => setInput(e.target.value)}
+
+          onChange={(e) => {
+            const value = e.target.value;
+            setInput(value);
+            console.log("INPUT:", value, "THREAD:", threadId);
+
+            if (value.includes('@')) {
+              fetchThreadFiles();
+              setShowFileDropdown(true);
+            }
+            else {
+              setShowFileDropdown(false);
+  }
+}}
+
+
           onKeyPress={handleKeyPress}
           disabled={disabled}
         />

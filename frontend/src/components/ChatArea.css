@@ -294,3 +294,31 @@
   font-size: 0.9rem;
 }
 
+.file-dropdown {
+  position: absolute;
+  bottom: 85px;
+  left: 20px;
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: 260px;
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 50;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.file-option {
+  padding: 10px 12px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.file-option:hover {
+  background: var(--primary-light);
+}
+.file-option.selected {
+  background: var(--accent);
+  color: white;
+}
+
