@@ -8,6 +8,13 @@ import time
 import psutil
 import threading
 
+# Optional CUDA support
+try:
+    import torch
+    CUDA_AVAILABLE = torch.cuda.is_available()
+except ImportError:
+    CUDA_AVAILABLE = False
+
 from .eval_utils import (
     answer_relevance,
     context_precision,
@@ -56,7 +63,7 @@ class EmbeddingModelManager:
             return
         self._model = None
         self._model_path = None
-        self._device = "cpu"
+        self._device = "cuda" if CUDA_AVAILABLE else "cpu"
         self._status = {
             "loaded": False,
             "path": None,
@@ -64,6 +71,12 @@ class EmbeddingModelManager:
             "device": self._device
         }
         self._initialized = True
+        
+        if CUDA_AVAILABLE:
+            print(f"[RAG] CUDA Available: {torch.cuda.get_device_name(0)}")
+            print(f"[RAG] CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        else:
+            print("[RAG] Running on CPU (CUDA not available)")
     
     def _get_model_path_from_db(self):
         """Get model path from database configuration"""
@@ -134,6 +147,8 @@ class EmbeddingModelManager:
                 if self._model is not None:
                     del self._model
                     self._model = None
+                    if CUDA_AVAILABLE:
+                        torch.cuda.empty_cache()
                 
                 self._model = SentenceTransformer(model_path, device=self._device)
                 self._model_path = model_path
