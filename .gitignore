@@ -22,6 +22,7 @@ pdfs/
 
 # Local data (don't commit large files)
 backend/local_chroma_db/
-backend/local_chroma_db/*
+backend/db.sqlite3
+*.sqlite3
 
 

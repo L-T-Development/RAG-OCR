@@ -47,6 +47,17 @@ export const api = {
     return { ok: res.ok, data: await res.json() };
   },
 
+  // Quick Upload - auto-creates thread named after PDF
+  async quickUpload(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch(`${API_BASE}/quick-upload/`, {
+      method: 'POST',
+      body: formData
+    });
+    return { ok: res.ok, data: await res.json() };
+  },
+
   // Chat
   async getChatHistory(threadId) {
     const res = await fetch(`${API_BASE}/chat/history/${threadId}/`);

@@ -7,7 +7,7 @@ from django.views.decorators.http import require_http_methods
 from .rag_engine import (
     process_pdf, query_rag, delete_from_chroma, summarize_document, 
     get_thread_documents_summary, get_model_status, configure_model_path, 
-    validate_model_path
+    validate_model_path, extract_pdf_title
 )
 import json
 import os
@@ -121,6 +121,86 @@ def get_thread_files(request, thread_id):
     return JsonResponse({'files': file_list, 'thread_name': current_thread.name})
 
 
+# --- Quick Upload: Auto-creates thread named after PDF ---
+@csrf_exempt
+def quick_upload(request):
+    """
+    Upload a PDF and automatically create a thread named after the document.
+    Used for drag & drop upload when no thread is selected.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST method required'}, status=405)
+    
+    if not request.FILES.get('file'):
+        return JsonResponse({'error': 'No file sent'}, status=400)
+    
+    uploaded_file = request.FILES['file']
+    
+    # Check if it's a PDF
+    if not uploaded_file.name.lower().endswith('.pdf'):
+        return JsonResponse({'error': 'Only PDF files are supported'}, status=400)
+    
+    try:
+        # Save file temporarily to extract title
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+            for chunk in uploaded_file.chunks():
+                tmp.write(chunk)
+            tmp_path = tmp.name
+        
+        # Extract title for thread name
+        thread_name = extract_pdf_title(tmp_path)
+        
+        # Create the thread
+        thread = Thread.objects.create(name=thread_name, parent=None)
+        
+        # Reset file position for upload
+        uploaded_file.seek(0)
+        
+        # Create document record
+        doc = Document.objects.create(
+            thread=thread,
+            file=uploaded_file,
+            filename=uploaded_file.name
+        )
+        
+        # Process the PDF (vectorize it)
+        result = process_pdf(
+            file_path=doc.file.path,
+            doc_id=str(doc.id),
+            thread_id=str(thread.id),
+            parent_id=None,
+            filename=doc.filename
+        )
+        
+        # Mark as processed
+        doc.is_processed = True
+        doc.save()
+        
+        # Clean up temp file
+        os.unlink(tmp_path)
+        
+        return JsonResponse({
+            'thread': {
+                'id': str(thread.id),
+                'name': thread.name,
+                'parent_id': None
+            },
+            'document': {
+                'id': str(doc.id),
+                'name': doc.filename,
+                'url': doc.file.url
+            },
+            'chunks': result if isinstance(result, dict) else {'text_chunks': result, 'table_chunks': 0}
+        })
+        
+    except Exception as e:
+        # Clean up temp file on error
+        if 'tmp_path' in locals():
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+        return JsonResponse({'error': str(e)}, status=500)
 
 
 @csrf_exempt

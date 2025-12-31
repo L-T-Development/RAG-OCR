@@ -1,8 +1,9 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import './FilesPanel.css';
 
-function FilesPanel({ files, onUpload, onDeleteFile, disabled, isUploading }) {
+function FilesPanel({ files, onUpload, onDeleteFile, disabled, isUploading, onQuickUpload }) {
   const fileInputRef = useRef(null);
+  const [isDragging, setIsDragging] = useState(false);
 
   const handleFileChange = (e) => {
     const file = e.target.files[0];
@@ -12,8 +13,53 @@ function FilesPanel({ files, onUpload, onDeleteFile, disabled, isUploading }) {
     }
   };
 
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+
+    const droppedFiles = e.dataTransfer.files;
+    if (droppedFiles.length > 0) {
+      const file = droppedFiles[0];
+      // Check if it's a PDF
+      if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+        // If thread is selected, use normal upload; otherwise use quick upload
+        if (!disabled && onUpload) {
+          onUpload(file);
+        } else if (onQuickUpload) {
+          onQuickUpload(file);
+        }
+      }
+    }
+  };
+
   return (
-    <aside className="files-panel">
+    <aside 
+      className={`files-panel ${isDragging ? 'dragging' : ''}`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {/* Drag & Drop Overlay */}
+      {isDragging && (
+        <div className="drop-overlay">
+          <i className="fa-solid fa-cloud-arrow-up"></i>
+          <span>Drop PDF here</span>
+        </div>
+      )}
+
       <div className="files-header">
         <span>Documents</span>
         <button

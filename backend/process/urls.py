@@ -12,6 +12,7 @@ urlpatterns = [
     path('api/create-thread/', views.create_thread, name='create_thread'),
     path('api/list-threads/', views.list_threads, name='list_threads'),
     path('api/upload/<str:thread_id>/', views.upload_file, name='upload_file'),
+    path('api/quick-upload/', views.quick_upload, name='quick_upload'),
     path('api/files/<str:thread_id>/', views.get_thread_files, name='get_thread_files'),
     
     path("api/chat/history/<uuid:thread_id>/", views.get_chat_history),

@@ -328,16 +328,20 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
     doc = fitz.open(file_path)
 
     text_chunks = []
+    table_chunks = []
     metadatas = []
+    table_metadatas = []
     ids = []
+    table_ids = []
 
     print(f"[RAG] Total Pages: {len(doc)}")
 
     for page_num, page in enumerate(doc):
+        # Extract text chunks
         text = page.get_text()
         chunks = smart_chunk_text(text)
 
-        print(f"[RAG] Page {page_num + 1}: Found {len(chunks)} chunks")
+        print(f"[RAG] Page {page_num + 1}: Found {len(chunks)} text chunks")
 
         for i, chunk in enumerate(chunks):
             chunk_id = f"{doc_id}_{page_num}_{i}"
@@ -349,40 +353,68 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
                 "thread_id": str(thread_id),
                 "parent_id": str(parent_id) if parent_id else "none",
                 "source": filename,
-                "page": page_num + 1
+                "page": page_num + 1,
+                "type": "text"
             })
+        
+        # Extract tables from the page
+        tables = extract_tables_from_page(page)
+        if tables:
+            print(f"[RAG] Page {page_num + 1}: Found {len(tables)} tables")
+            
+            for table in tables:
+                table_id = f"{doc_id}_{page_num}_table_{table['index']}"
+                table_chunks.append(table["text"])
+                table_ids.append(table_id)
+                
+                table_metadatas.append({
+                    "doc_id": str(doc_id),
+                    "thread_id": str(thread_id),
+                    "parent_id": str(parent_id) if parent_id else "none",
+                    "source": filename,
+                    "page": page_num + 1,
+                    "type": "table",
+                    "table_data": json.dumps(table["data"]),
+                    "row_count": table["row_count"],
+                    "column_count": table["column_count"]
+                })
 
-    if not text_chunks:
+    # Combine text and table chunks
+    all_chunks = text_chunks + table_chunks
+    all_ids = ids + table_ids
+    all_metadatas = metadatas + table_metadatas
+
+    if not all_chunks:
         print("[RAG] No valid chunks found.")
-        return 0
+        return {"text_chunks": 0, "table_chunks": 0}
 
-    print(f"[RAG] Embedding {len(text_chunks)} chunks...")
+    print(f"[RAG] Embedding {len(all_chunks)} chunks ({len(text_chunks)} text + {len(table_chunks)} table)...")
     embed_start = time.time()
-    embeddings = model_manager.encode(text_chunks).tolist()
+    embeddings = model_manager.encode(all_chunks).tolist()
     embed_time = time.time() - embed_start
     print(f"[RAG] Embedding completed in {embed_time:.2f}s")
 
     # Batch insert to handle large documents (ChromaDB has ~5461 limit per add())
     db_start = time.time()
-    total_chunks = len(text_chunks)
+    total_chunks = len(all_chunks)
     
     if total_chunks <= CHROMA_BATCH_SIZE:
         # Single batch insert
         collection.add(
-            documents=text_chunks,
+            documents=all_chunks,
             embeddings=embeddings,
-            metadatas=metadatas,
-            ids=ids
+            metadatas=all_metadatas,
+            ids=all_ids
         )
         print(f"[RAG] Inserted {total_chunks} chunks in single batch")
     else:
         # Multiple batch inserts
         for i in range(0, total_chunks, CHROMA_BATCH_SIZE):
             end_idx = min(i + CHROMA_BATCH_SIZE, total_chunks)
-            batch_docs = text_chunks[i:end_idx]
+            batch_docs = all_chunks[i:end_idx]
             batch_embeds = embeddings[i:end_idx]
-            batch_metas = metadatas[i:end_idx]
-            batch_ids = ids[i:end_idx]
+            batch_metas = all_metadatas[i:end_idx]
+            batch_ids = all_ids[i:end_idx]
             
             collection.add(
                 documents=batch_docs,
@@ -401,7 +433,7 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
     print("[RAG] Added to Vector DB successfully.")
     print(f"[RESOURCE] Total Time: {end_time - start_time:.2f}s | Embedding: {embed_time:.2f}s | DB Insert: {db_time:.2f}s")
     print(f"[RESOURCE] Memory: {start_memory:.1f}MB → {end_memory:.1f}MB (Δ{end_memory - start_memory:+.1f}MB) | CPU: {end_cpu:.1f}%")
-    return len(text_chunks)
+    return {"text_chunks": len(text_chunks), "table_chunks": len(table_chunks)}
 
 
 def extract_file_filter(query_text):
@@ -829,5 +861,116 @@ def get_thread_documents_summary(thread_id):
         
     except Exception as e:
         return {"error": str(e)}
+
+
+# ---------------- TABLE EXTRACTION ----------------
+def extract_tables_from_page(page):
+    """
+    Extract tables from a PDF page using PyMuPDF's table detection.
+    
+    Args:
+        page: PyMuPDF page object
+        
+    Returns:
+        List of dictionaries containing table data and metadata
+    """
+    tables = []
+    try:
+        # Find tables on the page
+        tabs = page.find_tables()
+        
+        for idx, table in enumerate(tabs):
+            # Extract table data as list of lists
+            table_data = table.extract()
+            
+            if not table_data or len(table_data) < 2:  # Need at least header + 1 row
+                continue
+            
+            # Convert to structured format
+            headers = table_data[0] if table_data else []
+            rows = table_data[1:] if len(table_data) > 1 else []
+            
+            # Create text representation for embedding
+            text_repr = f"Table {idx + 1}:\n"
+            if headers:
+                text_repr += "Columns: " + " | ".join(str(h) for h in headers if h) + "\n"
+            for row in rows[:10]:  # Limit rows for text representation
+                text_repr += " | ".join(str(cell) for cell in row if cell) + "\n"
+            if len(rows) > 10:
+                text_repr += f"... and {len(rows) - 10} more rows\n"
+            
+            tables.append({
+                "index": idx,
+                "text": text_repr.strip(),
+                "data": table_data,
+                "headers": headers,
+                "row_count": len(rows),
+                "column_count": len(headers) if headers else 0
+            })
+            
+    except Exception as e:
+        print(f"[RAG] Table extraction error: {e}")
+    
+    return tables
+
+
+def extract_pdf_title(file_path):
+    """
+    Extract a suitable title from a PDF for thread naming.
+    Tries: PDF metadata title -> First heading -> First line -> Filename
+    
+    Args:
+        file_path: Path to the PDF file
+        
+    Returns:
+        str: Extracted or generated title
+    """
+    try:
+        doc = fitz.open(file_path)
+        
+        # 1. Try PDF metadata title
+        metadata = doc.metadata
+        if metadata and metadata.get("title"):
+            title = metadata["title"].strip()
+            if len(title) > 5:  # Reasonable title length
+                doc.close()
+                return title[:100]  # Limit length
+        
+        # 2. Try to find a heading on the first page
+        if len(doc) > 0:
+            first_page = doc[0]
+            text = first_page.get_text()
+            
+            if text:
+                lines = [l.strip() for l in text.split('\n') if l.strip()]
+                
+                # Look for a title-like line (short, possibly uppercase)
+                for line in lines[:5]:  # Check first 5 non-empty lines
+                    # Skip very short or very long lines
+                    if 5 < len(line) < 100:
+                        # Prefer lines that look like titles
+                        if line.isupper() or line.istitle() or len(line) < 50:
+                            doc.close()
+                            return line[:100]
+                
+                # Fall back to first meaningful line
+                if lines:
+                    doc.close()
+                    return lines[0][:100]
+        
+        doc.close()
+        
+        # 3. Fall back to filename without extension
+        basename = os.path.basename(file_path)
+        name_without_ext = os.path.splitext(basename)[0]
+        # Clean up common filename patterns
+        clean_name = re.sub(r'[-_]+', ' ', name_without_ext)
+        return clean_name[:100]
+        
+    except Exception as e:
+        print(f"[RAG] Title extraction error: {e}")
+        # Ultimate fallback
+        basename = os.path.basename(file_path)
+        return os.path.splitext(basename)[0][:100]
 
 

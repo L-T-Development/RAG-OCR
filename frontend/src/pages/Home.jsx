@@ -173,6 +173,28 @@ function Home() {
     }
   };
 
+  // Quick upload: auto-creates thread named after PDF
+  const handleQuickUpload = async (file) => {
+    setIsUploading(true);
+    try {
+      const { ok, data } = await api.quickUpload(file);
+      if (ok) {
+        // Refresh threads list
+        await fetchThreads();
+        // Select the newly created thread
+        if (data.thread) {
+          handleSelectThread(data.thread.id, data.thread.name);
+        }
+      } else {
+        alert('Upload failed: ' + (data.error || 'Unknown error'));
+      }
+    } catch (e) {
+      alert('Upload failed: Network error');
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
   return (
     <div className="home-container">
       <Navbar />
@@ -200,6 +222,7 @@ function Home() {
           onDeleteFile={handleDeleteFile}
           disabled={!currentThreadId}
           isUploading={isUploading}
+          onQuickUpload={handleQuickUpload}
         />
       </div>
     </div>
