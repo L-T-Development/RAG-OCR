@@ -301,23 +301,41 @@ def delete_thread(request, thread_id):
         thread = get_object_or_404(Thread, id=thread_id)
         
         # 1. Collect all threads to be deleted (including self and children)
-        # Helper to get all descendant IDs
         def get_all_descendant_ids(t):
             ids = [t.id]
             for child in t.sub_threads.all():
                 ids.extend(get_all_descendant_ids(child))
             return ids
 
-        all_ids = get_all_descendant_ids(thread)
+        all_thread_ids = get_all_descendant_ids(thread)
         
-        # Delete from Chroma for each thread
-        for t_id in all_ids:
+        # 2. Delete all PDF files from disk for documents in these threads
+        from .models import Document
+        docs_to_delete = Document.objects.filter(thread_id__in=all_thread_ids)
+        deleted_files = []
+        for doc in docs_to_delete:
+            if doc.file:
+                try:
+                    file_path = doc.file.path
+                    doc.file.delete(save=False)  # Delete file from disk
+                    deleted_files.append(file_path)
+                except Exception as file_err:
+                    print(f"[DELETE] Warning: Could not delete file {doc.filename}: {file_err}")
+        
+        print(f"[DELETE] Deleted {len(deleted_files)} PDF files from disk")
+        
+        # 3. Delete from Chroma for each thread
+        for t_id in all_thread_ids:
             delete_from_chroma(thread_id=t_id)
 
-        # 2. Delete from SQL (Cascade will handle children and documents)
+        # 4. Delete from SQL (Cascade will handle children, documents, and chat messages)
         thread.delete()
         
-        return JsonResponse({'message': 'Thread and associated data deleted successfully'})
+        return JsonResponse({
+            'message': 'Thread and associated data deleted successfully',
+            'deleted_files': len(deleted_files),
+            'deleted_threads': len(all_thread_ids)
+        })
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -328,16 +346,29 @@ def delete_thread(request, thread_id):
 def delete_document(request, doc_id):
     try:
         doc = get_object_or_404(Document, id=doc_id)
+        filename = doc.filename
         
-        # 1. Delete from Chroma
+        # 1. Delete from Chroma (vector database)
         delete_from_chroma(doc_id=doc.id)
-         #2 delete file from disk
-        if doc.file:
-            doc.file.delete(save=False)
-        # 2. Delete from SQL
-        doc.delete()
+        print(f"[DELETE] Removed document {filename} from Chroma")
         
-        return JsonResponse({'message': 'Document deleted successfully'})
+        # 2. Delete file from disk
+        if doc.file:
+            try:
+                file_path = doc.file.path
+                doc.file.delete(save=False)
+                print(f"[DELETE] Deleted file from disk: {file_path}")
+            except Exception as file_err:
+                print(f"[DELETE] Warning: Could not delete file: {file_err}")
+        
+        # 3. Delete from SQL database
+        doc.delete()
+        print(f"[DELETE] Removed document {filename} from database")
+        
+        return JsonResponse({
+            'message': 'Document deleted successfully',
+            'filename': filename
+        })
     except Exception as e:
         import traceback
         traceback.print_exc()

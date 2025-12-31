@@ -1,0 +1,95 @@
+/* Input Component Styles */
+
+.input-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.input-label {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.input {
+  width: 100%;
+  padding: var(--spacing-sm) var(--spacing-md);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  color: var(--color-text-primary);
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  transition: all var(--transition-fast);
+}
+
+.input:hover {
+  border-color: var(--color-text-muted);
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--color-brand-primary);
+  box-shadow: 0 0 0 3px var(--color-brand-primary-light);
+}
+
+.input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.input:disabled {
+  background: var(--color-bg-tertiary);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+/* Textarea */
+.input--textarea {
+  min-height: 100px;
+  resize: vertical;
+  line-height: var(--leading-relaxed);
+}
+
+/* With Icon */
+.input-icon-wrapper {
+  position: relative;
+}
+
+.input-icon-wrapper .input {
+  padding-left: 40px;
+}
+
+.input-icon {
+  position: absolute;
+  left: var(--spacing-md);
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--color-text-muted);
+  pointer-events: none;
+}
+
+/* Sizes */
+.input--sm {
+  padding: var(--spacing-xs) var(--spacing-sm);
+  font-size: var(--text-xs);
+}
+
+.input--lg {
+  padding: var(--spacing-md);
+  font-size: var(--text-base);
+}
+
+/* Error State */
+.input--error {
+  border-color: var(--color-error);
+}
+
+.input--error:focus {
+  box-shadow: 0 0 0 3px var(--color-error-light);
+}
+
+.input-error-message {
+  font-size: var(--text-xs);
+  color: var(--color-error);
+}
