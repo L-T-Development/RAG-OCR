@@ -556,7 +556,7 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
     print(f"[RAG] Final chunks after filtering: {len(final_chunks)}")
 
     # --- GUARDRAIL ---
-    if len(final_chunks) < 2:
+    if len(final_chunks) < 1:
         
         return {
             "answer": "I don't know based on the uploaded documents.",
