@@ -8,6 +8,7 @@ import time
 import psutil
 import threading
 import re
+import sqlite3
 
 # Optional CUDA support
 try:
@@ -24,8 +25,9 @@ from .eval_utils import (
 
 # --- CONFIGURATION ---
 CHROMA_PATH = "./local_chroma_db"
+TABLES_DB_PATH = "./tables.db"
 OLLAMA_API = "http://localhost:11434/api/generate"
-LLM_MODEL = "llama3.2:1b"
+LLM_MODEL = "llama3.1:8b"
 
 # Retrieval tuning (SAFE DEFAULTS)
 CANDIDATE_K = 10
@@ -41,6 +43,202 @@ os.environ["ANONYMIZED_TELEMETRY"] = "False"
 # Initialize ChromaDB (always available)
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 collection = chroma_client.get_or_create_collection(name="rag_knowledge_base")
+
+
+# ---------------- TABLE DATABASE MANAGEMENT ----------------
+# Using Django ORM instead of raw SQL for better integration
+# Note: ExtractedTable model is defined in models.py
+
+
+def classify_table_type(headers, rows, row_count, column_count):
+    """
+    Classify table type for retrieval strategy.
+    Returns: 'key_value', 'single_row', 'single_cell', or 'multi_row'
+    """
+    if row_count <= 0:
+        return 'single_cell'
+    
+    if row_count == 1 and column_count == 1:
+        return 'single_cell'
+    
+    # Key-value detection: 2 columns, labels in first column
+    if column_count == 2 and row_count <= 10:
+        if headers and len(headers) == 2:
+            first_col = [str(row[0]).strip() for row in rows if row]
+            # Check if first column looks like keys/parameters
+            if any(kw in ' '.join(first_col).lower() for kw in ['parameter', 'property', 'specification', 'attribute', 'field', 'name', 'type']):
+                return 'key_value'
+    
+    if row_count <= 2:
+        return 'single_row'
+    
+    return 'multi_row'
+
+
+def generate_searchable_text(headers, rows, table_type):
+    """Generate rich searchable text for SQL FTS."""
+    parts = []
+    
+    # Add headers
+    if headers:
+        parts.append(' '.join(str(h) for h in headers if h))
+    
+    # Add all cell values
+    for row in rows:
+        if row:
+            parts.append(' '.join(str(cell) for cell in row if cell))
+    
+    # For key-value tables, create explicit key=value pairs
+    if table_type == 'key_value' and len(rows) > 0:
+        for row in rows:
+            if len(row) >= 2 and row[0] and row[1]:
+                parts.append(f"{row[0]}={row[1]}")
+                parts.append(f"{row[0]} is {row[1]}")
+    
+    return ' '.join(parts)
+
+
+def store_table(table_id, doc_id, thread_id, parent_id, source, page, table_index, 
+                headers, row_count, column_count, table_data):
+    """Store a table using Django ORM with normalized structure."""
+    from .models import ExtractedTable, TableRow, TableCell, Thread
+    
+    try:
+        rows = table_data[1:] if len(table_data) > 1 else []
+        table_type = classify_table_type(headers, rows, row_count, column_count)
+        searchable_text = generate_searchable_text(headers, rows, table_type)
+        
+        # Get thread instance
+        try:
+            thread = Thread.objects.get(id=thread_id)
+            parent_thread = Thread.objects.get(id=parent_id) if parent_id else None
+        except Thread.DoesNotExist:
+            print(f"[RAG] ERROR: Thread {thread_id} not found")
+            return
+        
+        # Create or update table metadata
+        table, created = ExtractedTable.objects.update_or_create(
+            id=table_id,
+            defaults={
+                'doc_id': doc_id,
+                'thread': thread,
+                'parent_thread': parent_thread,
+                'source': source,
+                'page': page,
+                'table_index': table_index,
+                'row_count': row_count,
+                'column_count': column_count,
+                'table_type': table_type,
+                'searchable_text': searchable_text,
+            }
+        )
+        
+        # Delete existing rows if updating
+        if not created:
+            table.rows.all().delete()
+        
+        # Store headers as first row
+        if headers and any(headers):
+            header_row = TableRow.objects.create(
+                table=table,
+                row_index=0,
+                is_header=True
+            )
+            
+            for col_idx, header_value in enumerate(headers):
+                TableCell.objects.create(
+                    row=header_row,
+                    column_index=col_idx,
+                    column_name=str(header_value) if header_value else '',
+                    value=str(header_value) if header_value else '',
+                    is_key=False
+                )
+        
+        # Store data rows
+        # table_data includes headers at index 0, so data rows start at index 1
+        if len(table_data) > 1:
+            data_rows = table_data[1:]
+        elif len(table_data) == 1 and not headers:
+            # Single row table without headers
+            data_rows = table_data
+        else:
+            data_rows = []
+        
+        start_row_idx = 1 if headers else 0
+        
+        for row_offset, row_data in enumerate(data_rows):
+            if not row_data or not isinstance(row_data, (list, tuple)):
+                continue
+                
+            row_idx = start_row_idx + row_offset
+            data_row = TableRow.objects.create(
+                table=table,
+                row_index=row_idx,
+                is_header=False
+            )
+            
+            # Determine if first column is a key (for key-value tables)
+            is_kv_table = table_type == 'key_value'
+            
+            for col_idx, cell_value in enumerate(row_data):
+                if col_idx >= column_count:
+                    break
+                    
+                col_name = headers[col_idx] if headers and col_idx < len(headers) else f'Column {col_idx}'
+                
+                TableCell.objects.create(
+                    row=data_row,
+                    column_index=col_idx,
+                    column_name=col_name,
+                    value=str(cell_value) if cell_value else '',
+                    is_key=(is_kv_table and col_idx == 0)  # First column in key-value tables
+                )
+        
+        print(f"[RAG] ✓ Stored table {table_id} ({table_type}) with {len(data_rows)} data rows")
+        
+    except Exception as e:
+        print(f"[RAG] ERROR storing table {table_id}: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def get_table_by_id(table_id):
+    """Retrieve a table by its ID using Django ORM."""
+    from .models import ExtractedTable
+    
+    try:
+        table = ExtractedTable.objects.get(id=table_id)
+        return table.to_dict()
+    except ExtractedTable.DoesNotExist:
+        return None
+
+
+def get_tables_by_doc(doc_id):
+    """Retrieve all tables for a document using Django ORM."""
+    from .models import ExtractedTable
+    
+    tables = ExtractedTable.objects.filter(doc_id=doc_id).order_by('page', 'table_index')
+    return [table.to_dict() for table in tables]
+
+
+def delete_tables(doc_id=None, thread_id=None):
+    """Delete tables using Django ORM by doc_id or thread_id."""
+    from .models import ExtractedTable
+    
+    if not doc_id and not thread_id:
+        return False
+    
+    if doc_id:
+        deleted_count, _ = ExtractedTable.objects.filter(doc_id=doc_id).delete()
+    elif thread_id:
+        deleted_count, _ = ExtractedTable.objects.filter(thread_id=thread_id).delete()
+    
+    print(f"[RAG] Deleted {deleted_count} tables via Django ORM")
+    return True
+
+
+# Django ORM handles table initialization via migrations
+# No need for manual initialization
 
 
 class EmbeddingModelManager:
@@ -328,11 +526,9 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
     doc = fitz.open(file_path)
 
     text_chunks = []
-    table_chunks = []
     metadatas = []
-    table_metadatas = []
     ids = []
-    table_ids = []
+    table_count = 0
 
     print(f"[RAG] Total Pages: {len(doc)}")
 
@@ -364,57 +560,83 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
             
             for table in tables:
                 table_id = f"{doc_id}_{page_num}_table_{table['index']}"
-                table_chunks.append(table["text"])
-                table_ids.append(table_id)
                 
-                table_metadatas.append({
-                    "doc_id": str(doc_id),
-                    "thread_id": str(thread_id),
-                    "parent_id": str(parent_id) if parent_id else "none",
-                    "source": filename,
-                    "page": page_num + 1,
-                    "type": "table",
-                    "table_data": json.dumps(table["data"]),
-                    "row_count": table["row_count"],
-                    "column_count": table["column_count"]
-                })
+                # Store full table in tables.db
+                store_table(
+                    table_id=table_id,
+                    doc_id=doc_id,
+                    thread_id=thread_id,
+                    parent_id=parent_id,
+                    source=filename,
+                    page=page_num + 1,
+                    table_index=table['index'],
+                    headers=table['headers'],
+                    row_count=table['row_count'],
+                    column_count=table['column_count'],
+                    table_data=table['data']
+                )
+                table_count += 1
+                
+                # For single-instance tables, ALSO embed in ChromaDB
+                rows = table['data'][1:] if len(table['data']) > 1 else []
+                table_type = classify_table_type(table['headers'], rows, table['row_count'], table['column_count'])
+                
+                if table_type in ['key_value', 'single_row', 'single_cell']:
+                    # Create semantic text representation
+                    table_text = f"Table {table['index'] + 1} on page {page_num + 1}:\n"
+                    if table['headers']:
+                        table_text += "Headers: " + ", ".join(str(h) for h in table['headers'] if h) + "\n"
+                    
+                    for row in rows[:5]:  # Limit to first 5 rows
+                        if row:
+                            table_text += " | ".join(str(cell) for cell in row if cell) + "\n"
+                    
+                    # Add to text chunks for embedding
+                    chunk_id = f"{doc_id}_{page_num}_table_{table['index']}_text"
+                    text_chunks.append(table_text)
+                    ids.append(chunk_id)
+                    metadatas.append({
+                        "doc_id": str(doc_id),
+                        "thread_id": str(thread_id),
+                        "parent_id": str(parent_id) if parent_id else "none",
+                        "source": filename,
+                        "page": page_num + 1,
+                        "type": "table_text",
+                        "table_id": table_id
+                    })
+                    print(f"[RAG] Also embedding single-instance table {table_id} for semantic search")
 
-    # Combine text and table chunks
-    all_chunks = text_chunks + table_chunks
-    all_ids = ids + table_ids
-    all_metadatas = metadatas + table_metadatas
+    if not text_chunks:
+        print("[RAG] No valid text chunks found.")
+        return {"text_chunks": 0, "table_chunks": table_count}
 
-    if not all_chunks:
-        print("[RAG] No valid chunks found.")
-        return {"text_chunks": 0, "table_chunks": 0}
-
-    print(f"[RAG] Embedding {len(all_chunks)} chunks ({len(text_chunks)} text + {len(table_chunks)} table)...")
+    print(f"[RAG] Embedding {len(text_chunks)} text chunks...")
     embed_start = time.time()
-    embeddings = model_manager.encode(all_chunks).tolist()
+    embeddings = model_manager.encode(text_chunks).tolist()
     embed_time = time.time() - embed_start
     print(f"[RAG] Embedding completed in {embed_time:.2f}s")
 
     # Batch insert to handle large documents (ChromaDB has ~5461 limit per add())
     db_start = time.time()
-    total_chunks = len(all_chunks)
+    total_chunks = len(text_chunks)
     
     if total_chunks <= CHROMA_BATCH_SIZE:
         # Single batch insert
         collection.add(
-            documents=all_chunks,
+            documents=text_chunks,
             embeddings=embeddings,
-            metadatas=all_metadatas,
-            ids=all_ids
+            metadatas=metadatas,
+            ids=ids
         )
-        print(f"[RAG] Inserted {total_chunks} chunks in single batch")
+        print(f"[RAG] Inserted {total_chunks} text chunks in single batch")
     else:
         # Multiple batch inserts
         for i in range(0, total_chunks, CHROMA_BATCH_SIZE):
             end_idx = min(i + CHROMA_BATCH_SIZE, total_chunks)
-            batch_docs = all_chunks[i:end_idx]
+            batch_docs = text_chunks[i:end_idx]
             batch_embeds = embeddings[i:end_idx]
-            batch_metas = all_metadatas[i:end_idx]
-            batch_ids = all_ids[i:end_idx]
+            batch_metas = metadatas[i:end_idx]
+            batch_ids = ids[i:end_idx]
             
             collection.add(
                 documents=batch_docs,
@@ -433,7 +655,60 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
     print("[RAG] Added to Vector DB successfully.")
     print(f"[RESOURCE] Total Time: {end_time - start_time:.2f}s | Embedding: {embed_time:.2f}s | DB Insert: {db_time:.2f}s")
     print(f"[RESOURCE] Memory: {start_memory:.1f}MB → {end_memory:.1f}MB (Δ{end_memory - start_memory:+.1f}MB) | CPU: {end_cpu:.1f}%")
-    return {"text_chunks": len(text_chunks), "table_chunks": len(table_chunks)}
+    print(f"[RAG] Stored {len(text_chunks)} text chunks in ChromaDB and {table_count} tables in tables.db")
+    return {"text_chunks": len(text_chunks), "table_chunks": table_count}
+
+
+def detect_table_query_intent(query_text):
+    """
+    Detect if query is asking for table/spec/numeric data.
+    Returns True if table lookup should be prioritized.
+    """
+    query_lower = query_text.lower()
+    
+    # Keywords that strongly indicate table lookup
+    table_keywords = [
+        'table', 'specification', 'spec', 'parameter', 'value', 'property',
+        'attribute', 'dimension', 'measurement', 'characteristic', 'feature',
+        'configuration', 'setting', 'rating', 'capacity', 'range', 'limit',
+        'requirement', 'criteria', 'threshold', 'tolerance', 'standard',
+        'available', 'availability', 'stock', 'part', 'nsn', 'model', 'code',
+        'number', 'serial', 'item', 'component', 'product'
+    ]
+    
+    # Question patterns for data lookup
+    data_patterns = [
+        r'what\s+(is|are)\s+the\s+\w+',
+        r'how\s+much',
+        r'how\s+many',
+        r'show\s+me',
+        r'list\s+the',
+        r'find\s+the',
+        r'get\s+the',
+        r'is\s+it\s+available',
+        r'is\s+there',
+        r'do\s+you\s+have'
+    ]
+    
+    # Part number / alphanumeric code patterns (e.g., 410A223100000, ABC-123-XYZ)
+    code_patterns = [
+        r'\b\d{5,}\b',  # Long numeric codes (5+ digits)
+        r'\b[A-Z0-9]{6,}\b',  # Alphanumeric codes (6+ chars)
+        r'\b\d+[A-Z]+\d+\b',  # Mixed digit-letter-digit
+        r'\b[A-Z]+\d+[A-Z]*\d*\b',  # Letter-digit combinations
+        r'\b\w+[-_]\w+[-_]\w+\b'  # Hyphen/underscore separated codes
+    ]
+    
+    has_table_keyword = any(kw in query_lower for kw in table_keywords)
+    has_data_pattern = any(re.search(pattern, query_lower) for pattern in data_patterns)
+    has_code_pattern = any(re.search(pattern, query_text, re.IGNORECASE) for pattern in code_patterns)
+    
+    is_table_query = has_table_keyword or has_data_pattern or has_code_pattern
+    
+    if has_code_pattern:
+        print(f"[RAG] Detected code/part number pattern in query - triggering table search")
+    
+    return is_table_query
 
 
 def extract_file_filter(query_text):
@@ -449,6 +724,78 @@ def extract_file_filter(query_text):
     filename = match.group(1).strip()
     cleaned_query = query_text.replace(f"@{filename}", "").strip()
     return cleaned_query, filename
+
+
+def search_tables_directly(query_text, thread_id, file_filter=None):
+    """
+    Simple SQL-based table search - returns ALL matching tables without limits.
+    Each table is stored as a complete unit, no chunking or reranking.
+    """
+    from .models import ExtractedTable
+    from django.db.models import Q
+    
+    print(f"\n[DEBUG-SQL-SEARCH] === search_tables_directly() ===")
+    
+    # Extract keywords and potential codes from query
+    # Split on whitespace and filter out very short words
+    tokens = query_text.split()
+    keywords = [w.lower() for w in tokens if len(w) > 3]
+    
+    # Also extract potential part numbers/codes (alphanumeric, 5+ chars)
+    codes = [w for w in tokens if len(w) >= 5 and any(c.isalnum() for c in w)]
+    
+    print(f"[DEBUG-SQL-SEARCH] Keywords: {keywords}")
+    print(f"[DEBUG-SQL-SEARCH] Codes: {codes}")
+    
+    # Build base filter
+    base_query = ExtractedTable.objects.filter(thread_id=thread_id)
+    if file_filter:
+        base_query = base_query.filter(source=file_filter)
+        print(f"[DEBUG-SQL-SEARCH] File Filter: {file_filter}")
+    
+    # Build search query - prioritize exact matches for codes
+    if codes or keywords:
+        q_objects = Q()
+        
+        # Priority 1: Exact code matches (case-insensitive)
+        for code in codes:
+            q_objects |= Q(searchable_text__icontains=code)
+            print(f"[DEBUG-SQL-SEARCH] Searching for code: {code}")
+        
+        # Priority 2: Keyword matches
+        for keyword in keywords:
+            q_objects |= Q(searchable_text__icontains=keyword)
+        
+        tables = base_query.filter(q_objects).distinct()
+    else:
+        tables = base_query.all()
+    
+    print(f"[DEBUG-SQL-SEARCH] Found {tables.count()} matching tables")
+    
+    # Convert to dict format
+    results = []
+    for table in tables:
+        result = table.to_dict()
+        result['source_type'] = 'sql_search'
+        results.append(result)
+        print(f"[DEBUG-SQL-SEARCH]   {table.id} | {table.source} | Page {table.page}")
+    
+    return results
+    for row in rows:
+        results.append({
+            "id": row[0],
+            "source": row[1],
+            "page": row[2],
+            "table_index": row[3],
+            "headers": json.loads(row[4]) if row[4] else [],
+            "row_count": row[5],
+            "column_count": row[6],
+            "data": json.loads(row[7]),
+            "table_type": row[8],
+            "source_type": "sql_search"
+        })
+    
+    return results
 
 # ---------------- QUERY RAG ----------------
 def query_rag(query_text, current_thread_id, parent_thread_id=None):
@@ -479,6 +826,10 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
 
     if file_filter:
         print(f"[RAG] File scoped query detected: {file_filter}")
+    
+    # --- QUERY INTENT DETECTION ---
+    is_table_query = detect_table_query_intent(query_text)
+    print(f"[RAG] Table query intent: {is_table_query}")
 
     # --- ACCESS CONTROL ---
     if parent_thread_id:
@@ -507,6 +858,10 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
     embed_time = time.time() - embed_start
     
     search_start = time.time()
+    print(f"\n[DEBUG-RETRIEVAL] Vector Search Starting...")
+    print(f"[DEBUG-RETRIEVAL] Filter: {where_filter}")
+    print(f"[DEBUG-RETRIEVAL] Candidate K: {CANDIDATE_K}")
+    
     results = collection.query(
         query_embeddings=query_vec,
         n_results=CANDIDATE_K,
@@ -521,6 +876,10 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
     print(f"[RAG] Retrieved {len(docs)} candidate chunks in {search_time:.3f}s")
     print(f"[RAG] Query embedding time: {embed_time:.3f}s")
     print("Distances:", dists)
+    print(f"\n[DEBUG-RETRIEVAL] ChromaDB Results:")
+    for i, (doc, meta, dist) in enumerate(zip(docs, metas, dists)):
+        print(f"  [{i}] Distance: {dist:.4f} | Source: {meta.get('source', 'N/A')} | Page: {meta.get('page', 'N/A')} | Type: {meta.get('type', 'text')}")
+        print(f"      Preview: {doc[:100]}...")
 
   
     # MAX_DISTANCE_THRESHOLD = 2.0 if file_filter else 1.0
@@ -535,25 +894,41 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
     # sort by best match (lowest distance first)
 
     # --- DISTANCE-BASED FILTERING (adaptive & file-safe) ---
+    print(f"\n[DEBUG-RETRIEVAL] Distance Filtering Starting...")
     filtered_chunks = []
     if dists:
         best_distance = dists[0]  # Chroma returns sorted distances
         RELATIVE_MARGIN = 0.35 if file_filter else 0.25
         MAX_ABSOLUTE_CAP = 2.2 if file_filter else 1.2
-        for doc, meta, dist in zip(docs, metas, dists):
-            if (
+        print(f"[DEBUG-RETRIEVAL] Best Distance: {best_distance:.4f}")
+        print(f"[DEBUG-RETRIEVAL] Relative Margin: {RELATIVE_MARGIN}")
+        print(f"[DEBUG-RETRIEVAL] Absolute Cap: {MAX_ABSOLUTE_CAP}")
+        print(f"[DEBUG-RETRIEVAL] Threshold: {best_distance * (1 + RELATIVE_MARGIN):.4f}")
+        
+        for idx, (doc, meta, dist) in enumerate(zip(docs, metas, dists)):
+            passed = (
                 dist <= best_distance * (1 + RELATIVE_MARGIN)
                 and dist <= MAX_ABSOLUTE_CAP
-        ):
+            )
+            print(f"[DEBUG-RETRIEVAL]   Chunk {idx}: dist={dist:.4f} | passed={passed}")
+            if passed:
                 filtered_chunks.append((doc, meta, dist))
 
-# Fallback: never allow empty context if results exist
+# Fallback: always ensure at least 1 chunk if any results exist
     if not filtered_chunks and docs:
-        filtered_chunks = list(zip(docs, metas, dists))[:2]
+        print(f"[DEBUG-RETRIEVAL] No chunks passed filter, using fallback (1 chunk)")
+        filtered_chunks = list(zip(docs, metas, dists))[:1]  # At least 1 chunk
 
     filtered_chunks.sort(key=lambda x: x[2])
     final_chunks = filtered_chunks[:MAX_FINAL_CHUNKS]
+    
+    # Ensure at least 1 chunk if any documents were retrieved
+    if not final_chunks and docs:
+        print(f"[DEBUG-RETRIEVAL] Empty final_chunks, using fallback (1 chunk)")
+        final_chunks = list(zip(docs, metas, dists))[:1]
+    
     print(f"[RAG] Final chunks after filtering: {len(final_chunks)}")
+    print(f"[DEBUG-RETRIEVAL] Final Chunk IDs: {[meta.get('source', 'N/A') + ':' + str(meta.get('page', 'N/A')) for _, meta, _ in final_chunks]}")
 
     # --- GUARDRAIL ---
     if len(final_chunks) < 1:
@@ -579,14 +954,88 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
         used_docs.append(doc)
         
         # Store chunk with metadata for frontend
-        chunks_with_metadata.append({
+        chunk_info = {
             "text": doc,
             "source": meta['source'],
             "page": meta['page'],
-            "similarity_score": round(float(1 - sim), 3)  # Convert to Python float for JSON
-        })
+            "similarity_score": round(float(1 - sim), 3),
+            "type": "text"
+        }
+        
+        chunks_with_metadata.append(chunk_info)
+    
+    # --- DUAL RETRIEVAL STRATEGY ---
+    
+    # SQL table search for table queries
+    print(f"\n[DEBUG-RETRIEVAL] === SQL TABLE SEARCH ===")
+    print(f"[DEBUG-RETRIEVAL] Is Table Query: {is_table_query}")
+    sql_tables = []
+    if is_table_query:
+        print("[RAG] Executing SQL table search...")
+        print(f"[DEBUG-RETRIEVAL] Query Text: '{query_text}'")
+        print(f"[DEBUG-RETRIEVAL] Thread ID: {current_thread_id}")
+        print(f"[DEBUG-RETRIEVAL] File Filter: {file_filter}")
+        sql_tables = search_tables_directly(query_text, current_thread_id, file_filter)
+        print(f"[RAG] Found {len(sql_tables)} tables via SQL search")
+    
+    # Add ALL SQL tables to response (no limits, no reranking)
+    print(f"\n[DEBUG-RETRIEVAL] === ADDING SQL TABLES ===")
+    print(f"[DEBUG-RETRIEVAL] Total Tables: {len(sql_tables)}")
+    
+    for idx, table in enumerate(sql_tables):
+        table_info = {
+            "type": "table",
+            "table_id": table['id'],
+            "source": table['source'],
+            "page": table['page'],
+            "table_index": table['table_index'],
+            "table_data": {
+                "headers": table['headers'],
+                "row_count": table['row_count'],
+                "column_count": table['column_count'],
+                "data": table['data']
+            },
+            "table_type": table.get('table_type', 'unknown'),
+            "has_structured_data": True,
+            "similarity_score": 0.0,
+            "retrieval_source": table.get('source_type', 'unknown')
+        }
+        chunks_with_metadata.append(table_info)
+        print(f"[DEBUG-RETRIEVAL]   [{idx+1}] {table['id']}: {table['row_count']}x{table['column_count']} | {table.get('table_type')}")
 
-    # --- LLM CALL ---
+    # --- EARLY RETURN FOR SQL TABLE HITS ---
+    # If SQL search found tables, return immediately without LLM processing
+    if sql_tables:
+        print(f"\n[RAG] SQL table search found {len(sql_tables)} results - returning direct answer")
+        
+        # Build simple location response for ALL matches
+        table_locations = []
+        for table in sql_tables:
+            location = f"{table['source']} (Page {table['page']}, Table {table['table_index']})"
+            table_locations.append(location)
+        
+        location_text = "\n".join(f"• {loc}" for loc in table_locations)
+        
+        answer = f"**Yes** - Found in {len(sql_tables)} table(s):\n\n{location_text}"
+        
+        total_time = time.time() - start_time
+        end_memory = process.memory_info().rss / 1024 / 1024
+        
+        print(f"[RAG] Direct table answer returned in {total_time:.2f}s")
+        print(f"[RAG] Memory: {start_memory:.1f}MB → {end_memory:.1f}MB")
+        
+        return {
+            "answer": answer,
+            "sources": list(set(sources + table_locations)),
+            "chunks": chunks_with_metadata,
+            "confidence": 100.0,
+            "confidence_label": "EXACT_MATCH",
+            "retrieval_type": "sql_direct",
+            "table_count": len(sql_tables)
+        }
+
+    # --- LLM CALL (for ChromaDB text results only) ---
+    print(f"\n[RAG] Processing ChromaDB results with LLM evaluation...")
     system_prompt = """You are a precise and helpful document assistant.
 
 INSTRUCTIONS:
@@ -664,7 +1113,8 @@ INSTRUCTIONS:
             "sources": list(set(sources)),
             "chunks": chunks_with_metadata,
             "confidence": round(confidence, 1),
-            "confidence_label": label
+            "confidence_label": label,
+            "retrieval_type": "vector_semantic"
         }
 
     except Exception as e:
@@ -673,7 +1123,8 @@ INSTRUCTIONS:
             "sources": [],
             "chunks": [],
             "confidence": 0,
-            "confidence_label": "ERROR"
+            "confidence_label": "ERROR",
+            "retrieval_type": "error"
         }
 
 
@@ -693,7 +1144,11 @@ def delete_from_chroma(doc_id=None, thread_id=None):
         where_filter["thread_id"] = str(thread_id)
 
     try:
+        # Delete from ChromaDB
         collection.delete(where=where_filter)
+        
+        # Delete from tables.db
+        delete_tables(doc_id=doc_id, thread_id=thread_id)
         
         end_time = time.time()
         end_memory = process.memory_info().rss / 1024 / 1024  # MB
