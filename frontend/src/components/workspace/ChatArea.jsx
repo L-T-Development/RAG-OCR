@@ -31,12 +31,12 @@ function ConfidenceRing({ confidence, label }) {
   }
   // Clamp to 0-100 range
   score = Math.max(0, Math.min(100, score));
-  
+
   // SVG circle parameters
   const radius = 18;
   const circumference = 2 * Math.PI * radius;
   const strokeDashoffset = circumference - (score / 100) * circumference;
-  
+
   // Color based on confidence level
   const getColor = (score) => {
     if (score >= 70) return 'var(--color-success)';
@@ -82,14 +82,14 @@ function ConfidenceRing({ confidence, label }) {
 // Sources Panel Component
 function SourcesPanel({ sources, chunks }) {
   const [isExpanded, setIsExpanded] = useState(false);
-  
+
   if ((!sources || sources.length === 0) && (!chunks || chunks.length === 0)) {
     return null;
   }
 
   return (
     <div className={`sources-panel ${isExpanded ? 'sources-panel--expanded' : ''}`}>
-      <button 
+      <button
         className="sources-panel__toggle"
         onClick={() => setIsExpanded(!isExpanded)}
       >
@@ -97,7 +97,7 @@ function SourcesPanel({ sources, chunks }) {
         <span>Sources ({sources?.length || 0})</span>
         {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
       </button>
-      
+
       {isExpanded && (
         <div className="sources-panel__content">
           {sources && sources.length > 0 && (
@@ -113,7 +113,7 @@ function SourcesPanel({ sources, chunks }) {
               </div>
             </div>
           )}
-          
+
           {chunks && chunks.length > 0 && (
             <div className="sources-panel__section">
               <div className="sources-panel__section-title">Relevant Passages</div>
@@ -129,8 +129,8 @@ function SourcesPanel({ sources, chunks }) {
                       )}
                     </div>
                     <p className="sources-panel__chunk-text">
-                      {typeof chunk === 'string' 
-                        ? chunk.slice(0, 200) 
+                      {typeof chunk === 'string'
+                        ? chunk.slice(0, 200)
                         : (chunk.text || chunk.content || '').slice(0, 200)}
                       {(typeof chunk === 'string' ? chunk.length : (chunk.text || chunk.content || '').length) > 200 && '...'}
                     </p>
@@ -155,13 +155,13 @@ function Message({ message, isUser }) {
     const contentLength = (message.content || '').length;
     const sourceCount = (message.sources || []).length;
     const chunkCount = (message.chunks || []).length;
-    
+
     let score = 0.3; // Base confidence
     if (contentLength > 100) score += 0.2;
     if (contentLength > 300) score += 0.1;
     if (sourceCount > 0) score += 0.2;
     if (chunkCount > 0) score += 0.2;
-    
+
     return Math.min(score, 1);
   };
 
@@ -182,25 +182,25 @@ function Message({ message, isUser }) {
             </div>
           )}
         </div>
-        
+
         {/* Sources Panel - Only for assistant messages */}
         {!isUser && (
-          <SourcesPanel 
-            sources={message.sources} 
+          <SourcesPanel
+            sources={message.sources}
             chunks={message.chunks}
           />
         )}
-        
+
         <div className="message__meta">
           <span>{message.timestamp || 'Just now'}</span>
         </div>
       </div>
-      
+
       {/* Confidence Ring - Only for assistant messages */}
       {!isUser && (
         <div className="message__confidence">
-          <ConfidenceRing 
-            confidence={getConfidence()} 
+          <ConfidenceRing
+            confidence={getConfidence()}
             label={message.confidence_label}
           />
         </div>
@@ -241,7 +241,7 @@ function EmptyChat({ onSuggestionClick }) {
       </div>
       <h2 className="chat-area__empty-title">Start a conversation</h2>
       <p className="chat-area__empty-text">
-        Upload a PDF document and ask questions about its content. 
+        Upload a PDF document and ask questions about its content.
         The AI will analyze and provide answers based on the document.
       </p>
       <div className="chat-area__empty-suggestions">
@@ -276,6 +276,7 @@ export function ChatArea({
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [showFilePicker, setShowFilePicker] = useState(false);
   const [fileFilterText, setFileFilterText] = useState('');
+  const [selectedIndex, setSelectedIndex] = useState(0);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
 
@@ -296,7 +297,7 @@ export function ChatArea({
   const handleInputChange = (e) => {
     const value = e.target.value;
     setInputValue(value);
-    
+
     // Check for @ trigger
     const lastAtPos = value.lastIndexOf('@');
     if (lastAtPos !== -1 && (lastAtPos === 0 || value[lastAtPos - 1] === ' ')) {
@@ -304,6 +305,7 @@ export function ChatArea({
       if (!filterText.includes(' ')) {
         setFileFilterText(filterText);
         setShowFilePicker(true);
+        setSelectedIndex(0);
         return;
       }
     }
@@ -311,7 +313,7 @@ export function ChatArea({
   };
 
   // Filter documents based on @ search
-  const filteredDocs = documents.filter(doc => 
+  const filteredDocs = documents.filter(doc =>
     doc.name.toLowerCase().includes(fileFilterText.toLowerCase())
   );
 
@@ -321,7 +323,7 @@ export function ChatArea({
     if (!selectedFiles.find(f => f.id === doc.id)) {
       setSelectedFiles(prev => [...prev, doc]);
     }
-    
+
     // Remove @ and filter text from input
     const lastAtPos = inputValue.lastIndexOf('@');
     const newValue = inputValue.slice(0, lastAtPos).trimEnd();
@@ -339,7 +341,7 @@ export function ChatArea({
   const handleSubmit = (e) => {
     e?.preventDefault();
     if (!inputValue.trim() || isLoading || disabled) return;
-    
+
     // Build query with @filename tags for selected files
     // Backend expects @filename.pdf in the query text itself
     let query = inputValue.trim();
@@ -347,11 +349,11 @@ export function ChatArea({
       const fileTags = selectedFiles.map(f => `@${f.name}`).join(' ');
       query = `${fileTags} ${query}`;
     }
-    
+
     onSendMessage(query);
     setInputValue('');
     setSelectedFiles([]);
-    
+
     // Reset textarea height
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
@@ -359,6 +361,29 @@ export function ChatArea({
   };
 
   const handleKeyDown = (e) => {
+    // Handle @ File Picker Navigation
+    if (showFilePicker && filteredDocs.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSelectedIndex(prev => (prev + 1) % filteredDocs.length);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSelectedIndex(prev => (prev - 1 + filteredDocs.length) % filteredDocs.length);
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleSelectFile(filteredDocs[selectedIndex]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        setShowFilePicker(false);
+        return;
+      }
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
@@ -446,7 +471,7 @@ export function ChatArea({
               <span key={file.id} className="chat-area__selected-file">
                 <FileText size={12} />
                 {file.name}
-                <button 
+                <button
                   className="chat-area__selected-file-remove"
                   onClick={() => handleRemoveFile(file.id)}
                 >
@@ -466,10 +491,10 @@ export function ChatArea({
             </div>
             <div className="chat-area__file-picker-list">
               {filteredDocs.length > 0 ? (
-                filteredDocs.map(doc => (
+                filteredDocs.map((doc, idx) => (
                   <button
                     key={doc.id}
-                    className="chat-area__file-picker-item"
+                    className={`chat-area__file-picker-item ${idx === selectedIndex ? 'selected' : ''}`}
                     onClick={() => handleSelectFile(doc)}
                   >
                     <FileText size={14} />
@@ -525,6 +550,9 @@ export function ChatArea({
         </form>
         <p className="chat-area__input-hint">
           Press Enter to send • @ to mention a document • Shift+Enter for new line
+        </p>
+        <p className="chat-area__footer-branding">
+          Developed by L&T with Mag13
         </p>
       </div>
     </div>
