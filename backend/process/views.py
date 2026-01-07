@@ -5,9 +5,10 @@ from django.db.models import Q
 from .models import Thread, Document, ChatMessage, AppConfig
 from django.views.decorators.http import require_http_methods
 from .rag_engine import (
-    process_pdf, query_rag, delete_from_chroma, summarize_document, 
-    get_thread_documents_summary, get_model_status, configure_model_path, 
-    validate_model_path, extract_pdf_title
+    process_pdf, query_rag, delete_from_chroma, summarize_document,
+    get_thread_documents_summary, get_model_status, configure_model_path,
+    validate_model_path, extract_pdf_title, get_llm_models_list,
+    get_current_llm_model, set_llm_model
 )
 import json
 import os
@@ -71,7 +72,7 @@ def upload_file(request, thread_id):
     if request.method == 'POST' and request.FILES.get('file'):
         thread = get_object_or_404(Thread, id=thread_id)
         uploaded_file = request.FILES['file']
-        
+
         # 1. Save to SQL Database (Django)
         doc = Document.objects.create(
             thread=thread,
@@ -83,16 +84,16 @@ def upload_file(request, thread_id):
         try:
             # We need the parent ID to tag the vector for access control
             p_id = thread.parent.id if thread.parent else None
-            
+
             chunk_count = process_pdf(
-                file_path=doc.file.path, 
-                doc_id=doc.id, 
+                file_path=doc.file.path,
+                doc_id=doc.id,
                 thread_id=thread.id,
                 parent_id=p_id,
                 filename=doc.filename
             )
             return JsonResponse({
-                'message': 'File uploaded and vectorized successfully', 
+                'message': 'File uploaded and vectorized successfully',
                 'filename': doc.filename,
                 'chunk_count': chunk_count
             })
@@ -111,13 +112,13 @@ def get_thread_files(request, thread_id):
         docs = Document.objects.filter(thread=current_thread).order_by('-uploaded_at')
 
     file_list = [{
-        'id': str(d.id), 
-        'name': d.filename, 
-        'url': d.file.url, 
+        'id': str(d.id),
+        'name': d.filename,
+        'url': d.file.url,
         'is_inherited': d.thread.id != current_thread.id,
         'source_thread': d.thread.name
     } for d in docs]
-    
+
     return JsonResponse({'files': file_list, 'thread_name': current_thread.name})
 
 
@@ -130,39 +131,39 @@ def quick_upload(request):
     """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST method required'}, status=405)
-    
+
     if not request.FILES.get('file'):
         return JsonResponse({'error': 'No file sent'}, status=400)
-    
+
     uploaded_file = request.FILES['file']
-    
+
     # Check if it's a PDF
     if not uploaded_file.name.lower().endswith('.pdf'):
         return JsonResponse({'error': 'Only PDF files are supported'}, status=400)
-    
+
     try:
         # Save file temporarily to extract title
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
             for chunk in uploaded_file.chunks():
                 tmp.write(chunk)
             tmp_path = tmp.name
-        
+
         # Extract title for thread name
         thread_name = extract_pdf_title(tmp_path)
-        
+
         # Create the thread
         thread = Thread.objects.create(name=thread_name, parent=None)
-        
+
         # Reset file position for upload
         uploaded_file.seek(0)
-        
+
         # Create document record
         doc = Document.objects.create(
             thread=thread,
             file=uploaded_file,
             filename=uploaded_file.name
         )
-        
+
         # Process the PDF (vectorize it)
         result = process_pdf(
             file_path=doc.file.path,
@@ -171,14 +172,14 @@ def quick_upload(request):
             parent_id=None,
             filename=doc.filename
         )
-        
+
         # Mark as processed
         doc.is_processed = True
         doc.save()
-        
+
         # Clean up temp file
         os.unlink(tmp_path)
-        
+
         return JsonResponse({
             'thread': {
                 'id': str(thread.id),
@@ -192,7 +193,7 @@ def quick_upload(request):
             },
             'chunks': result if isinstance(result, dict) else {'text_chunks': result, 'table_chunks': 0}
         })
-        
+
     except Exception as e:
         # Clean up temp file on error
         if 'tmp_path' in locals():
@@ -250,7 +251,7 @@ def chat_thread(request, thread_id):
                 confidence=confidence,
                 confidence_label=confidence_label
             )
-           
+
             # Ensure all data is JSON serializable
             response_data = {
                 "answer": answer,
@@ -299,7 +300,7 @@ def get_chat_history(request, thread_id):
 def delete_thread(request, thread_id):
     try:
         thread = get_object_or_404(Thread, id=thread_id)
-        
+
         # 1. Collect all threads to be deleted (including self and children)
         def get_all_descendant_ids(t):
             ids = [t.id]
@@ -308,7 +309,7 @@ def delete_thread(request, thread_id):
             return ids
 
         all_thread_ids = get_all_descendant_ids(thread)
-        
+
         # 2. Delete all PDF files from disk for documents in these threads
         from .models import Document
         docs_to_delete = Document.objects.filter(thread_id__in=all_thread_ids)
@@ -321,16 +322,16 @@ def delete_thread(request, thread_id):
                     deleted_files.append(file_path)
                 except Exception as file_err:
                     print(f"[DELETE] Warning: Could not delete file {doc.filename}: {file_err}")
-        
+
         print(f"[DELETE] Deleted {len(deleted_files)} PDF files from disk")
-        
+
         # 3. Delete from Chroma for each thread
         for t_id in all_thread_ids:
             delete_from_chroma(thread_id=t_id)
 
         # 4. Delete from SQL (Cascade will handle children, documents, and chat messages)
         thread.delete()
-        
+
         return JsonResponse({
             'message': 'Thread and associated data deleted successfully',
             'deleted_files': len(deleted_files),
@@ -347,11 +348,11 @@ def delete_document(request, doc_id):
     try:
         doc = get_object_or_404(Document, id=doc_id)
         filename = doc.filename
-        
+
         # 1. Delete from Chroma (vector database)
         delete_from_chroma(doc_id=doc.id)
         print(f"[DELETE] Removed document {filename} from Chroma")
-        
+
         # 2. Delete file from disk
         if doc.file:
             try:
@@ -360,11 +361,11 @@ def delete_document(request, doc_id):
                 print(f"[DELETE] Deleted file from disk: {file_path}")
             except Exception as file_err:
                 print(f"[DELETE] Warning: Could not delete file: {file_err}")
-        
+
         # 3. Delete from SQL database
         doc.delete()
         print(f"[DELETE] Removed document {filename} from database")
-        
+
         return JsonResponse({
             'message': 'Document deleted successfully',
             'filename': filename
@@ -373,8 +374,8 @@ def delete_document(request, doc_id):
         import traceback
         traceback.print_exc()
         return JsonResponse({'error': f'Delete failed: {str(e)}'}, status=500)
-    
-#comparison 
+
+#comparison
 @csrf_exempt
 def compare_documents(request):
     """
@@ -383,14 +384,14 @@ def compare_documents(request):
     """
     print("\n" + "="*60)
     print("[COMPARE] Document comparison request received")
-    
+
     if request.method != "POST":
         print("[COMPARE] ERROR: Invalid method:", request.method)
         return JsonResponse({"error": "POST method required"}, status=405)
 
     old_file = request.FILES.get("old_file")
     new_file = request.FILES.get("new_file")
-    
+
     print(f"[COMPARE] Old file: {old_file.name if old_file else 'None'}")
     print(f"[COMPARE] New file: {new_file.name if new_file else 'None'}")
 
@@ -400,13 +401,13 @@ def compare_documents(request):
 
     old_ext = os.path.splitext(old_file.name)[1].lower()
     new_ext = os.path.splitext(new_file.name)[1].lower()
-    
+
     print(f"[COMPARE] File extensions: {old_ext} vs {new_ext}")
 
     if old_ext != new_ext:
         print("[COMPARE] ERROR: Extension mismatch")
         return JsonResponse({"error": "Files must be of same type"}, status=400)
-    
+
     # Validate file type
     supported_types = [".pdf", ".docx", ".xlsx"]
     if old_ext not in supported_types:
@@ -425,7 +426,7 @@ def compare_documents(request):
             f_new.write(new_file.read())
             new_path = f_new.name
             print(f"[COMPARE] New file saved to: {new_path}")
-        
+
         # Create background job and return immediately (KEY CHANGE - non-blocking!)
         job_id = create_comparison_job(
             old_path=old_path,
@@ -434,17 +435,17 @@ def compare_documents(request):
             new_filename=new_file.name,
             file_ext=old_ext
         )
-        
+
         print(f"[COMPARE] ✓ Job {job_id} created and submitted to background worker")
         print("="*60 + "\n")
-        
+
         # Return immediately with job identifier (HTTP 202 Accepted)
         return JsonResponse({
             "job_id": job_id,
             "status": "pending",
             "message": "Comparison job submitted. Use /api/compare/status/<job_id>/ to check progress."
         }, status=202)
-        
+
     except Exception as e:
         print(f"[COMPARE] ERROR: {type(e).__name__}: {str(e)}")
         import traceback
@@ -455,9 +456,9 @@ def compare_documents(request):
 def compare_status(request, job_id):
     """
     Check status of a background comparison job.
-    
+
     GET /api/compare/status/<job_id>/
-    
+
     Returns:
     - status: pending | processing | completed | failed
     - progress: 0-100
@@ -465,12 +466,12 @@ def compare_status(request, job_id):
     - error: error message (only when status=failed)
     """
     print(f"[COMPARE] Status check for job {job_id}")
-    
+
     job = get_comparison_status(job_id)
-    
+
     if not job:
         return JsonResponse({"error": "Job not found"}, status=404)
-    
+
     return JsonResponse(job)
 
 
@@ -481,28 +482,28 @@ def summarize_thread_documents(request, thread_id):
     """Generate an AI summary of all documents in a thread"""
     if request.method != "GET":
         return JsonResponse({"error": "GET method required"}, status=405)
-    
+
     print(f"\n[API] Summarize thread documents: {thread_id}")
-    
+
     try:
         thread = get_object_or_404(Thread, id=thread_id)
-        
+
         # Get document names from DB
         documents = Document.objects.filter(thread=thread)
         doc_names = [doc.filename for doc in documents]
-        
+
         result = summarize_document(thread_id=thread.id)
-        
+
         if "error" in result:
             return JsonResponse(result, status=500)
-        
+
         # Add extra info
         result["documents"] = doc_names
         result["documents_count"] = len(doc_names)
         result["total_chunks"] = result.get("chunk_count", 0)
-        
+
         return JsonResponse(result)
-        
+
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
 
@@ -512,19 +513,19 @@ def summarize_single_document(request, doc_id):
     """Generate an AI summary of a specific document"""
     if request.method != "GET":
         return JsonResponse({"error": "GET method required"}, status=405)
-    
+
     print(f"\n[API] Summarize single document: {doc_id}")
-    
+
     try:
         doc = get_object_or_404(Document, id=doc_id)
         result = summarize_document(doc_id=doc.id)
-        
+
         if "error" in result:
             return JsonResponse(result, status=500)
-        
+
         result["filename"] = doc.filename
         return JsonResponse(result)
-        
+
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
 
@@ -533,17 +534,17 @@ def get_thread_info(request, thread_id):
     """Get metadata about documents in a thread (no LLM call)"""
     if request.method != "GET":
         return JsonResponse({"error": "GET method required"}, status=405)
-    
+
     try:
         thread = get_object_or_404(Thread, id=thread_id)
         result = get_thread_documents_summary(thread.id)
-        
+
         if "error" in result:
             return JsonResponse(result, status=500)
-        
+
         result["thread_name"] = thread.name
         return JsonResponse(result)
-        
+
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
 
@@ -555,7 +556,7 @@ def model_status(request):
     """Get current embedding model status"""
     if request.method != "GET":
         return JsonResponse({"error": "GET method required"}, status=405)
-    
+
     try:
         status = get_model_status()
         # Also get saved path from DB
@@ -571,20 +572,20 @@ def model_configure(request):
     """Configure the embedding model path"""
     if request.method != "POST":
         return JsonResponse({"error": "POST method required"}, status=405)
-    
+
     try:
         data = json.loads(request.body)
         path = data.get('path', '').strip()
-        
+
         if not path:
             return JsonResponse({"error": "Model path is required"}, status=400)
-        
+
         # Normalize path (handle both forward and back slashes)
         path = os.path.normpath(path)
-        
+
         # Configure and load the model
         result = configure_model_path(path)
-        
+
         if result.get('success'):
             return JsonResponse({
                 "message": "Model configured successfully",
@@ -595,32 +596,32 @@ def model_configure(request):
                 "error": result.get('error', 'Unknown error'),
                 "status": result.get('status', {})
             }, status=400)
-            
+
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
 
 
-@csrf_exempt  
+@csrf_exempt
 def model_validate(request):
     """Validate a model path without loading it"""
     if request.method != "POST":
         return JsonResponse({"error": "POST method required"}, status=405)
-    
+
     try:
         data = json.loads(request.body)
         path = data.get('path', '').strip()
-        
+
         if not path:
             return JsonResponse({"valid": False, "error": "Path is required"})
-        
+
         # Normalize path
         path = os.path.normpath(path)
-        
+
         result = validate_model_path(path)
         return JsonResponse(result)
-        
+
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
@@ -632,10 +633,61 @@ def get_app_config(request):
     """Get all app configuration values"""
     if request.method != "GET":
         return JsonResponse({"error": "GET method required"}, status=405)
-    
+
     try:
         configs = AppConfig.objects.all()
         config_dict = {c.key: c.value for c in configs}
         return JsonResponse({"config": config_dict})
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+# ==================== LLM MODEL SELECTION ENDPOINTS ====================
+
+@csrf_exempt
+def llm_models_list(request):
+    """Get list of available LLM models"""
+    if request.method != "GET":
+        return JsonResponse({"error": "GET method required"}, status=405)
+
+    try:
+        models = get_llm_models_list()
+        current_model = get_current_llm_model()
+        return JsonResponse({
+            "models": models,
+            "current": current_model
+        })
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+def llm_model_select(request):
+    """Select/switch the LLM model"""
+    if request.method != "POST":
+        return JsonResponse({"error": "POST method required"}, status=405)
+
+    try:
+        data = json.loads(request.body)
+        model_id = data.get('model', '').strip()
+
+        if not model_id:
+            return JsonResponse({"error": "Model ID is required"}, status=400)
+
+        result = set_llm_model(model_id)
+
+        if result.get('success'):
+            return JsonResponse({
+                "message": "LLM model switched successfully",
+                "model": result.get('model'),
+                "models": get_llm_models_list()
+            })
+        else:
+            return JsonResponse({
+                "error": result.get('error', 'Unknown error')
+            }, status=400)
+
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)

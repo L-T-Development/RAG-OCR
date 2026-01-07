@@ -12,14 +12,14 @@ export const api = {
     const res = await fetch(`${API_BASE}/create-thread/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, parent_id: parentId })
+      body: JSON.stringify({ name, parent_id: parentId }),
     });
     return res.json();
   },
 
   async deleteThread(threadId) {
     const res = await fetch(`${API_BASE}/delete-thread/${threadId}/`, {
-      method: 'DELETE'
+      method: 'DELETE',
     });
     return { ok: res.ok, data: await res.json() };
   },
@@ -35,14 +35,14 @@ export const api = {
     formData.append('file', file);
     const res = await fetch(`${API_BASE}/upload/${threadId}/`, {
       method: 'POST',
-      body: formData
+      body: formData,
     });
     return { ok: res.ok, data: await res.json() };
   },
 
   async deleteDocument(docId) {
     const res = await fetch(`${API_BASE}/delete-document/${docId}/`, {
-      method: 'DELETE'
+      method: 'DELETE',
     });
     return { ok: res.ok, data: await res.json() };
   },
@@ -53,7 +53,7 @@ export const api = {
     formData.append('file', file);
     const res = await fetch(`${API_BASE}/quick-upload/`, {
       method: 'POST',
-      body: formData
+      body: formData,
     });
     return { ok: res.ok, data: await res.json() };
   },
@@ -69,7 +69,7 @@ export const api = {
     const res = await fetch(`${API_BASE}/chat/${threadId}/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query })
+      body: JSON.stringify({ query }),
     });
     return res.json();
   },
@@ -81,7 +81,7 @@ export const api = {
     formData.append('new_file', newFile);
     const res = await fetch(`${API_BASE}/compare-documents/`, {
       method: 'POST',
-      body: formData
+      body: formData,
     });
     return { ok: res.ok, data: await res.json() };
   },
@@ -117,7 +117,7 @@ export const api = {
     const res = await fetch(`${API_BASE}/model/configure/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path })
+      body: JSON.stringify({ path }),
     });
     return { ok: res.ok, data: await res.json() };
   },
@@ -126,7 +126,7 @@ export const api = {
     const res = await fetch(`${API_BASE}/model/validate/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path })
+      body: JSON.stringify({ path }),
     });
     return { ok: res.ok, data: await res.json() };
   },
@@ -134,5 +134,20 @@ export const api = {
   async getAppConfig() {
     const res = await fetch(`${API_BASE}/config/`);
     return { ok: res.ok, data: await res.json() };
-  }
+  },
+
+  // LLM Model Selection
+  async getLLMModels() {
+    const res = await fetch(`${API_BASE}/llm/models/`);
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  async selectLLMModel(modelId) {
+    const res = await fetch(`${API_BASE}/llm/select/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: modelId }),
+    });
+    return { ok: res.ok, data: await res.json() };
+  },
 };

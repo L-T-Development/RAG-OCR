@@ -27,7 +27,74 @@ from .eval_utils import (
 CHROMA_PATH = "./local_chroma_db"
 TABLES_DB_PATH = "./tables.db"
 OLLAMA_API = "http://localhost:11434/api/generate"
-LLM_MODEL = "llama3.1:8b"
+DEFAULT_LLM_MODEL = "llama3.1:8b"
+
+# Available LLM models configuration
+AVAILABLE_LLM_MODELS = {
+    "llama3.2:1b": {
+        "name": "Llama 3.2 1B",
+        "title": "Efficient",
+        "description": "Optimized for speed and low memory usage. Perfect for quick responses on limited hardware. Uses minimal resources while maintaining good quality output.",
+        "tier": "efficient"
+    },
+    "phi3:3.8b": {
+        "name": "Phi-3 3.8B",
+        "title": "Balanced",
+        "description": "Microsoft's powerful small model with excellent reasoning. Ideal balance of speed and accuracy for RAG tasks. Strong instruction-following capabilities.",
+        "tier": "balanced"
+    },
+    "llama3.1:8b": {
+        "name": "Llama 3.1 8B",
+        "title": "Performance (Best)",
+        "description": "Maximum accuracy and reasoning capability. Best for complex queries and detailed analysis. Recommended when quality is the top priority.",
+        "tier": "performance"
+    }
+}
+
+
+def get_current_llm_model():
+    """Get the currently configured LLM model from database or return default."""
+    try:
+        from .models import AppConfig
+        model = AppConfig.get_value('llm_model', DEFAULT_LLM_MODEL)
+        # Validate model exists in available models
+        if model not in AVAILABLE_LLM_MODELS:
+            return DEFAULT_LLM_MODEL
+        return model
+    except Exception as e:
+        print(f"[RAG] Could not read LLM model from DB: {e}")
+        return DEFAULT_LLM_MODEL
+
+
+def set_llm_model(model_name):
+    """Set the LLM model in database."""
+    try:
+        from .models import AppConfig
+        if model_name not in AVAILABLE_LLM_MODELS:
+            return {"success": False, "error": f"Invalid model: {model_name}"}
+        AppConfig.set_value('llm_model', model_name)
+        return {"success": True, "model": model_name}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def get_llm_models_list():
+    """Get list of available LLM models with their configurations."""
+    current_model = get_current_llm_model()
+    models = []
+    for model_id, config in AVAILABLE_LLM_MODELS.items():
+        models.append({
+            "id": model_id,
+            "name": config["name"],
+            "title": config["title"],
+            "description": config["description"],
+            "tier": config["tier"],
+            "selected": model_id == current_model
+        })
+    # Sort by tier: efficient -> balanced -> performance
+    tier_order = {"efficient": 0, "balanced": 1, "performance": 2}
+    models.sort(key=lambda x: tier_order.get(x["tier"], 99))
+    return models
 
 # Retrieval tuning (SAFE DEFAULTS)
 CANDIDATE_K = 10
@@ -1047,8 +1114,11 @@ INSTRUCTIONS:
 - Structure longer answers with bullet points for clarity
 """
 
+    current_llm = get_current_llm_model()
+    print(f"[RAG] Using LLM model: {current_llm}")
+
     payload = {
-        "model": LLM_MODEL,
+        "model": current_llm,
         "prompt": f"Context:\n{context_text}\nUser Query: {query_text}",
         "system": system_prompt,
         "stream": False,
@@ -1266,8 +1336,11 @@ FORMAT YOUR RESPONSE AS:
 [Concluding summary]
 """
 
+        current_llm = get_current_llm_model()
+        print(f"[SUMMARY] Using LLM model: {current_llm}")
+
         payload = {
-            "model": LLM_MODEL,
+            "model": current_llm,
             "prompt": f"Document Content ({len(max_input_chunks)} sections):\n{combined_text}\n\nPlease provide a {detail_level} summary:",
             "system": system_prompt,
             "stream": False,

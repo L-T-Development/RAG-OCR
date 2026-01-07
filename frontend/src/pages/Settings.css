@@ -295,3 +295,117 @@
   font-weight: 500;
   color: var(--color-text-primary);
 }
+
+/* LLM Model Selection */
+.llm-model-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--spacing-md);
+}
+
+@media (max-width: 768px) {
+  .llm-model-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.llm-model-card {
+  position: relative;
+  padding: var(--spacing-md);
+  background: var(--color-bg-secondary);
+  border: 2px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  text-align: left;
+  transition: all var(--transition-fast);
+}
+
+.llm-model-card:hover:not(.llm-model-card--disabled) {
+  border-color: var(--color-text-muted);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.llm-model-card--active {
+  border-color: var(--color-brand-primary);
+  background: var(--color-brand-primary-light);
+}
+
+.llm-model-card--disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.llm-model-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: var(--spacing-sm);
+}
+
+.llm-model-card__icon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+}
+
+.llm-model-card__icon--efficient {
+  background: linear-gradient(135deg, #10b981, #059669);
+}
+
+.llm-model-card__icon--balanced {
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+}
+
+.llm-model-card__icon--performance {
+  background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+}
+
+.llm-model-card__badge {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: var(--color-success);
+  color: white;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+}
+
+.llm-model-card__title {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin-bottom: 2px;
+}
+
+.llm-model-card__name {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  margin-bottom: var(--spacing-sm);
+}
+
+.llm-model-card__description {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.llm-model-card__loading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(255, 255, 255, 0.9);
+  padding: var(--spacing-md);
+  border-radius: var(--radius-md);
+}
+
+[data-theme='dark'] .llm-model-card__loading {
+  background: rgba(0, 0, 0, 0.7);
+}
