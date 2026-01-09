@@ -227,13 +227,6 @@ function LoadingMessage() {
 }
 
 function EmptyChat({ onSuggestionClick }) {
-  const suggestions = [
-    "Summarize this document",
-    "What are the key points?",
-    "Find specific information",
-    "Compare sections"
-  ];
-
   return (
     <div className="chat-area__empty">
       <div className="chat-area__empty-icon">
@@ -244,17 +237,6 @@ function EmptyChat({ onSuggestionClick }) {
         Upload a PDF document and ask questions about its content.
         The AI will analyze and provide answers based on the document.
       </p>
-      <div className="chat-area__empty-suggestions">
-        {suggestions.map((suggestion, idx) => (
-          <button
-            key={idx}
-            className="chat-area__suggestion"
-            onClick={() => onSuggestionClick(suggestion)}
-          >
-            {suggestion}
-          </button>
-        ))}
-      </div>
     </div>
   );
 }

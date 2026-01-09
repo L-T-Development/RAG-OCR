@@ -94,6 +94,38 @@
   color: var(--color-text-muted);
 }
 
+/* Upload Progress */
+.document-panel__progress {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-sm);
+}
+
+.document-panel__progress-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--color-bg-tertiary);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+
+.document-panel__progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--color-brand-primary), var(--color-brand-secondary));
+  border-radius: var(--radius-full);
+  transition: width 0.3s ease;
+  box-shadow: 0 0 10px rgba(20, 184, 166, 0.5);
+}
+
+.document-panel__progress-text {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--color-brand-primary);
+  min-width: 35px;
+  text-align: right;
+}
+
 /* Document List */
 .document-panel__list {
   flex: 1;

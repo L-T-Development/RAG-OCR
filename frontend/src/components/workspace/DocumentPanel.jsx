@@ -73,7 +73,9 @@ export function DocumentPanel({
   onDelete,
   onSummarize,
   disabled = false,
-  isUploading = false
+  isUploading = false,
+  uploadProgress = 0,
+  uploadStatus = ''
 }) {
   const fileInputRef = useRef(null);
 
@@ -109,11 +111,24 @@ export function DocumentPanel({
           disabled={disabled || isUploading}
         >
           <div className="document-panel__upload-icon">
-            <Upload size={20} />
+            {isUploading ? <Loader2 size={20} className="animate-spin" /> : <Upload size={20} />}
           </div>
-          <span className="document-panel__upload-text">Upload PDF</span>
-          <span className="document-panel__upload-hint">or drag and drop</span>
+          <span className="document-panel__upload-text">
+            {isUploading ? uploadStatus || 'Uploading...' : 'Upload PDF'}
+          </span>
+          {!isUploading && <span className="document-panel__upload-hint">or drag and drop</span>}
         </button>
+        {isUploading && uploadProgress > 0 && (
+          <div className="document-panel__progress">
+            <div className="document-panel__progress-bar">
+              <div 
+                className="document-panel__progress-fill" 
+                style={{ width: `${uploadProgress}%` }}
+              />
+            </div>
+            <span className="document-panel__progress-text">{uploadProgress}%</span>
+          </div>
+        )}
         <input
           ref={fileInputRef}
           type="file"

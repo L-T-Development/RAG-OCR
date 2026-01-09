@@ -21,6 +21,8 @@ export function Workspace() {
   // Document state
   const [documents, setDocuments] = useState([]);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStatus, setUploadStatus] = useState('');
   const [isSummarizing, setIsSummarizing] = useState(false);
   
   // UI state
@@ -173,16 +175,49 @@ export function Workspace() {
     }
 
     setIsUploading(true);
+    setUploadProgress(0);
+    setUploadStatus('Uploading...');
+
+    // Simulate upload progress
+    const progressInterval = setInterval(() => {
+      setUploadProgress(prev => {
+        if (prev >= 50) return prev; // Stop at 50% until processing
+        return prev + 10;
+      });
+    }, 300);
+
     try {
       const { ok, data } = await api.uploadFile(currentThreadId, file);
+      clearInterval(progressInterval);
+      
       if (ok) {
+        setUploadProgress(60);
+        setUploadStatus('Processing document...');
+        
+        // Simulate processing time
+        await new Promise(resolve => setTimeout(resolve, 500));
+        setUploadProgress(100);
+        setUploadStatus('Upload complete!');
+        
         const filesData = await api.getThreadFiles(currentThreadId);
         setDocuments(filesData.files || []);
+        
+        // Clear status after delay
+        setTimeout(() => {
+          setUploadStatus('');
+          setUploadProgress(0);
+        }, 2000);
       } else {
+        clearInterval(progressInterval);
         alert('Upload failed: ' + (data.error || 'Unknown error'));
+        setUploadStatus('');
+        setUploadProgress(0);
       }
     } catch (e) {
+      clearInterval(progressInterval);
       alert('Upload failed: Network error');
+      setUploadStatus('');
+      setUploadProgress(0);
     } finally {
       setIsUploading(false);
     }
@@ -190,16 +225,47 @@ export function Workspace() {
 
   const handleQuickUpload = async (file) => {
     setIsUploading(true);
+    setUploadProgress(0);
+    setUploadStatus('Uploading...');
+
+    // Simulate upload progress
+    const progressInterval = setInterval(() => {
+      setUploadProgress(prev => {
+        if (prev >= 50) return prev;
+        return prev + 10;
+      });
+    }, 300);
+
     try {
       const { ok, data } = await api.quickUpload(file);
+      clearInterval(progressInterval);
+      
       if (ok && data.thread) {
+        setUploadProgress(60);
+        setUploadStatus('Processing document...');
+        
+        await new Promise(resolve => setTimeout(resolve, 500));
+        setUploadProgress(100);
+        setUploadStatus('Upload complete!');
+        
         await fetchThreads();
         handleSelectThread(data.thread.id, data.thread.name);
+        
+        setTimeout(() => {
+          setUploadStatus('');
+          setUploadProgress(0);
+        }, 2000);
       } else {
+        clearInterval(progressInterval);
         alert('Upload failed: ' + (data.error || 'Unknown error'));
+        setUploadStatus('');
+        setUploadProgress(0);
       }
     } catch (e) {
+      clearInterval(progressInterval);
       alert('Upload failed: Network error');
+      setUploadStatus('');
+      setUploadProgress(0);
     } finally {
       setIsUploading(false);
     }
@@ -313,6 +379,8 @@ export function Workspace() {
           onSummarize={handleSummarizeDocument}
           disabled={!currentThreadId}
           isUploading={isUploading}
+          uploadProgress={uploadProgress}
+          uploadStatus={uploadStatus}
         />
       </main>
 

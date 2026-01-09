@@ -596,15 +596,18 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
     metadatas = []
     ids = []
     table_count = 0
+    total_pages = len(doc)
 
-    print(f"[RAG] Total Pages: {len(doc)}")
+    print(f"[RAG] Total Pages: {total_pages}")
 
     for page_num, page in enumerate(doc):
         # Extract text chunks
         text = page.get_text()
         chunks = smart_chunk_text(text)
 
-        print(f"[RAG] Page {page_num + 1}: Found {len(chunks)} text chunks")
+        # Print progress only every 100 pages or on first/last page
+        if (page_num + 1) % 100 == 0 or (page_num + 1) == total_pages or page_num == 0:
+            print(f"[RAG] Processing page {page_num + 1}/{total_pages}...")
 
         for i, chunk in enumerate(chunks):
             chunk_id = f"{doc_id}_{page_num}_{i}"
@@ -623,7 +626,9 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
         # Extract tables from the page
         tables = extract_tables_from_page(page)
         if tables:
-            print(f"[RAG] Page {page_num + 1}: Found {len(tables)} tables")
+            # Only print table info every 100 pages or on first/last page
+            if (page_num + 1) % 100 == 0 or (page_num + 1) == total_pages or page_num == 0:
+                print(f"[RAG] Page {page_num + 1}: Found {len(tables)} tables")
 
             for table in tables:
                 table_id = f"{doc_id}_{page_num}_table_{table['index']}"

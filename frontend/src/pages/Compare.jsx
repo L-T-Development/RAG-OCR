@@ -11,6 +11,10 @@ function Compare() {
   const [isLoading, setIsLoading] = useState(false);
   const [jobId, setJobId] = useState(null);
   const [showOnlyChanges, setShowOnlyChanges] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage] = useState(100); // Show 100 lines per page
+  const [pageInput, setPageInput] = useState('1');
   
   const pollingTimerRef = useRef(null);
 
@@ -44,15 +48,29 @@ function Compare() {
     }
 
     setIsLoading(true);
-    setStatus('Processing...');
+    setStatus('Uploading files...');
     setDiffResult(null);
+    setUploadProgress(0);
+    setCurrentPage(1);
+    setPageInput('1');
+
+    // Simulate upload progress
+    const progressInterval = setInterval(() => {
+      setUploadProgress(prev => {
+        if (prev >= 90) return prev;
+        return prev + 10;
+      });
+    }, 300);
 
     try {
       const { ok, data } = await api.compareDocuments(oldFile, newFile);
+      clearInterval(progressInterval);
+      setUploadProgress(100);
       
       if (ok && data.job_id) {
         // Backend returned job_id, start polling
         setJobId(data.job_id);
+        setStatus('Processing documents...');
         pollComparisonStatus(data.job_id);
       } else if (ok && data.diff) {
         // Synchronous response (fallback)
@@ -86,6 +104,11 @@ function Compare() {
         }
 
         const job = res.data;
+
+        // Update status with progress if available
+        if (job.progress) {
+          setStatus(`Processing documents... ${job.progress}%`);
+        }
 
         if (job.status === 'completed') {
           if (pollingTimerRef.current) {
@@ -127,6 +150,38 @@ function Compare() {
   const filteredLines = diffResult?.lines?.filter(line => 
     showOnlyChanges ? line.status !== 'equal' : true
   ) || [];
+
+  // Pagination logic
+  const totalPages = Math.ceil(filteredLines.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const currentLines = filteredLines.slice(startIndex, endIndex);
+
+  const handlePageChange = (newPage) => {
+    if (newPage >= 1 && newPage <= totalPages) {
+      setCurrentPage(newPage);
+      setPageInput(newPage.toString());
+    }
+  };
+
+  const handlePageInputChange = (e) => {
+    setPageInput(e.target.value);
+  };
+
+  const handlePageInputSubmit = () => {
+    const page = parseInt(pageInput, 10);
+    if (!isNaN(page) && page >= 1 && page <= totalPages) {
+      setCurrentPage(page);
+    } else {
+      setPageInput(currentPage.toString());
+    }
+  };
+
+  const handlePageInputKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      handlePageInputSubmit();
+    }
+  };
 
   return (
     <div className="compare-page">
@@ -258,8 +313,18 @@ function Compare() {
         {/* Status */}
         {status && (
           <div className={`compare-status ${status.includes('completed') ? 'success' : ''}`}>
-            <i className={`fa-solid ${status.includes('completed') ? 'fa-circle-check' : status.includes('Processing') ? 'fa-spinner fa-spin' : 'fa-circle-info'}`}></i>
+            <i className={`fa-solid ${status.includes('completed') ? 'fa-circle-check' : status.includes('Processing') || status.includes('Uploading') ? 'fa-spinner fa-spin' : 'fa-circle-info'}`}></i>
             {status}
+          </div>
+        )}
+
+        {/* Upload Progress Bar */}
+        {isLoading && uploadProgress > 0 && uploadProgress < 100 && (
+          <div className="compare-progress">
+            <div className="compare-progress-bar">
+              <div className="compare-progress-fill" style={{ width: `${uploadProgress}%` }}></div>
+            </div>
+            <span className="compare-progress-text">{uploadProgress}%</span>
           </div>
         )}
 
@@ -305,10 +370,47 @@ function Compare() {
               </div>
             </div>
 
+            {/* Pagination Controls */}
+            {totalPages > 1 && (
+              <div className="diff-pagination">
+                <button 
+                  className="pagination-btn"
+                  onClick={() => handlePageChange(currentPage - 1)}
+                  disabled={currentPage === 1}
+                >
+                  <i className="fa-solid fa-chevron-left"></i>
+                  Previous
+                </button>
+                
+                <div className="pagination-info">
+                  <span>Page</span>
+                  <input
+                    type="text"
+                    className="pagination-input"
+                    value={pageInput}
+                    onChange={handlePageInputChange}
+                    onKeyDown={handlePageInputKeyDown}
+                    onBlur={handlePageInputSubmit}
+                  />
+                  <span>of {totalPages}</span>
+                  <span className="pagination-meta">({filteredLines.length} lines total)</span>
+                </div>
+                
+                <button 
+                  className="pagination-btn"
+                  onClick={() => handlePageChange(currentPage + 1)}
+                  disabled={currentPage === totalPages}
+                >
+                  Next
+                  <i className="fa-solid fa-chevron-right"></i>
+                </button>
+              </div>
+            )}
+
             {/* Unified Diff View */}
             <div className="diff-unified">
-              {filteredLines.length > 0 ? (
-                filteredLines.map((line, idx) => (
+              {currentLines.length > 0 ? (
+                currentLines.map((line, idx) => (
                   <div key={idx} className={`diff-line ${line.status}`}>
                     <span className="diff-line-number">{line.line}</span>
                     <span className="diff-line-status">
