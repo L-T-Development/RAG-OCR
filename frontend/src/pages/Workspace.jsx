@@ -175,27 +175,30 @@ export function Workspace() {
     }
 
     setIsUploading(true);
-    setUploadProgress(0);
+    setUploadProgress(10);
     setUploadStatus('Uploading...');
 
-    // Simulate upload progress
+    // Progress animation to 20% during upload
     const progressInterval = setInterval(() => {
       setUploadProgress(prev => {
-        if (prev >= 50) return prev; // Stop at 50% until processing
-        return prev + 10;
+        if (prev >= 20) return prev;
+        return prev + 2;
       });
-    }, 300);
+    }, 100);
 
     try {
       const { ok, data } = await api.uploadFile(currentThreadId, file);
       clearInterval(progressInterval);
       
       if (ok) {
-        setUploadProgress(60);
+        setUploadProgress(50);
         setUploadStatus('Processing document...');
+        await new Promise(resolve => setTimeout(resolve, 400));
         
-        // Simulate processing time
-        await new Promise(resolve => setTimeout(resolve, 500));
+        setUploadProgress(80);
+        setUploadStatus('Embedding text...');
+        await new Promise(resolve => setTimeout(resolve, 400));
+        
         setUploadProgress(100);
         setUploadStatus('Upload complete!');
         
@@ -225,26 +228,30 @@ export function Workspace() {
 
   const handleQuickUpload = async (file) => {
     setIsUploading(true);
-    setUploadProgress(0);
+    setUploadProgress(10);
     setUploadStatus('Uploading...');
 
-    // Simulate upload progress
+    // Progress animation to 20% during upload
     const progressInterval = setInterval(() => {
       setUploadProgress(prev => {
-        if (prev >= 50) return prev;
-        return prev + 10;
+        if (prev >= 20) return prev;
+        return prev + 2;
       });
-    }, 300);
+    }, 100);
 
     try {
       const { ok, data } = await api.quickUpload(file);
       clearInterval(progressInterval);
       
       if (ok && data.thread) {
-        setUploadProgress(60);
+        setUploadProgress(50);
         setUploadStatus('Processing document...');
+        await new Promise(resolve => setTimeout(resolve, 400));
         
-        await new Promise(resolve => setTimeout(resolve, 500));
+        setUploadProgress(80);
+        setUploadStatus('Embedding text...');
+        await new Promise(resolve => setTimeout(resolve, 400));
+        
         setUploadProgress(100);
         setUploadStatus('Upload complete!');
         

@@ -104,6 +104,9 @@ MAX_FINAL_CHUNKS = 5
 # ChromaDB batch size limit (default is 5461)
 CHROMA_BATCH_SIZE = 5000
 
+# Embedding batch size for faster processing
+EMBEDDING_BATCH_SIZE = 128  # Process 128 chunks at a time for optimal GPU usage
+
 # Disable ChromaDB telemetry (PostHog)
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
@@ -261,7 +264,7 @@ def store_table(table_id, doc_id, thread_id, parent_id, source, page, table_inde
                     is_key=(is_kv_table and col_idx == 0)  # First column in key-value tables
                 )
 
-        print(f"[RAG] [OK] Stored table {table_id} ({table_type}) with {len(data_rows)} data rows")
+        # Silently store - logging happens at page batch level
 
     except Exception as e:
         print(f"[RAG] ERROR storing table {table_id}: {e}")
@@ -462,7 +465,7 @@ class EmbeddingModelManager:
 
     def encode(self, texts):
         """
-        Encode texts to embeddings.
+        Encode texts to embeddings with batch processing optimization.
 
         Args:
             texts: List of strings to encode
@@ -476,7 +479,12 @@ class EmbeddingModelManager:
         model = self.get_model()
         if model is None:
             raise RuntimeError("Embedding model not loaded. Please configure model path in Settings.")
-        return model.encode(texts)
+        
+        # Optimize with batch processing for large documents
+        if len(texts) > EMBEDDING_BATCH_SIZE:
+            return model.encode(texts, batch_size=EMBEDDING_BATCH_SIZE, show_progress_bar=False)
+        else:
+            return model.encode(texts, show_progress_bar=False)
 
 
 # Global singleton instance
@@ -596,18 +604,16 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
     metadatas = []
     ids = []
     table_count = 0
+    chunk_count = 0
     total_pages = len(doc)
 
-    print(f"[RAG] Total Pages: {total_pages}")
+    print(f"[RAG] Processing {total_pages} pages...")
 
     for page_num, page in enumerate(doc):
         # Extract text chunks
         text = page.get_text()
         chunks = smart_chunk_text(text)
-
-        # Print progress only every 100 pages or on first/last page
-        if (page_num + 1) % 100 == 0 or (page_num + 1) == total_pages or page_num == 0:
-            print(f"[RAG] Processing page {page_num + 1}/{total_pages}...")
+        chunk_count += len(chunks)
 
         for i, chunk in enumerate(chunks):
             chunk_id = f"{doc_id}_{page_num}_{i}"
@@ -626,10 +632,6 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
         # Extract tables from the page
         tables = extract_tables_from_page(page)
         if tables:
-            # Only print table info every 100 pages or on first/last page
-            if (page_num + 1) % 100 == 0 or (page_num + 1) == total_pages or page_num == 0:
-                print(f"[RAG] Page {page_num + 1}: Found {len(tables)} tables")
-
             for table in tables:
                 table_id = f"{doc_id}_{page_num}_table_{table['index']}"
 
@@ -676,17 +678,20 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
                         "type": "table_text",
                         "table_id": table_id
                     })
-                    print(f"[RAG] Also embedding single-instance table {table_id} for semantic search")
+        
+        # Print progress every 100 pages
+        if (page_num + 1) % 100 == 0 or (page_num + 1) == total_pages:
+            print(f"[RAG] Progress: {page_num + 1}/{total_pages} pages | {chunk_count} chunks | {table_count} tables")
 
     if not text_chunks:
         print("[RAG] No valid text chunks found.")
         return {"text_chunks": 0, "table_chunks": table_count}
 
-    print(f"[RAG] Embedding {len(text_chunks)} text chunks...")
+    print(f"[RAG] Embedding {len(text_chunks)} chunks...")
     embed_start = time.time()
     embeddings = model_manager.encode(text_chunks).tolist()
     embed_time = time.time() - embed_start
-    print(f"[RAG] Embedding completed in {embed_time:.2f}s")
+    print(f"[RAG] ✓ Embedded in {embed_time:.2f}s")
 
     # Batch insert to handle large documents (ChromaDB has ~5461 limit per add())
     db_start = time.time()
@@ -700,7 +705,6 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
             metadatas=metadatas,
             ids=ids
         )
-        print(f"[RAG] Inserted {total_chunks} text chunks in single batch")
     else:
         # Multiple batch inserts
         for i in range(0, total_chunks, CHROMA_BATCH_SIZE):
@@ -716,18 +720,11 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
                 metadatas=batch_metas,
                 ids=batch_ids
             )
-            print(f"[RAG] Batch {i//CHROMA_BATCH_SIZE + 1}: Inserted chunks {i+1}-{end_idx} ({len(batch_docs)} chunks)")
 
     db_time = time.time() - db_start
-
     end_time = time.time()
-    end_memory = process.memory_info().rss / 1024 / 1024  # MB
-    end_cpu = process.cpu_percent(interval=0.1)
 
-    print("[RAG] Added to Vector DB successfully.")
-    print(f"[RESOURCE] Total Time: {end_time - start_time:.2f}s | Embedding: {embed_time:.2f}s | DB Insert: {db_time:.2f}s")
-    print(f"[RESOURCE] Memory: {start_memory:.1f}MB → {end_memory:.1f}MB (Δ{end_memory - start_memory:+.1f}MB) | CPU: {end_cpu:.1f}%")
-    print(f"[RAG] Stored {len(text_chunks)} text chunks in ChromaDB and {table_count} tables in tables.db")
+    print(f"[RAG] ✓ Completed in {end_time - start_time:.1f}s | {len(text_chunks)} chunks + {table_count} tables stored")
     return {"text_chunks": len(text_chunks), "table_chunks": table_count}
 
 
