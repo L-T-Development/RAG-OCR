@@ -805,39 +805,64 @@ def search_tables_directly(query_text, thread_id, file_filter=None):
 
     print(f"\n[DEBUG-SQL-SEARCH] === search_tables_directly() ===")
 
-    # Extract keywords and potential codes from query
-    # Split on whitespace and filter out very short words
-    tokens = query_text.split()
-    keywords = [w.lower() for w in tokens if len(w) > 3]
-
-    # Also extract potential part numbers/codes (alphanumeric, 5+ chars)
-    codes = [w for w in tokens if len(w) >= 5 and any(c.isalnum() for c in w)]
-
-    print(f"[DEBUG-SQL-SEARCH] Keywords: {keywords}")
-    print(f"[DEBUG-SQL-SEARCH] Codes: {codes}")
-
     # Build base filter
     base_query = ExtractedTable.objects.filter(thread_id=thread_id)
     if file_filter:
         base_query = base_query.filter(source=file_filter)
         print(f"[DEBUG-SQL-SEARCH] File Filter: {file_filter}")
 
-    # Build search query - prioritize exact matches for codes
-    if codes or keywords:
-        q_objects = Q()
+    # Strategy: Try full phrase first, then fall back to individual words
+    tables = None
+    
+    # Step 1: Try exact phrase match (for multi-word names like "BALATA SHEET")
+    # Remove common stop words for better matching
+    stop_words = {'is', 'it', 'there', 'the', 'in', 'a', 'an', 'and', 'or', 'for', 'to', 'of', 'on', 'at'}
+    tokens = query_text.split()
+    meaningful_tokens = [w for w in tokens if w.lower() not in stop_words]
+    
+    # Try 2-3 word combinations first (common for material/item names)
+    if len(meaningful_tokens) >= 2:
+        # Try combinations of 2-3 consecutive words
+        for length in [3, 2]:
+            if len(meaningful_tokens) >= length:
+                for i in range(len(meaningful_tokens) - length + 1):
+                    phrase = ' '.join(meaningful_tokens[i:i+length])
+                    print(f"[DEBUG-SQL-SEARCH] Trying phrase match: '{phrase}'")
+                    phrase_tables = base_query.filter(searchable_text__icontains=phrase)
+                    if phrase_tables.exists():
+                        print(f"[DEBUG-SQL-SEARCH] Found {phrase_tables.count()} tables with phrase: '{phrase}'")
+                        tables = phrase_tables
+                        break
+            if tables is not None:
+                break
+    
+    # Step 2: Fall back to individual keyword search if no phrase matches
+    if tables is None or not tables.exists():
+        print(f"[DEBUG-SQL-SEARCH] No phrase matches, trying individual keywords...")
+        # Extract keywords and potential codes from query
+        keywords = [w.lower() for w in meaningful_tokens if len(w) > 3]
+        # Also extract potential part numbers/codes (alphanumeric, 5+ chars)
+        codes = [w for w in meaningful_tokens if len(w) >= 5 and any(c.isalnum() for c in w)]
 
-        # Priority 1: Exact code matches (case-insensitive)
-        for code in codes:
-            q_objects |= Q(searchable_text__icontains=code)
-            print(f"[DEBUG-SQL-SEARCH] Searching for code: {code}")
+        print(f"[DEBUG-SQL-SEARCH] Keywords: {keywords}")
+        print(f"[DEBUG-SQL-SEARCH] Codes: {codes}")
 
-        # Priority 2: Keyword matches
-        for keyword in keywords:
-            q_objects |= Q(searchable_text__icontains=keyword)
+        # Build search query - prioritize exact matches for codes
+        if codes or keywords:
+            q_objects = Q()
 
-        tables = base_query.filter(q_objects).distinct()
-    else:
-        tables = base_query.all()
+            # Priority 1: Exact code matches (case-insensitive)
+            for code in codes:
+                q_objects |= Q(searchable_text__icontains=code)
+                print(f"[DEBUG-SQL-SEARCH] Searching for code: {code}")
+
+            # Priority 2: Keyword matches
+            for keyword in keywords:
+                q_objects |= Q(searchable_text__icontains=keyword)
+
+            tables = base_query.filter(q_objects).distinct()
+        else:
+            tables = base_query.all()
 
     print(f"[DEBUG-SQL-SEARCH] Found {tables.count()} matching tables")
 
