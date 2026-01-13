@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
+import { Navigation } from '../components/shared/Navigation';
 import { api } from '../services/api';
 import {
   ArrowLeft,
@@ -163,6 +164,7 @@ export function Settings() {
 
   return (
     <div className="settings-page">
+      <Navigation />
       <header className="settings-page__header">
         <button className="settings-page__back" onClick={() => navigate(-1)}>
           <ArrowLeft size={20} />

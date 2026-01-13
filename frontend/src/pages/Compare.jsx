@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
+import { Navigation } from '../components/shared/Navigation';
 import { api } from '../services/api';
 import './Compare.css';
 
@@ -185,29 +186,10 @@ function Compare() {
 
   return (
     <div className="compare-page">
+      <Navigation />
       {/* Background Effects */}
       <div className="compare-bg-gradient"></div>
       <div className="compare-bg-grid"></div>
-      
-      {/* Navigation */}
-      <nav className="compare-nav">
-        <Link to="/" className="compare-nav-brand">
-          <div className="compare-logo-icon">
-            <i className="fa-solid fa-cube"></i>
-          </div>
-          <span className="compare-logo-text">RAG<span className="compare-logo-accent">OCR</span></span>
-        </Link>
-        <div className="compare-nav-actions">
-          <Link to="/workspace" className="compare-nav-btn">
-            <i className="fa-solid fa-message"></i>
-            <span>Workspace</span>
-          </Link>
-          <Link to="/" className="compare-nav-btn primary">
-            <i className="fa-solid fa-house"></i>
-            <span>Home</span>
-          </Link>
-        </div>
-      </nav>
 
       <div className="compare-content">
         {/* Header */}
@@ -444,4 +426,3 @@ function Compare() {
 }
 
 export default Compare;
-

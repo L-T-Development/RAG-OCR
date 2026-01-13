@@ -462,8 +462,10 @@ def compare_status(request, job_id):
     Returns:
     - status: pending | processing | completed | failed
     - progress: 0-100
-    - result: comparison result (only when status=completed)
+    - result: Page-wise comparison summary (only when status=completed)
     - error: error message (only when status=failed)
+    
+    NOTE: Use /api/compare/pages/<job_id>/?page=N for actual page content
     """
     print(f"[COMPARE] Status check for job {job_id}")
 
@@ -472,7 +474,45 @@ def compare_status(request, job_id):
     if not job:
         return JsonResponse({"error": "Job not found"}, status=404)
 
+    # If completed, return page-wise summary (no massive lines array)
+    if job.get("status") == "completed" and "result" in job:
+        result = job["result"]
     return JsonResponse(job)
+
+
+
+
+
+def compare_page_detail(request, job_id, page_num):
+    """
+    Get detailed line-by-line comparison for a specific page.
+    
+    GET /api/compare/page/<job_id>/<page_num>/
+    
+    Returns:
+    - page_num: The requested page number
+    - old_line_count: Number of lines in old document page
+    - new_line_count: Number of lines in new document page  
+    - diff: Line-by-line difference data
+    - page_status: Overall page status (equal, modified, added, removed)
+    """
+    if request.method != "GET":
+        return JsonResponse({"error": "GET method required"}, status=405)
+    
+    if page_num < 1:
+        return JsonResponse({"error": "Page number must be positive"}, status=400)
+    
+    try:
+        from .document_compare import get_page_detail_comparison
+        result = get_page_detail_comparison(job_id, page_num)
+        
+        if "error" in result:
+            return JsonResponse(result, status=404 if "not found" in result["error"].lower() else 400)
+        
+        return JsonResponse(result)
+        
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
 
 
 # ---------------- DOCUMENT SUMMARY ENDPOINTS ----------------
@@ -521,12 +561,16 @@ def summarize_single_document(request, doc_id):
         result = summarize_document(doc_id=doc.id)
 
         if "error" in result:
+            print(f"[API] Summarization error: {result['error']}")
             return JsonResponse(result, status=500)
 
         result["filename"] = doc.filename
         return JsonResponse(result)
 
     except Exception as e:
+        print(f"[API] Exception in summarize_single_document: {e}")
+        import traceback
+        traceback.print_exc()
         return JsonResponse({"error": str(e)}, status=500)
 
 

@@ -1134,8 +1134,8 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
 
 INSTRUCTIONS:
 - Answer questions ONLY using the provided context
+-If the answer is not found in the context, say "I don't know based on the provided documents" dont suggest anything not in the context
 - Be concise but thorough in your responses
-- If the answer is not found in the context, say "I don't know based on the provided documents"
 - Never make up information or hallucinate facts
 - Quote relevant parts when appropriate
 - Structure longer answers with bullet points for clarity
@@ -1310,21 +1310,24 @@ def summarize_document(doc_id=None, thread_id=None):
             word_limit = "150-250"
             detail_level = "concise"
             max_input_chunks = docs
+            timeout_seconds = 60
         elif total_chunks < 1500:
             # Medium Document (~100-500 pages)
             scale = "Medium"
-            chunk_limit = 50
+            chunk_limit = 30  # Reduced from 50 for better performance
             word_limit = "300-500"
             detail_level = "detailed"
+            timeout_seconds = 120  # Increased timeout
             # Sample uniformly to get coverage
             step = max(1, total_chunks // chunk_limit)
             max_input_chunks = docs[::step][:chunk_limit]
         else:
             # Large Document (500+ pages)
             scale = "Large"
-            chunk_limit = 80
+            chunk_limit = 40  # Reduced from 80 for better performance
             word_limit = "600-1000"
             detail_level = "comprehensive and extensive"
+            timeout_seconds = 180  # Extended timeout for large docs
             # Sample uniformly
             step = max(1, total_chunks // chunk_limit)
             max_input_chunks = docs[::step][:chunk_limit]
@@ -1332,8 +1335,25 @@ def summarize_document(doc_id=None, thread_id=None):
         print(f"[SUMMARY] Document Scale: {scale} (Pages: {max_page}, Chunks: {total_chunks})")
         print(f"[SUMMARY] Generating {detail_level} summary ({word_limit} words) using {len(max_input_chunks)} chunks")
 
-        # Combine selected input chunks
-        combined_text = "\n\n".join(max_input_chunks)
+        # Combine selected input chunks with safety checks
+        valid_chunks = [chunk for chunk in max_input_chunks if chunk and chunk.strip()]
+        if not valid_chunks:
+            return {"error": "No valid content chunks found for summarization"}
+        
+        combined_text = "\n\n".join(valid_chunks)
+        
+        # Limit text length based on document scale to prevent API issues
+        if scale == "Small":
+            max_chars = 4000
+        elif scale == "Medium":
+            max_chars = 5000  # Reduced from 6000
+        else:  # Large
+            max_chars = 4500  # Conservative limit for large docs
+            
+        if len(combined_text) > max_chars:
+            combined_text = combined_text[:max_chars] + "\n... (truncated for processing)"
+        
+        print(f"[SUMMARY] Processing {len(combined_text)} characters of content with {timeout_seconds}s timeout")
 
         # Generate summary via LLM with dynamic prompt
         system_prompt = f"""You are a document summarization expert.
@@ -1373,15 +1393,29 @@ FORMAT YOUR RESPONSE AS:
             "stream": False,
             "temperature": 0.3,
             "options": {
-                "num_thread": 8,
-                "num_ctx": 8192,  # Increased context for larger summaries
+                "num_thread": 8,  # Reduced threads for stability
+                "num_ctx": 8192,  # Reduced context window for faster processing
             },
             "keep_alive": "5m",
         }
 
         llm_start = time.time()
-        response = requests.post(OLLAMA_API, json=payload, timeout=90).json() # Increased timeout
+        
+        # Make the request with adaptive timeout
+        http_response = requests.post(OLLAMA_API, json=payload, timeout=timeout_seconds)
+        
+        if http_response.status_code != 200:
+            return {"error": f"Ollama API returned status {http_response.status_code}: {http_response.text}"}
+        
+        try:
+            response = http_response.json()
+        except json.JSONDecodeError as e:
+            return {"error": f"Invalid JSON response from Ollama: {e}"}
+        
         llm_time = time.time() - llm_start
+
+        if "error" in response:
+            return {"error": f"Ollama error: {response['error']}"}
 
         summary = response.get("response", "Unable to generate summary.")
 
@@ -1397,7 +1431,7 @@ FORMAT YOUR RESPONSE AS:
         }
 
     except requests.exceptions.Timeout:
-        return {"error": "LLM timeout - document may be too large"}
+        return {"error": f"LLM timeout after {timeout_seconds}s - try again or the document may be too large"}
     except requests.exceptions.ConnectionError:
         return {"error": "Cannot connect to Ollama. Make sure it's running."}
     except Exception as e:

@@ -25,7 +25,7 @@ def extract_lines(text: str):
 def unified_line_diff(old_lines, new_lines):
     """
     Generate unified line-by-line diff with status for each line.
-    Returns list of dicts: {line_num, status, old_text, new_text}
+    Returns dict with lines, stats, and total_lines
     Status: 'equal', 'added', 'removed', 'modified'
     """
     diff_result = []
@@ -50,21 +50,45 @@ def unified_line_diff(old_lines, new_lines):
                 stats["equal"] += 1
                 line_num += 1
                 
-        elif tag == 'insert':
-            # Lines added in new file
-            for j in range(j1, j2):
-                diff_result.append({
-                    "line": line_num,
-                    "status": "added",
-                    "text": new_lines[j],
-                    "old_text": None,
-                    "new_text": new_lines[j]
-                })
-                stats["added"] += 1
+        elif tag == 'replace':
+            # Lines are different (modified)
+            max_lines = max(i2 - i1, j2 - j1)
+            for k in range(max_lines):
+                old_text = old_lines[i1 + k] if (i1 + k) < i2 else None
+                new_text = new_lines[j1 + k] if (j1 + k) < j2 else None
+                
+                if old_text and new_text:
+                    diff_result.append({
+                        "line": line_num,
+                        "status": "modified",
+                        "text": new_text,
+                        "old_text": old_text,
+                        "new_text": new_text
+                    })
+                    stats["modified"] += 1
+                elif old_text:
+                    diff_result.append({
+                        "line": line_num,
+                        "status": "removed",
+                        "text": old_text,
+                        "old_text": old_text,
+                        "new_text": None
+                    })
+                    stats["removed"] += 1
+                elif new_text:
+                    diff_result.append({
+                        "line": line_num,
+                        "status": "added",
+                        "text": new_text,
+                        "old_text": None,
+                        "new_text": new_text
+                    })
+                    stats["added"] += 1
+                    
                 line_num += 1
                 
         elif tag == 'delete':
-            # Lines removed from old file
+            # Lines removed
             for i in range(i1, i2):
                 diff_result.append({
                     "line": line_num,
@@ -76,47 +100,19 @@ def unified_line_diff(old_lines, new_lines):
                 stats["removed"] += 1
                 line_num += 1
                 
-        elif tag == 'replace':
-            # Lines modified
-            old_part = old_lines[i1:i2]
-            new_part = new_lines[j1:j2]
-            
-            max_len = max(len(old_part), len(new_part))
-            
-            for k in range(max_len):
-                old_val = old_part[k] if k < len(old_part) else None
-                new_val = new_part[k] if k < len(new_part) else None
-                
-                if old_val and new_val:
-                    diff_result.append({
-                        "line": line_num,
-                        "status": "modified",
-                        "text": new_val,
-                        "old_text": old_val,
-                        "new_text": new_val
-                    })
-                    stats["modified"] += 1
-                elif new_val:
-                    diff_result.append({
-                        "line": line_num,
-                        "status": "added",
-                        "text": new_val,
-                        "old_text": None,
-                        "new_text": new_val
-                    })
-                    stats["added"] += 1
-                elif old_val:
-                    diff_result.append({
-                        "line": line_num,
-                        "status": "removed",
-                        "text": old_val,
-                        "old_text": old_val,
-                        "new_text": None
-                    })
-                    stats["removed"] += 1
-                    
+        elif tag == 'insert':
+            # Lines added
+            for j in range(j1, j2):
+                diff_result.append({
+                    "line": line_num,
+                    "status": "added",
+                    "text": new_lines[j],
+                    "old_text": None,
+                    "new_text": new_lines[j]
+                })
+                stats["added"] += 1
                 line_num += 1
-    
+
     return {
         "lines": diff_result,
         "stats": stats,
@@ -129,19 +125,41 @@ def unified_line_diff(old_lines, new_lines):
 def extract_pdf(path):
     print(f"[PDF] Extracting text from: {path}")
     doc = fitz.open(path)
-    text = ""
-    for page in doc:
-        text += page.get_text()
-    lines = extract_lines(text)
-    print(f"[PDF] Extracted {len(lines)} lines")
-    return lines
+    text_lines = []
+    
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        text = page.get_text()
+        
+        # Split text into lines and clean them
+        raw_lines = text.splitlines()
+        for line in raw_lines:
+            cleaned_line = line.strip()
+            if cleaned_line:  # Only keep non-empty lines
+                text_lines.append(cleaned_line)
+    
+    print(f"[PDF] Total lines extracted: {len(text_lines)}")
+    doc.close()
+    return text_lines
+
+
+
 
 
 def compare_pdfs(old_pdf, new_pdf):
-    return unified_line_diff(
-        extract_pdf(old_pdf),
-        extract_pdf(new_pdf)
-    )
+    """Compare PDFs line by line"""
+    old_lines = extract_pdf(old_pdf)
+    new_lines = extract_pdf(new_pdf)
+    return unified_line_diff(old_lines, new_lines)
+
+
+
+
+
+
+
+
+
 
 
 # ---------------- DOCX ----------------
@@ -156,10 +174,9 @@ def extract_docx(path):
 
 
 def compare_docx(old_docx, new_docx):
-    return unified_line_diff(
-        extract_docx(old_docx),
-        extract_docx(new_docx)
-    )
+    old_lines = extract_docx(old_docx)
+    new_lines = extract_docx(new_docx)
+    return unified_line_diff(old_lines, new_lines)
 
 
 # ---------------- EXCEL ----------------
@@ -185,10 +202,9 @@ def extract_excel(path):
 
 
 def compare_excels(old_xlsx, new_xlsx):
-    return unified_line_diff(
-        extract_excel(old_xlsx),
-        extract_excel(new_xlsx)
-    )
+    old_lines = extract_excel(old_xlsx)
+    new_lines = extract_excel(new_xlsx)
+    return unified_line_diff(old_lines, new_lines)
 
 
 # ============================================================================

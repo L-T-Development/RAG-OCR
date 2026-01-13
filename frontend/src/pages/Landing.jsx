@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
+import { Navigation } from '../components/shared/Navigation';
 import './Landing.css';
 
 function Landing() {
@@ -86,22 +87,7 @@ function Landing() {
       </div>
 
       {/* Navigation */}
-      <nav className={`landing-nav ${isVisible ? 'visible' : ''}`}>
-        <div className="nav-logo">
-          <div className="logo-icon">
-            <i className="fa-solid fa-cube"></i>
-          </div>
-          <span className="logo-text">RAG<span className="logo-accent">OCR</span></span>
-        </div>
-        <div className="nav-links">
-          <a href="#features" className="nav-link">Features</a>
-          <a href="#about" className="nav-link">About</a>
-          <Link to="/workspace" className="nav-btn">
-            <i className="fa-solid fa-rocket"></i>
-            Launch App
-          </Link>
-        </div>
-      </nav>
+      <Navigation />
 
       {/* Hero Section */}
       <section className={`hero ${isVisible ? 'visible' : ''}`}>
