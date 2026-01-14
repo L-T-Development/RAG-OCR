@@ -150,4 +150,74 @@ export const api = {
     });
     return { ok: res.ok, data: await res.json() };
   },
+
+  // ==================== REPORTS / COMPARATOR ====================
+
+  /**
+   * Extract columns from uploaded file (Excel, PDF, Image)
+   */
+  async getColumnsFromFile(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch(`${API_BASE}/reports/columns/`, {
+      method: 'POST',
+      body: formData,
+    });
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  /**
+   * Start multi-PDF comparison job
+   * @param {File} sourceFile - Excel/PDF with values to search
+   * @param {string} columnName - Column to extract values from
+   * @param {File[]} pdfFiles - Array of PDF files to search in
+   * @param {boolean} useOcr - Enable OCR for scanned documents
+   */
+  async startMultiPdfComparison(sourceFile, columnName, pdfFiles, useOcr = false) {
+    const formData = new FormData();
+    formData.append('source_file', sourceFile);
+    formData.append('column_name', columnName);
+    pdfFiles.forEach(file => {
+      formData.append('pdf_files', file);
+    });
+    formData.append('use_ocr', useOcr.toString());
+    
+    const res = await fetch(`${API_BASE}/reports/compare/`, {
+      method: 'POST',
+      body: formData,
+    });
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  /**
+   * Get status of report job
+   */
+  async getReportStatus(jobId) {
+    const res = await fetch(`${API_BASE}/reports/status/${jobId}/`);
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  /**
+   * Quick synchronous comparison (for small files)
+   */
+  async quickColumnCompare(sourceFile, targetFile, columnName, useOcr = false) {
+    const formData = new FormData();
+    formData.append('source_file', sourceFile);
+    formData.append('target_file', targetFile);
+    formData.append('column_name', columnName);
+    formData.append('use_ocr', useOcr.toString());
+    
+    const res = await fetch(`${API_BASE}/reports/quick-compare/`, {
+      method: 'POST',
+      body: formData,
+    });
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  /**
+   * Get download URL for report
+   */
+  getReportDownloadUrl(jobId) {
+    return `${API_BASE}/reports/download/${jobId}/`;
+  },
 };

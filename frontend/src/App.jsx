@@ -3,6 +3,7 @@ import { ThemeProvider } from './context/ThemeContext';
 import Landing from './pages/Landing';
 import Workspace from './pages/Workspace';
 import Compare from './pages/Compare';
+import Reports from './pages/Reports';
 import { Settings } from './pages/Settings';
 
 function App() {
@@ -12,6 +13,7 @@ function App() {
         <Route path="/" element={<Landing />} />
         <Route path="/workspace" element={<Workspace />} />
         <Route path="/compare" element={<Compare />} />
+        <Route path="/reports" element={<Reports />} />
         <Route path="/settings" element={<Settings />} />
       </Routes>
     </ThemeProvider>

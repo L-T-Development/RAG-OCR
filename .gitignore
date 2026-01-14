@@ -43,3 +43,6 @@ backend/tables.db
 *.sqlite3
 models/
 backend/models/
+
+
+Comparator-main/

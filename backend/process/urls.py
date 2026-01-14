@@ -41,4 +41,11 @@ urlpatterns = [
     # LLM Model Selection Endpoints
     path('api/llm/models/', views.llm_models_list, name='llm_models_list'),
     path('api/llm/select/', views.llm_model_select, name='llm_model_select'),
+
+    # ==================== REPORTS / COMPARATOR ENDPOINTS ====================
+    path('api/reports/columns/', views.get_columns_from_file, name='get_columns'),
+    path('api/reports/compare/', views.start_multi_pdf_comparison, name='multi_pdf_compare'),
+    path('api/reports/status/<str:job_id>/', views.get_report_status, name='report_status'),
+    path('api/reports/quick-compare/', views.quick_column_compare, name='quick_compare'),
+    path('api/reports/download/<str:job_id>/', views.download_report, name='download_report'),
 ]

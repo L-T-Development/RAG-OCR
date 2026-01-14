@@ -24,6 +24,15 @@ from process.document_compare import (
 
 from process.llm_summary import summarize_diff
 
+# Reports Engine imports
+from process.reports_engine import (
+    create_report_job,
+    get_report_job_status,
+    get_file_columns,
+    AdvancedComparator,
+    MultiPDFComparator
+)
+
 def home(request):
     return render(request, 'home.html')
 def compare_page(request):
@@ -735,3 +744,269 @@ def llm_model_select(request):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
+
+
+# ==================== REPORTS / COMPARATOR ENDPOINTS ====================
+
+@csrf_exempt
+def get_columns_from_file(request):
+    """
+    Extract column headers from uploaded file (Excel, PDF, Image).
+    Used to let user select which column to compare.
+    
+    POST /api/reports/columns/
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "POST method required"}, status=405)
+    
+    uploaded_file = request.FILES.get("file")
+    
+    if not uploaded_file:
+        return JsonResponse({"error": "File is required"}, status=400)
+    
+    # Get file extension
+    ext = os.path.splitext(uploaded_file.name)[1].lower()
+    supported = ['.xlsx', '.xls', '.pdf', '.png', '.jpg', '.jpeg']
+    
+    if ext not in supported:
+        return JsonResponse({
+            "error": f"Unsupported file type. Supported: {', '.join(supported)}"
+        }, status=400)
+    
+    try:
+        # Save to temp file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as f:
+            for chunk in uploaded_file.chunks():
+                f.write(chunk)
+            temp_path = f.name
+        
+        # Extract columns
+        columns = get_file_columns(temp_path)
+        
+        # Cleanup
+        os.unlink(temp_path)
+        
+        return JsonResponse({
+            "columns": columns,
+            "filename": uploaded_file.name,
+            "file_type": ext
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+def start_multi_pdf_comparison(request):
+    """
+    Start a multi-PDF comparison job.
+    
+    POST /api/reports/compare/
+    - source_file: Excel/PDF file with values to search
+    - column_name: Column to extract values from
+    - pdf_files[]: List of PDF files to search in
+    - use_ocr: Optional, enable OCR (default: false)
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "POST method required"}, status=405)
+    
+    # Get source file
+    source_file = request.FILES.get("source_file")
+    if not source_file:
+        return JsonResponse({"error": "Source file is required"}, status=400)
+    
+    # Get column name
+    column_name = request.POST.get("column_name")
+    if not column_name:
+        return JsonResponse({"error": "Column name is required"}, status=400)
+    
+    # Get PDF files
+    pdf_files = request.FILES.getlist("pdf_files")
+    if not pdf_files or len(pdf_files) == 0:
+        return JsonResponse({"error": "At least one PDF file is required"}, status=400)
+    
+    # Get OCR option
+    use_ocr = request.POST.get("use_ocr", "false").lower() == "true"
+    
+    print(f"[Reports] Starting comparison: {source_file.name} ({column_name}) against {len(pdf_files)} PDFs")
+    
+    try:
+        # Save source file
+        source_ext = os.path.splitext(source_file.name)[1].lower()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=source_ext) as f:
+            for chunk in source_file.chunks():
+                f.write(chunk)
+            source_path = f.name
+        
+        # Save PDF files
+        pdf_paths = []
+        pdf_filenames = []
+        for pdf_file in pdf_files:
+            pdf_ext = os.path.splitext(pdf_file.name)[1].lower()
+            with tempfile.NamedTemporaryFile(delete=False, suffix=pdf_ext) as f:
+                for chunk in pdf_file.chunks():
+                    f.write(chunk)
+                pdf_paths.append(f.name)
+                pdf_filenames.append(pdf_file.name)
+        
+        # Create background job
+        job_id = create_report_job(
+            source_path=source_path,
+            source_filename=source_file.name,
+            column_name=column_name,
+            pdf_paths=pdf_paths,
+            pdf_filenames=pdf_filenames,
+            use_ocr=use_ocr
+        )
+        
+        return JsonResponse({
+            "job_id": job_id,
+            "status": "pending",
+            "message": "Comparison job submitted. Poll /api/reports/status/<job_id>/ for progress."
+        }, status=202)
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+def get_report_status(request, job_id):
+    """
+    Check status of a report job.
+    
+    GET /api/reports/status/<job_id>/
+    """
+    job = get_report_job_status(job_id)
+    
+    if not job:
+        return JsonResponse({"error": "Job not found"}, status=404)
+    
+    # Return full job status including logs
+    response = {
+        "status": job.get("status"),
+        "progress": job.get("progress", 0),
+        "progress_message": job.get("progress_message", ""),
+        "source_file": job.get("source_file"),
+        "column_name": job.get("column_name"),
+        "pdf_count": job.get("pdf_count"),
+        "logs": job.get("logs", [])[-15:],  # Last 15 log entries
+    }
+    
+    if job.get("status") == "completed":
+        response["result"] = job.get("result")
+    elif job.get("status") == "failed":
+        response["error"] = job.get("error")
+    
+    return JsonResponse(response)
+
+
+@csrf_exempt
+def quick_column_compare(request):
+    """
+    Quick synchronous comparison (for small files).
+    
+    POST /api/reports/quick-compare/
+    """
+    print("\n" + "="*60)
+    print("[REPORTS] Quick comparison request")
+    
+    if request.method != "POST":
+        return JsonResponse({"error": "POST method required"}, status=405)
+    
+    source_file = request.FILES.get("source_file")
+    target_file = request.FILES.get("target_file")
+    column_name = request.POST.get("column_name")
+    use_ocr = request.POST.get("use_ocr", "false").lower() == "true"
+    
+    if not all([source_file, target_file, column_name]):
+        return JsonResponse({
+            "error": "source_file, target_file, and column_name are required"
+        }, status=400)
+    
+    try:
+        # Save temp files
+        source_ext = os.path.splitext(source_file.name)[1].lower()
+        target_ext = os.path.splitext(target_file.name)[1].lower()
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=source_ext) as f:
+            for chunk in source_file.chunks():
+                f.write(chunk)
+            source_path = f.name
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=target_ext) as f:
+            for chunk in target_file.chunks():
+                f.write(chunk)
+            target_path = f.name
+        
+        # Run comparison
+        comparator = AdvancedComparator(use_ocr=use_ocr)
+        
+        # Extract values
+        search_values = comparator.extract_values_from_file(source_path, column_name)
+        
+        if not search_values:
+            return JsonResponse({
+                "error": f"No values found in column '{column_name}'"
+            }, status=400)
+        
+        # Search in target
+        results = comparator.search_values_in_file(target_path, search_values)
+        
+        # Cleanup
+        os.unlink(source_path)
+        os.unlink(target_path)
+        
+        # Prepare response
+        total = len(search_values)
+        found_count = len(results['found'])
+        not_found_count = len(results['not_found'])
+        match_pct = (found_count / total * 100) if total > 0 else 0
+        
+        return JsonResponse({
+            "source_file": source_file.name,
+            "target_file": target_file.name,
+            "column_name": column_name,
+            "total_values": total,
+            "found_count": found_count,
+            "not_found_count": not_found_count,
+            "match_percentage": round(match_pct, 2),
+            "found": {k: v for k, v in results['found'].items()},
+            "not_found": list(results['not_found'])
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+def download_report(request, job_id):
+    """
+    Download the Excel report for a completed job.
+    
+    GET /api/reports/download/<job_id>/
+    """
+    job = get_report_job_status(job_id)
+    
+    if not job:
+        return JsonResponse({"error": "Job not found"}, status=404)
+    
+    if job.get('status') != 'completed':
+        return JsonResponse({"error": "Report not ready yet"}, status=400)
+    
+    result = job.get('result', {})
+    excel_path = result.get('excel_report')
+    
+    if not excel_path or not os.path.exists(excel_path):
+        return JsonResponse({"error": "Report file not found"}, status=404)
+    
+    from django.http import FileResponse
+    
+    return FileResponse(
+        open(excel_path, 'rb'),
+        as_attachment=True,
+        filename=os.path.basename(excel_path)
+    )

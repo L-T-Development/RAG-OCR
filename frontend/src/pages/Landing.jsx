@@ -19,7 +19,7 @@ function Landing() {
     
     // Auto-rotate features
     const interval = setInterval(() => {
-      setActiveFeature((prev) => (prev + 1) % 4);
+      setActiveFeature((prev) => (prev + 1) % 5);
     }, 3000);
     
     return () => {
@@ -46,6 +46,12 @@ function Landing() {
       title: 'Document Compare',
       description: 'Compare document versions with detailed change tracking',
       color: '#14b8a6'
+    },
+    {
+      icon: 'fa-solid fa-chart-bar',
+      title: 'Multi-PDF Reports',
+      description: 'Compare Excel values against multiple PDFs with detailed reports',
+      color: '#8b5cf6'
     },
     {
       icon: 'fa-solid fa-bolt',

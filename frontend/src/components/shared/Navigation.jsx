@@ -7,7 +7,8 @@ import {
   Settings,
   Moon,
   Sun,
-  Home
+  Home,
+  FileBarChart
 } from 'lucide-react';
 import './Navigation.css';
 
@@ -48,6 +49,13 @@ export function Navigation({ compact = false }) {
           >
             <GitCompare size={16} />
             Compare
+          </Link>
+          <Link 
+            to="/reports" 
+            className={`nav__link ${isActive('/reports') ? 'nav__link--active' : ''}`}
+          >
+            <FileBarChart size={16} />
+            Reports
           </Link>
         </div>
       </div>
