@@ -10,6 +10,10 @@ import threading
 import re
 import sqlite3
 
+# Excel and Word document support
+import openpyxl
+from docx import Document as DocxDocument
+
 # Optional CUDA support
 try:
     import torch
@@ -726,6 +730,290 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
 
     print(f"[RAG] ✓ Completed in {end_time - start_time:.1f}s | {len(text_chunks)} chunks + {table_count} tables stored")
     return {"text_chunks": len(text_chunks), "table_chunks": table_count}
+
+
+# ---------------- EXCEL INGESTION ----------------
+def process_excel(file_path, doc_id, thread_id, parent_id, filename):
+    """
+    Process Excel files (.xlsx, .xls) for RAG.
+    Extracts text from all sheets and embeds it.
+    """
+    # Ensure model is loaded
+    if not model_manager.is_ready():
+        model_manager.load_model()
+
+    if not model_manager.is_ready():
+        raise RuntimeError("Embedding model not configured. Please set model path in Settings.")
+
+    start_time = time.time()
+    print(f"\n[RAG] Processing Excel: {filename} (Doc ID: {doc_id})")
+
+    try:
+        workbook = openpyxl.load_workbook(file_path, data_only=True)
+    except Exception as e:
+        print(f"[RAG] Error loading Excel file: {e}")
+        raise RuntimeError(f"Failed to load Excel file: {e}")
+
+    text_chunks = []
+    metadatas = []
+    ids = []
+    table_count = 0
+    chunk_count = 0
+
+    for sheet_idx, sheet_name in enumerate(workbook.sheetnames):
+        sheet = workbook[sheet_name]
+        print(f"[RAG] Processing sheet: {sheet_name}")
+
+        # Collect all text from the sheet
+        sheet_text = []
+        rows_data = []
+        headers = None
+
+        for row_idx, row in enumerate(sheet.iter_rows(values_only=True)):
+            if not any(cell is not None for cell in row):
+                continue  # Skip empty rows
+
+            row_values = [str(cell) if cell is not None else "" for cell in row]
+            rows_data.append(row_values)
+
+            if row_idx == 0:
+                headers = row_values
+
+            # Build text representation
+            row_text = " | ".join(str(cell) for cell in row if cell is not None)
+            if row_text.strip():
+                sheet_text.append(row_text)
+
+        # Store as table in tables.db if it looks like structured data
+        if len(rows_data) > 1 and headers:
+            table_id = f"{doc_id}_sheet_{sheet_idx}_table_0"
+            column_count = len(headers) if headers else len(rows_data[0]) if rows_data else 0
+            
+            store_table(
+                table_id=table_id,
+                doc_id=doc_id,
+                thread_id=thread_id,
+                parent_id=parent_id,
+                source=filename,
+                page=sheet_idx + 1,
+                table_index=0,
+                headers=headers,
+                row_count=len(rows_data) - 1,
+                column_count=column_count,
+                table_data=rows_data
+            )
+            table_count += 1
+
+        # Chunk the sheet text
+        full_text = f"Sheet: {sheet_name}\n" + "\n".join(sheet_text)
+        chunks = smart_chunk_text(full_text)
+        chunk_count += len(chunks)
+
+        for i, chunk in enumerate(chunks):
+            chunk_id = f"{doc_id}_sheet_{sheet_idx}_{i}"
+            text_chunks.append(chunk)
+            ids.append(chunk_id)
+
+            metadatas.append({
+                "doc_id": str(doc_id),
+                "thread_id": str(thread_id),
+                "parent_id": str(parent_id) if parent_id else "none",
+                "source": filename,
+                "page": sheet_idx + 1,
+                "sheet_name": sheet_name,
+                "type": "excel_text"
+            })
+
+    workbook.close()
+
+    if not text_chunks:
+        print("[RAG] No valid text chunks found in Excel.")
+        return {"text_chunks": 0, "table_chunks": table_count}
+
+    print(f"[RAG] Embedding {len(text_chunks)} chunks...")
+    embed_start = time.time()
+    embeddings = model_manager.encode(text_chunks).tolist()
+    embed_time = time.time() - embed_start
+    print(f"[RAG] ✓ Embedded in {embed_time:.2f}s")
+
+    # Batch insert
+    total_chunks = len(text_chunks)
+    if total_chunks <= CHROMA_BATCH_SIZE:
+        collection.add(
+            documents=text_chunks,
+            embeddings=embeddings,
+            metadatas=metadatas,
+            ids=ids
+        )
+    else:
+        for i in range(0, total_chunks, CHROMA_BATCH_SIZE):
+            end_idx = min(i + CHROMA_BATCH_SIZE, total_chunks)
+            collection.add(
+                documents=text_chunks[i:end_idx],
+                embeddings=embeddings[i:end_idx],
+                metadatas=metadatas[i:end_idx],
+                ids=ids[i:end_idx]
+            )
+
+    end_time = time.time()
+    print(f"[RAG] ✓ Excel completed in {end_time - start_time:.1f}s | {len(text_chunks)} chunks + {table_count} tables stored")
+    return {"text_chunks": len(text_chunks), "table_chunks": table_count}
+
+
+# ---------------- WORD DOCUMENT INGESTION ----------------
+def process_word(file_path, doc_id, thread_id, parent_id, filename):
+    """
+    Process Word documents (.docx) for RAG.
+    Extracts text from paragraphs and tables.
+    """
+    # Ensure model is loaded
+    if not model_manager.is_ready():
+        model_manager.load_model()
+
+    if not model_manager.is_ready():
+        raise RuntimeError("Embedding model not configured. Please set model path in Settings.")
+
+    start_time = time.time()
+    print(f"\n[RAG] Processing Word: {filename} (Doc ID: {doc_id})")
+
+    try:
+        doc = DocxDocument(file_path)
+    except Exception as e:
+        print(f"[RAG] Error loading Word file: {e}")
+        raise RuntimeError(f"Failed to load Word file: {e}")
+
+    text_chunks = []
+    metadatas = []
+    ids = []
+    table_count = 0
+    chunk_count = 0
+
+    # Extract text from paragraphs
+    paragraphs_text = []
+    for para in doc.paragraphs:
+        if para.text.strip():
+            paragraphs_text.append(para.text.strip())
+
+    full_text = "\n\n".join(paragraphs_text)
+    chunks = smart_chunk_text(full_text)
+    chunk_count += len(chunks)
+
+    for i, chunk in enumerate(chunks):
+        chunk_id = f"{doc_id}_para_{i}"
+        text_chunks.append(chunk)
+        ids.append(chunk_id)
+
+        metadatas.append({
+            "doc_id": str(doc_id),
+            "thread_id": str(thread_id),
+            "parent_id": str(parent_id) if parent_id else "none",
+            "source": filename,
+            "page": 1,
+            "type": "word_text"
+        })
+
+    # Extract tables from Word document
+    for table_idx, table in enumerate(doc.tables):
+        rows_data = []
+        headers = None
+
+        for row_idx, row in enumerate(table.rows):
+            row_values = [cell.text.strip() for cell in row.cells]
+            rows_data.append(row_values)
+
+            if row_idx == 0:
+                headers = row_values
+
+        if len(rows_data) > 0:
+            table_id = f"{doc_id}_table_{table_idx}"
+            column_count = len(headers) if headers else len(rows_data[0]) if rows_data else 0
+
+            store_table(
+                table_id=table_id,
+                doc_id=doc_id,
+                thread_id=thread_id,
+                parent_id=parent_id,
+                source=filename,
+                page=1,
+                table_index=table_idx,
+                headers=headers,
+                row_count=len(rows_data) - 1 if headers else len(rows_data),
+                column_count=column_count,
+                table_data=rows_data
+            )
+            table_count += 1
+
+            # Create text representation for embedding
+            table_text = f"Table {table_idx + 1}:\n"
+            if headers:
+                table_text += "Headers: " + ", ".join(str(h) for h in headers if h) + "\n"
+
+            for row in rows_data[1:6]:  # First 5 data rows
+                table_text += " | ".join(str(cell) for cell in row if cell) + "\n"
+
+            chunk_id = f"{doc_id}_table_{table_idx}_text"
+            text_chunks.append(table_text)
+            ids.append(chunk_id)
+            metadatas.append({
+                "doc_id": str(doc_id),
+                "thread_id": str(thread_id),
+                "parent_id": str(parent_id) if parent_id else "none",
+                "source": filename,
+                "page": 1,
+                "type": "word_table",
+                "table_id": table_id
+            })
+
+    if not text_chunks:
+        print("[RAG] No valid text chunks found in Word document.")
+        return {"text_chunks": 0, "table_chunks": table_count}
+
+    print(f"[RAG] Embedding {len(text_chunks)} chunks...")
+    embed_start = time.time()
+    embeddings = model_manager.encode(text_chunks).tolist()
+    embed_time = time.time() - embed_start
+    print(f"[RAG] ✓ Embedded in {embed_time:.2f}s")
+
+    # Batch insert
+    total_chunks = len(text_chunks)
+    if total_chunks <= CHROMA_BATCH_SIZE:
+        collection.add(
+            documents=text_chunks,
+            embeddings=embeddings,
+            metadatas=metadatas,
+            ids=ids
+        )
+    else:
+        for i in range(0, total_chunks, CHROMA_BATCH_SIZE):
+            end_idx = min(i + CHROMA_BATCH_SIZE, total_chunks)
+            collection.add(
+                documents=text_chunks[i:end_idx],
+                embeddings=embeddings[i:end_idx],
+                metadatas=metadatas[i:end_idx],
+                ids=ids[i:end_idx]
+            )
+
+    end_time = time.time()
+    print(f"[RAG] ✓ Word completed in {end_time - start_time:.1f}s | {len(text_chunks)} chunks + {table_count} tables stored")
+    return {"text_chunks": len(text_chunks), "table_chunks": table_count}
+
+
+# ---------------- UNIVERSAL DOCUMENT PROCESSOR ----------------
+def process_document(file_path, doc_id, thread_id, parent_id, filename):
+    """
+    Universal document processor that handles PDF, Excel, and Word files.
+    Automatically detects file type and calls the appropriate processor.
+    """
+    ext = os.path.splitext(filename)[1].lower()
+
+    if ext == '.pdf':
+        return process_pdf(file_path, doc_id, thread_id, parent_id, filename)
+    elif ext in ['.xlsx', '.xls']:
+        return process_excel(file_path, doc_id, thread_id, parent_id, filename)
+    elif ext == '.docx':
+        return process_word(file_path, doc_id, thread_id, parent_id, filename)
+    else:
+        raise ValueError(f"Unsupported file type: {ext}. Supported: .pdf, .xlsx, .xls, .docx")
 
 
 def detect_table_query_intent(query_text):

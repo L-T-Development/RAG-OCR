@@ -234,8 +234,8 @@ function EmptyChat({ onSuggestionClick }) {
       </div>
       <h2 className="chat-area__empty-title">Start a conversation</h2>
       <p className="chat-area__empty-text">
-        Upload a PDF document and ask questions about its content.
-        The AI will analyze and provide answers based on the document.
+        Upload documents (PDF, Excel, or Word) and ask questions about their content.
+        The AI will analyze and provide answers based on your documents.
       </p>
     </div>
   );
@@ -391,6 +391,12 @@ export function ChatArea({
           <p className="chat-area__no-thread-text">
             Select or create a thread to start chatting
           </p>
+          <div style={{ marginTop: '1rem' }}>
+            <Link to="/reports" className="chat-area__nav-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 1rem', background: 'var(--color-primary)', color: 'white', borderRadius: '8px', textDecoration: 'none' }}>
+              <FileSearch size={18} />
+              <span>Go to Reports</span>
+            </Link>
+          </div>
         </div>
       </div>
     );
@@ -420,10 +426,6 @@ export function ChatArea({
               <span>Summarize</span>
             </button>
           )}
-          <Link to="/compare" className="chat-area__nav-btn">
-            <GitCompare size={18} />
-            <span>Compare</span>
-          </Link>
         </div>
       </header>
 
@@ -516,7 +518,7 @@ export function ChatArea({
               className="chat-area__upload-btn"
               onClick={onUploadClick}
               disabled={disabled}
-              title="Upload PDF"
+              title="Upload Document (PDF, Excel, Word)"
             >
               <Paperclip size={20} />
             </button>

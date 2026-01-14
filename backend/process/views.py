@@ -5,7 +5,7 @@ from django.db.models import Q
 from .models import Thread, Document, ChatMessage, AppConfig
 from django.views.decorators.http import require_http_methods
 from .rag_engine import (
-    process_pdf, query_rag, delete_from_chroma, summarize_document,
+    process_pdf, process_document, query_rag, delete_from_chroma, summarize_document,
     get_thread_documents_summary, get_model_status, configure_model_path,
     validate_model_path, extract_pdf_title, get_llm_models_list,
     get_current_llm_model, set_llm_model
@@ -81,11 +81,21 @@ def list_threads(request):
     return JsonResponse({'threads': data})
 
 # --- Upload File (UPDATED WITH AI VECTORIZATION) ---
+# Supported file types for RAG chat
+SUPPORTED_EXTENSIONS = ['.pdf', '.xlsx', '.xls', '.docx']
+
 @csrf_exempt
 def upload_file(request, thread_id):
     if request.method == 'POST' and request.FILES.get('file'):
         thread = get_object_or_404(Thread, id=thread_id)
         uploaded_file = request.FILES['file']
+
+        # Check file type
+        ext = os.path.splitext(uploaded_file.name)[1].lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            return JsonResponse({
+                'error': f'Unsupported file type. Supported: {", ".join(SUPPORTED_EXTENSIONS)}'
+            }, status=400)
 
         # 1. Save to SQL Database (Django)
         doc = Document.objects.create(
@@ -99,13 +109,25 @@ def upload_file(request, thread_id):
             # We need the parent ID to tag the vector for access control
             p_id = thread.parent.id if thread.parent else None
 
-            chunk_count = process_pdf(
-                file_path=doc.file.path,
+            # Store file path before processing
+            file_path = doc.file.path
+
+            chunk_count = process_document(
+                file_path=file_path,
                 doc_id=doc.id,
                 thread_id=thread.id,
                 parent_id=p_id,
                 filename=doc.filename
             )
+
+            # Delete physical file after successful vectorization
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    print(f"[STORAGE] Deleted file after processing: {file_path}")
+            except Exception as delete_error:
+                print(f"[STORAGE] Warning: Could not delete file {file_path}: {delete_error}")
+
             return JsonResponse({
                 'message': 'File uploaded and vectorized successfully',
                 'filename': doc.filename,
@@ -136,12 +158,39 @@ def get_thread_files(request, thread_id):
     return JsonResponse({'files': file_list, 'thread_name': current_thread.name})
 
 
-# --- Quick Upload: Auto-creates thread named after PDF ---
+def extract_document_title(file_path, filename):
+    """Extract title from document based on file type."""
+    ext = os.path.splitext(filename)[1].lower()
+    
+    if ext == '.pdf':
+        return extract_pdf_title(file_path)
+    elif ext in ['.xlsx', '.xls']:
+        # Use filename without extension for Excel
+        return os.path.splitext(filename)[0]
+    elif ext == '.docx':
+        # Try to extract title from Word document
+        try:
+            from docx import Document as DocxDocument
+            doc = DocxDocument(file_path)
+            # Use first heading or paragraph as title
+            for para in doc.paragraphs:
+                if para.text.strip():
+                    title = para.text.strip()[:100]  # Limit length
+                    return title if title else os.path.splitext(filename)[0]
+            return os.path.splitext(filename)[0]
+        except:
+            return os.path.splitext(filename)[0]
+    else:
+        return os.path.splitext(filename)[0]
+
+
+# --- Quick Upload: Auto-creates thread named after document ---
 @csrf_exempt
 def quick_upload(request):
     """
-    Upload a PDF and automatically create a thread named after the document.
+    Upload a document and automatically create a thread named after it.
     Used for drag & drop upload when no thread is selected.
+    Supports PDF, Excel (.xlsx, .xls), and Word (.docx) files.
     """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST method required'}, status=405)
@@ -151,19 +200,22 @@ def quick_upload(request):
 
     uploaded_file = request.FILES['file']
 
-    # Check if it's a PDF
-    if not uploaded_file.name.lower().endswith('.pdf'):
-        return JsonResponse({'error': 'Only PDF files are supported'}, status=400)
+    # Check if it's a supported file type
+    ext = os.path.splitext(uploaded_file.name)[1].lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        return JsonResponse({
+            'error': f'Unsupported file type. Supported: {", ".join(SUPPORTED_EXTENSIONS)}'
+        }, status=400)
 
     try:
         # Save file temporarily to extract title
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
             for chunk in uploaded_file.chunks():
                 tmp.write(chunk)
             tmp_path = tmp.name
 
         # Extract title for thread name
-        thread_name = extract_pdf_title(tmp_path)
+        thread_name = extract_document_title(tmp_path, uploaded_file.name)
 
         # Create the thread
         thread = Thread.objects.create(name=thread_name, parent=None)
@@ -178,9 +230,12 @@ def quick_upload(request):
             filename=uploaded_file.name
         )
 
-        # Process the PDF (vectorize it)
-        result = process_pdf(
-            file_path=doc.file.path,
+        # Store file path before processing
+        file_path = doc.file.path
+
+        # Process the document (vectorize it)
+        result = process_document(
+            file_path=file_path,
             doc_id=str(doc.id),
             thread_id=str(thread.id),
             parent_id=None,
@@ -190,6 +245,14 @@ def quick_upload(request):
         # Mark as processed
         doc.is_processed = True
         doc.save()
+
+        # Delete physical file after successful vectorization
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                print(f"[STORAGE] Deleted file after processing: {file_path}")
+        except Exception as delete_error:
+            print(f"[STORAGE] Warning: Could not delete file {file_path}: {delete_error}")
 
         # Clean up temp file
         os.unlink(tmp_path)

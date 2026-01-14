@@ -158,15 +158,6 @@ export function Sidebar({
 
   return (
     <aside className="sidebar">
-      <div className="sidebar__header">
-        <div className="sidebar__logo">
-          <div className="sidebar__logo-icon">
-            <Sparkles size={18} />
-          </div>
-          <span className="sidebar__logo-text">RAG-OCR</span>
-        </div>
-      </div>
-
       <div className="sidebar__new-thread">
         <button className="sidebar__new-thread-btn" onClick={onCreateThread}>
           <Plus size={16} />

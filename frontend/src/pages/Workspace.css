@@ -4,14 +4,23 @@
 
 .workspace {
   display: flex;
+  flex-direction: column;
   height: 100vh;
   background: var(--color-bg-secondary);
+}
+
+.workspace__content {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .workspace__main {
   flex: 1;
   display: flex;
   min-width: 0;
+  overflow: hidden;
 }
 
 /* ============================================

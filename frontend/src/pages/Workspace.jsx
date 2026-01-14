@@ -354,42 +354,45 @@ export function Workspace() {
 
   return (
     <div className="workspace">
-      <Sidebar
-        threads={threads}
-        currentThreadId={currentThreadId}
-        onSelectThread={handleSelectThread}
-        onCreateThread={handleCreateThread}
-        onCreateSubThread={handleCreateSubThread}
-        onDeleteThread={handleDeleteThread}
-        onOpenSettings={() => navigate('/settings')}
-      />
-      
-      <main className="workspace__main">
-        <ChatArea
-          threadId={currentThreadId}
-          threadName={currentThreadName}
-          messages={messages}
-          documents={documents}
-          onSendMessage={handleSendMessage}
-          onUploadClick={() => document.querySelector('.document-panel__upload-btn')?.click()}
-          onSummarizeThread={handleSummarizeThread}
-          onSummarizeDocument={handleSummarizeDocument}
-          isLoading={isLoading}
-          isSummarizing={isSummarizing}
-          disabled={!currentThreadId}
+      <Navigation />
+      <div className="workspace__content">
+        <Sidebar
+          threads={threads}
+          currentThreadId={currentThreadId}
+          onSelectThread={handleSelectThread}
+          onCreateThread={handleCreateThread}
+          onCreateSubThread={handleCreateSubThread}
+          onDeleteThread={handleDeleteThread}
+          onOpenSettings={() => navigate('/settings')}
         />
         
-        <DocumentPanel
-          documents={documents}
-          onUpload={handleUpload}
-          onDelete={handleDeleteDocument}
-          onSummarize={handleSummarizeDocument}
-          disabled={!currentThreadId}
-          isUploading={isUploading}
-          uploadProgress={uploadProgress}
-          uploadStatus={uploadStatus}
-        />
-      </main>
+        <main className="workspace__main">
+          <ChatArea
+            threadId={currentThreadId}
+            threadName={currentThreadName}
+            messages={messages}
+            documents={documents}
+            onSendMessage={handleSendMessage}
+            onUploadClick={() => document.querySelector('.document-panel__upload-btn')?.click()}
+            onSummarizeThread={handleSummarizeThread}
+            onSummarizeDocument={handleSummarizeDocument}
+            isLoading={isLoading}
+            isSummarizing={isSummarizing}
+            disabled={!currentThreadId}
+          />
+          
+          <DocumentPanel
+            documents={documents}
+            onUpload={handleUpload}
+            onDelete={handleDeleteDocument}
+            onSummarize={handleSummarizeDocument}
+            disabled={!currentThreadId}
+            isUploading={isUploading}
+            uploadProgress={uploadProgress}
+            uploadStatus={uploadStatus}
+          />
+        </main>
+      </div>
 
       <DropZone onDrop={handleDrop} disabled={isUploading} />
 

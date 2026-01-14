@@ -6,15 +6,29 @@ import {
   FileUp,
   Loader2,
   FolderOpen,
-  Sparkles
+  Sparkles,
+  FileSpreadsheet,
+  File
 } from 'lucide-react';
 import './DocumentPanel.css';
+
+// Supported file extensions for chat
+const SUPPORTED_EXTENSIONS = ['.pdf', '.xlsx', '.xls', '.docx'];
+
+// Get icon based on file type with colors
+function getFileIcon(filename) {
+  const ext = filename?.toLowerCase().split('.').pop();
+  if (ext === 'pdf') return <FileText size={18} style={{ color: '#ef4444' }} />; // Red
+  if (ext === 'xlsx' || ext === 'xls') return <FileSpreadsheet size={18} style={{ color: '#10b981' }} />; // Green
+  if (ext === 'docx') return <File size={18} style={{ color: '#3b82f6' }} />; // Blue
+  return <FileText size={18} />;
+}
 
 function DocumentCard({ document, onDelete, onSummarize, isUploading = false }) {
   return (
     <div className={`document-card ${isUploading ? 'document-card--uploading' : ''}`}>
       <div className="document-card__icon">
-        {isUploading ? <Loader2 size={18} className="animate-spin" /> : <FileText size={18} />}
+        {isUploading ? <Loader2 size={18} className="animate-spin" /> : getFileIcon(document.name)}
       </div>
       <div className="document-card__info">
         <div className="document-card__name" title={document.name}>
@@ -82,11 +96,12 @@ export function DocumentPanel({
   const handleFileChange = (e) => {
     const file = e.target.files[0];
     if (file) {
-      // Strict PDF check
-      if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+      // Check if file extension is supported
+      const ext = '.' + file.name.toLowerCase().split('.').pop();
+      if (SUPPORTED_EXTENSIONS.includes(ext)) {
         onUpload(file);
       } else {
-        alert('Only PDF files are supported');
+        alert(`Unsupported file type. Supported: ${SUPPORTED_EXTENSIONS.join(', ')}`);
       }
       e.target.value = '';
     }
@@ -114,9 +129,9 @@ export function DocumentPanel({
             {isUploading ? <Loader2 size={20} className="animate-spin" /> : <Upload size={20} />}
           </div>
           <span className="document-panel__upload-text">
-            {isUploading ? uploadStatus || 'Uploading...' : 'Upload PDF'}
+            {isUploading ? uploadStatus || 'Uploading...' : 'Upload Document'}
           </span>
-          {!isUploading && <span className="document-panel__upload-hint">or drag and drop</span>}
+          {!isUploading && <span className="document-panel__upload-hint">PDF, Excel, or Word</span>}
         </button>
         {isUploading && uploadProgress > 0 && (
           <div className="document-panel__progress">
@@ -132,7 +147,7 @@ export function DocumentPanel({
         <input
           ref={fileInputRef}
           type="file"
-          accept="application/pdf,.pdf"
+          accept=".pdf,.xlsx,.xls,.docx,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
           onChange={handleFileChange}
           style={{ display: 'none' }}
         />
@@ -145,7 +160,7 @@ export function DocumentPanel({
           </div>
           <div className="document-panel__empty-title">No documents yet</div>
           <div className="document-panel__empty-text">
-            Upload a PDF to start asking questions
+            Upload PDF, Excel, or Word files to start
           </div>
         </div>
       ) : (
