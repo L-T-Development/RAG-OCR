@@ -155,7 +155,7 @@ function Reports() {
         setError('Polling error');
         setIsProcessing(false);
       }
-    }, 2000);
+    }, 60000);
   };
 
   // Reset form

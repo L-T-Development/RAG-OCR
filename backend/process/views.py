@@ -28,6 +28,7 @@ from process.llm_summary import summarize_diff
 from process.reports_engine import (
     create_report_job,
     get_report_job_status,
+    get_report_excel_bytes,
     get_file_columns,
     AdvancedComparator,
     MultiPDFComparator
@@ -910,9 +911,6 @@ def quick_column_compare(request):
     
     POST /api/reports/quick-compare/
     """
-    print("\n" + "="*60)
-    print("[REPORTS] Quick comparison request")
-    
     if request.method != "POST":
         return JsonResponse({"error": "POST method required"}, status=405)
     
@@ -986,6 +984,7 @@ def quick_column_compare(request):
 def download_report(request, job_id):
     """
     Download the Excel report for a completed job.
+    Serves directly from memory, no file saved on disk.
     
     GET /api/reports/download/<job_id>/
     """
@@ -997,16 +996,19 @@ def download_report(request, job_id):
     if job.get('status') != 'completed':
         return JsonResponse({"error": "Report not ready yet"}, status=400)
     
+    excel_bytes = get_report_excel_bytes(job_id)
+    
+    if not excel_bytes:
+        return JsonResponse({"error": "Report data not found"}, status=404)
+    
+    from django.http import HttpResponse
+    
     result = job.get('result', {})
-    excel_path = result.get('excel_report')
+    filename = result.get('excel_filename', f'Report_{job_id[:8]}.xlsx')
     
-    if not excel_path or not os.path.exists(excel_path):
-        return JsonResponse({"error": "Report file not found"}, status=404)
-    
-    from django.http import FileResponse
-    
-    return FileResponse(
-        open(excel_path, 'rb'),
-        as_attachment=True,
-        filename=os.path.basename(excel_path)
+    response = HttpResponse(
+        excel_bytes,
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     )
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return response

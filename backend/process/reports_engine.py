@@ -1,13 +1,13 @@
 """
 Reports Engine - Multi-PDF Comparator Integration
-Ported from Comparator-main folder with Django integration
+Ported from Comparator-main with proper OCR/scanning logic
 
 Features:
 - Column extraction from Excel/PDF/Images
-- Multi-PDF comparison against Excel values
-- Detailed location tracking (page numbers)
-- Report generation with Excel export
+- Multi-PDF comparison against source values
+- Accurate page number detection using PyPDF2
 - Real-time progress updates
+- In-memory Excel report generation
 """
 
 import pandas as pd
@@ -15,43 +15,34 @@ from pathlib import Path
 from typing import Set, List, Dict, Any, Callable
 import re
 import os
-import tempfile
+import io
 from datetime import datetime
-import json
 
 
 def log_progress(message: str):
-    """Simple progress logger that prints to console."""
+    """Simple progress logger."""
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"[{timestamp}] {message}")
 
 
 class AdvancedComparator:
     """
-    Compare specific column values from source file (Excel/PDF/Image) 
-    against target files (PDF/Excel/Image).
+    Compare specific column values from source file against target files.
+    Uses Docling for text extraction + PyPDF2 for accurate page numbers.
     """
     
     def __init__(self, use_ocr: bool = True, progress_callback: Callable = None):
-        """
-        Initialize comparator with optional OCR support.
-        
-        Args:
-            use_ocr: Enable OCR for scanned PDFs and images
-            progress_callback: Optional callback for progress updates
-        """
         self.use_ocr = use_ocr
         self.converter = None
         self.progress_callback = progress_callback or log_progress
         self._init_docling()
     
     def _log(self, message: str):
-        """Log message using callback."""
         if self.progress_callback:
             self.progress_callback(message)
     
     def _init_docling(self):
-        """Initialize Docling converter with appropriate settings."""
+        """Initialize Docling with OCR settings."""
         try:
             from docling.document_converter import DocumentConverter, PdfFormatOption
             from docling.datamodel.base_models import InputFormat
@@ -69,9 +60,8 @@ class AdvancedComparator:
                 }
             )
             self._log("✓ Docling OCR engine initialized")
-            
-        except ImportError as e:
-            self._log(f"⚠ Docling not available - using PyPDF2 fallback")
+        except ImportError:
+            self._log("⚠ Docling not available - using PyPDF2 only")
             self.converter = None
         except Exception as e:
             self._log(f"⚠ Docling init error: {e}")
@@ -80,7 +70,7 @@ class AdvancedComparator:
     # ==================== COLUMN EXTRACTION ====================
     
     def get_columns(self, file_path: str) -> List[str]:
-        """Get list of column names from file."""
+        """Get column names from file."""
         ext = Path(file_path).suffix.lower()
         filename = Path(file_path).name
         self._log(f"📂 Reading columns from: {filename}")
@@ -91,77 +81,57 @@ class AdvancedComparator:
             return self._get_pdf_columns(file_path)
         elif ext in ['.png', '.jpg', '.jpeg', '.tiff', '.bmp']:
             return self._get_image_columns(file_path)
-        else:
-            self._log(f"⚠ Unsupported file type: {ext}")
-            return []
+        return []
     
     def _get_excel_columns(self, file_path: str) -> List[str]:
-        """Extract column headers from Excel file."""
         try:
             df = pd.read_excel(file_path)
             columns = list(df.columns)
-            self._log(f"✓ Found {len(columns)} columns in Excel")
+            self._log(f"✓ Found {len(columns)} columns")
             return columns
         except Exception as e:
-            self._log(f"✗ Error reading Excel: {e}")
+            self._log(f"✗ Error: {e}")
             return []
     
     def _get_pdf_columns(self, file_path: str) -> List[str]:
-        """Extract column headers from PDF tables using Docling."""
         if not self.converter:
             return ["[All extracted text]"]
-        
         try:
-            self._log("📄 Converting PDF to extract columns...")
             result = self.converter.convert(str(file_path))
             markdown = result.document.export_to_markdown()
             
             columns = set()
             lines = markdown.split('\n')
-            
             for i, line in enumerate(lines):
-                if '|' in line:
-                    if i + 1 < len(lines) and '---' in lines[i + 1]:
-                        cells = [c.strip() for c in line.split('|') if c.strip()]
-                        columns.update(cells)
+                if '|' in line and i + 1 < len(lines) and '---' in lines[i + 1]:
+                    cells = [c.strip() for c in line.split('|') if c.strip()]
+                    columns.update(cells)
             
             if columns:
-                result_cols = sorted(list(columns))
-                self._log(f"✓ Found {len(result_cols)} table columns in PDF")
-                return result_cols
-            else:
-                self._log("ℹ No tables found in PDF")
-                return ["[All extracted text]"]
-                
+                self._log(f"✓ Found {len(columns)} table columns")
+                return sorted(list(columns))
+            return ["[All extracted text]"]
         except Exception as e:
-            self._log(f"✗ Error reading PDF: {e}")
+            self._log(f"✗ Error: {e}")
             return []
     
     def _get_image_columns(self, file_path: str) -> List[str]:
-        """Extract column headers from image using OCR."""
         if not self.converter:
             return ["[All extracted text]"]
-        
         try:
-            self._log("🖼 Processing image with OCR...")
             result = self.converter.convert(str(file_path))
             markdown = result.document.export_to_markdown()
             
             columns = set()
             lines = markdown.split('\n')
-            
             for i, line in enumerate(lines):
-                if '|' in line:
-                    if i + 1 < len(lines) and '---' in lines[i + 1]:
-                        cells = [c.strip() for c in line.split('|') if c.strip()]
-                        columns.update(cells)
+                if '|' in line and i + 1 < len(lines) and '---' in lines[i + 1]:
+                    cells = [c.strip() for c in line.split('|') if c.strip()]
+                    columns.update(cells)
             
-            if columns:
-                return sorted(list(columns))
-            return ["[All extracted text]"]
-            
+            return sorted(list(columns)) if columns else ["[All extracted text]"]
         except Exception as e:
-            self._log(f"✗ Error reading image: {e}")
+            self._log(f"✗ Error: {e}")
             return []
     
     # ==================== VALUE EXTRACTION ====================
@@ -176,33 +146,43 @@ class AdvancedComparator:
             return self._extract_pdf_column(file_path, column_name)
         elif ext in ['.png', '.jpg', '.jpeg', '.tiff', '.bmp']:
             return self._extract_image_column(file_path, column_name)
-        else:
-            return set()
+        return set()
+    
+    def _is_valid_value(self, value: str) -> bool:
+        """Check if a value is valid (not just separators/dashes/empty)."""
+        if not value or not value.strip():
+            return False
+        v = value.strip()
+        # Skip values that are just dashes, dots, underscores, or other separators
+        if all(c in '-_.=~*#|/' for c in v):
+            return False
+        # Skip very short values (likely noise)
+        if len(v) < 2:
+            return False
+        # Skip values that are mostly dashes/dots (like "----" or "...")
+        separator_count = sum(1 for c in v if c in '-_.=~')
+        if separator_count > len(v) * 0.7:
+            return False
+        return True
     
     def _extract_excel_column(self, file_path: str, column_name: str) -> Set[str]:
-        """Extract values from Excel column."""
         try:
             df = pd.read_excel(file_path)
-            
             if column_name not in df.columns:
                 self._log(f"✗ Column '{column_name}' not found!")
                 return set()
             
             values = df[column_name].dropna().astype(str).unique()
-            values = {str(v).strip() for v in values if str(v).strip()}
-            
+            values = {str(v).strip() for v in values if self._is_valid_value(str(v))}
             self._log(f"✓ Extracted {len(values)} unique values from '{column_name}'")
             return values
-            
         except Exception as e:
             self._log(f"✗ Error: {e}")
             return set()
     
     def _extract_pdf_column(self, file_path: str, column_name: str) -> Set[str]:
-        """Extract values from PDF column."""
         if not self.converter:
             return set()
-        
         try:
             result = self.converter.convert(str(file_path))
             markdown = result.document.export_to_markdown()
@@ -214,7 +194,6 @@ class AdvancedComparator:
             for i, line in enumerate(lines):
                 if '|' in line:
                     cells = [c.strip() for c in line.split('|') if c.strip()]
-                    
                     if i + 1 < len(lines) and '---' in lines[i + 1]:
                         for idx, cell in enumerate(cells):
                             if cell == column_name:
@@ -222,48 +201,17 @@ class AdvancedComparator:
                                 break
                     elif column_index >= 0 and column_index < len(cells):
                         val = cells[column_index].strip()
-                        if val and val != column_name:
+                        if val and val != column_name and self._is_valid_value(val):
                             values.add(val)
             
             self._log(f"✓ Extracted {len(values)} values from PDF column")
             return values
-            
         except Exception as e:
-            self._log(f"✗ Error extracting from PDF: {e}")
+            self._log(f"✗ Error: {e}")
             return set()
     
     def _extract_image_column(self, file_path: str, column_name: str) -> Set[str]:
-        """Extract values from image column using OCR."""
-        if not self.converter:
-            return set()
-        
-        try:
-            result = self.converter.convert(str(file_path))
-            markdown = result.document.export_to_markdown()
-            
-            values = set()
-            lines = markdown.split('\n')
-            column_index = -1
-            
-            for i, line in enumerate(lines):
-                if '|' in line:
-                    cells = [c.strip() for c in line.split('|') if c.strip()]
-                    
-                    if i + 1 < len(lines) and '---' in lines[i + 1]:
-                        for idx, cell in enumerate(cells):
-                            if cell == column_name:
-                                column_index = idx
-                                break
-                    elif column_index >= 0 and column_index < len(cells):
-                        val = cells[column_index].strip()
-                        if val and val != column_name:
-                            values.add(val)
-            
-            return values
-            
-        except Exception as e:
-            self._log(f"✗ Error extracting from image: {e}")
-            return set()
+        return self._extract_pdf_column(file_path, column_name)
     
     # ==================== SEARCH FUNCTIONS ====================
     
@@ -277,11 +225,9 @@ class AdvancedComparator:
             return self._search_in_pdf(file_path, search_values)
         elif ext in ['.png', '.jpg', '.jpeg', '.tiff', '.bmp']:
             return self._search_in_image(file_path, search_values)
-        else:
-            return {'found': {}, 'not_found': search_values, 'has_pages': False}
+        return {'found': {}, 'not_found': search_values}
     
     def _search_in_excel(self, file_path: str, search_values: Set[str]) -> Dict[str, Any]:
-        """Search values in Excel file."""
         try:
             df = pd.read_excel(file_path)
             found = {}
@@ -298,21 +244,25 @@ class AdvancedComparator:
                                 found[search_val].append(location)
             
             not_found = search_values - set(found.keys())
-            return {'found': found, 'not_found': not_found, 'has_pages': False}
-            
+            return {'found': found, 'not_found': not_found}
         except Exception as e:
-            self._log(f"✗ Error searching Excel: {e}")
-            return {'found': {}, 'not_found': search_values, 'has_pages': False}
+            self._log(f"✗ Error: {e}")
+            return {'found': {}, 'not_found': search_values}
     
     def _search_in_pdf(self, file_path: str, search_values: Set[str]) -> Dict[str, Any]:
-        """Search values in PDF with page number tracking."""
-        try:
-            import PyPDF2
-            
-            # First pass with Docling to find which values exist
-            values_in_pdf = set()
-            if self.converter:
-                self._log("  → Converting PDF for text extraction...")
+        """
+        Search values in PDF using Docling + PyPDF2 for accurate page numbers.
+        This is the HYBRID approach from Comparator-main.
+        """
+        found = {}
+        not_found = set(search_values)
+        
+        # Step 1: Use Docling to find which values exist in PDF
+        values_in_pdf = set()
+        
+        if self.converter:
+            try:
+                self._log("  → Converting PDF with Docling...")
                 result = self.converter.convert(str(file_path))
                 full_text = result.document.export_to_markdown()
                 
@@ -320,94 +270,102 @@ class AdvancedComparator:
                     if str(search_val).strip() in full_text:
                         values_in_pdf.add(search_val)
                 
-                self._log(f"  → Found {len(values_in_pdf)} values in PDF text")
-            else:
+                self._log(f"  → Docling found {len(values_in_pdf)} values in text")
+            except Exception as e:
+                self._log(f"  → Docling error: {e}, using PyPDF2 only")
                 values_in_pdf = search_values
-            
-            # Second pass: use PyPDF2 for page numbers
-            found = {}
+        else:
+            values_in_pdf = search_values
+        
+        # Step 2: Use PyPDF2 for accurate page number detection
+        # This is the KEY improvement - scan each page ONCE for all values
+        try:
+            import PyPDF2
             
             with open(file_path, 'rb') as pdf_file:
                 pdf_reader = PyPDF2.PdfReader(pdf_file)
                 total_pages = len(pdf_reader.pages)
-                self._log(f"  → Scanning {total_pages} pages for matches...")
+                self._log(f"  → Total pages to scan: {total_pages}")
                 
+                # Track pages for each value
                 value_pages = {val: [] for val in values_in_pdf}
+                matches_found = 0
                 
+                # OPTIMIZED: Scan each page once and check ALL values
                 for page_num in range(total_pages):
                     try:
                         page = pdf_reader.pages[page_num]
                         page_text = page.extract_text() or ""
                         
+                        page_matches = 0
+                        # Check all values against this page
                         for search_val in values_in_pdf:
-                            if str(search_val).strip() in page_text:
+                            search_str = str(search_val).strip()
+                            if search_str in page_text:
+                                if not value_pages[search_val]:  # First time finding this value
+                                    matches_found += 1
                                 value_pages[search_val].append(page_num + 1)
+                                page_matches += 1
                         
-                        # Progress update every 25 pages
-                        if (page_num + 1) % 25 == 0 or page_num == total_pages - 1:
-                            self._log(f"  → Scanned {page_num + 1}/{total_pages} pages")
+                        # Progress every 10 pages or if matches found
+                        if (page_num + 1) % 10 == 0 or page_num == total_pages - 1:
+                            self._log(f"  → Page {page_num + 1}/{total_pages} done | Matches: {matches_found}/{len(values_in_pdf)}")
+                        elif page_matches > 0:
+                            self._log(f"  → Page {page_num + 1}: Found {page_matches} value(s)")
                             
-                    except Exception:
+                    except Exception as page_err:
+                        self._log(f"  → Page {page_num + 1}: Error reading - {page_err}")
                         continue
                 
+                self._log(f"  → Scan complete: {matches_found} values found across {total_pages} pages")
+                
+                # Build results
+                final_found = 0
                 for search_val, pages in value_pages.items():
                     if pages:
                         found[search_val] = pages
+                        not_found.discard(search_val)
+                        final_found += 1
                     elif search_val in values_in_pdf:
-                        found[search_val] = ["Found (page unknown)"]
-            
-            not_found = search_values - set(found.keys())
-            return {'found': found, 'not_found': not_found, 'has_pages': True}
-            
+                        # Docling found it but PyPDF2 didn't (might be in images)
+                        found[search_val] = ["Found (page detection failed)"]
+                        not_found.discard(search_val)
+                        final_found += 1
+                
+                self._log(f"  → Results: {final_found} found, {len(not_found)} not found")
+                        
         except ImportError:
-            return self._search_in_pdf_docling_only(file_path, search_values)
+            self._log("  → PyPDF2 not available")
+            # Fallback: mark Docling-found values without page numbers
+            for val in values_in_pdf:
+                found[val] = ["Page info unavailable"]
+                not_found.discard(val)
         except Exception as e:
-            self._log(f"✗ Error searching PDF: {e}")
-            return {'found': {}, 'not_found': search_values, 'has_pages': False}
-    
-    def _search_in_pdf_docling_only(self, file_path: str, search_values: Set[str]) -> Dict[str, Any]:
-        """Fallback PDF search using only Docling."""
-        if not self.converter:
-            return {'found': {}, 'not_found': search_values, 'has_pages': False}
+            self._log(f"  → PyPDF2 error: {e}")
         
-        try:
-            result = self.converter.convert(str(file_path))
-            full_text = result.document.export_to_markdown()
-            
-            found = {}
-            for search_val in search_values:
-                if str(search_val).strip() in full_text:
-                    found[search_val] = ["Page info unavailable"]
-            
-            not_found = search_values - set(found.keys())
-            return {'found': found, 'not_found': not_found, 'has_pages': False}
-            
-        except Exception as e:
-            return {'found': {}, 'not_found': search_values, 'has_pages': False}
+        return {'found': found, 'not_found': not_found}
     
     def _search_in_image(self, file_path: str, search_values: Set[str]) -> Dict[str, Any]:
-        """Search values in image using OCR."""
         if not self.converter:
-            return {'found': {}, 'not_found': search_values, 'has_pages': False}
-        
+            return {'found': {}, 'not_found': search_values}
         try:
             result = self.converter.convert(str(file_path))
             text = result.document.export_to_markdown()
             
             found = {}
             for search_val in search_values:
-                if search_val in text:
+                if str(search_val).strip() in text:
                     found[search_val] = ["Image"]
             
             not_found = search_values - set(found.keys())
-            return {'found': found, 'not_found': not_found, 'has_pages': False}
-            
+            return {'found': found, 'not_found': not_found}
         except Exception as e:
-            return {'found': {}, 'not_found': search_values, 'has_pages': False}
+            self._log(f"✗ Error: {e}")
+            return {'found': {}, 'not_found': search_values}
 
 
 class MultiPDFComparator:
-    """Compare values from Excel/PDF against multiple PDF files."""
+    """Compare values from source file against multiple PDFs."""
     
     def __init__(self, use_ocr: bool = False, progress_callback: Callable = None):
         self.progress_callback = progress_callback or log_progress
@@ -424,64 +382,57 @@ class MultiPDFComparator:
         pdf_files: List[str],
         job_updater: Callable = None
     ) -> Dict[str, Any]:
-        """
-        Compare source column values against multiple PDF files.
-        """
-        self._log("="*60)
+        """Compare source column values against multiple PDFs."""
+        
+        self._log("=" * 60)
         self._log("🚀 STARTING MULTI-PDF COMPARISON")
-        self._log("="*60)
+        self._log("=" * 60)
         
         # Extract values from source
         source_name = Path(source_file).name
-        self._log(f"\n📋 Step 1: Extracting values from '{column_name}'")
+        self._log(f"\n📋 Extracting values from '{column_name}'")
         self._log(f"   Source: {source_name}")
         
         search_values = self.comparator.extract_values_from_file(source_file, column_name)
         total_values = len(search_values)
         
         if total_values == 0:
-            self._log("✗ No values found to search!")
-            return {
-                'error': 'No values found in source column',
-                'source_file': source_name,
-                'column_name': column_name
-            }
+            self._log("✗ No values found!")
+            return {'error': 'No values found in source column'}
         
         self._log(f"   ✓ Found {total_values} unique values to search")
         
         # Track results
-        all_found = {}
+        all_found = {}  # {value: {pdf_name: [pages]}}
         still_not_found = set(search_values)
         pdf_results = []
         
-        # Search in each PDF
+        # Search each PDF
         total_pdfs = len(pdf_files)
         for i, pdf_file in enumerate(pdf_files, 1):
             pdf_name = Path(pdf_file).name
             
-            self._log(f"\n📄 Step {i+1}: Searching in PDF {i}/{total_pdfs}")
-            self._log(f"   File: {pdf_name}")
-            self._log(f"   Remaining values to find: {len(still_not_found)}")
+            self._log(f"\n📄 Searching PDF {i}/{total_pdfs}: {pdf_name}")
+            self._log(f"   Values remaining: {len(still_not_found)}")
             
-            # Update job progress
             if job_updater:
-                progress = 20 + int((i / total_pdfs) * 70)
-                job_updater(progress, f"Searching PDF {i}/{total_pdfs}: {pdf_name}")
+                progress = 15 + int((i / total_pdfs) * 75)
+                job_updater(progress, f"Searching {pdf_name}...")
             
             result = self.comparator.search_values_in_file(pdf_file, still_not_found)
             
-            found_in_this_pdf = result['found']
-            found_count = len(found_in_this_pdf)
+            found_in_pdf = result['found']
+            found_count = len(found_in_pdf)
             
-            self._log(f"   ✓ Found {found_count} matches in this PDF")
+            self._log(f"   ✓ Found {found_count} matches")
             
-            # Show sample of what was found
+            # Show samples
             if found_count > 0:
-                samples = list(found_in_this_pdf.keys())[:3]
-                self._log(f"   Sample matches: {samples}")
+                samples = list(found_in_pdf.keys())[:3]
+                self._log(f"   Sample: {samples}")
             
             # Update tracking
-            for value, locations in found_in_this_pdf.items():
+            for value, locations in found_in_pdf.items():
                 if value not in all_found:
                     all_found[value] = {}
                 all_found[value][pdf_name] = locations
@@ -489,31 +440,26 @@ class MultiPDFComparator:
             
             pdf_results.append({
                 'pdf_name': pdf_name,
-                'pdf_path': pdf_file,
                 'found_count': found_count,
-                'found': found_in_this_pdf
+                'found': found_in_pdf
             })
         
-        # Calculate summary
+        # Summary
         total_found = len(all_found)
         total_not_found = len(still_not_found)
-        match_percentage = (total_found / total_values * 100) if total_values > 0 else 0
+        match_pct = (total_found / total_values * 100) if total_values > 0 else 0
         
-        self._log("\n" + "="*60)
-        self._log("📊 COMPARISON COMPLETE - SUMMARY")
-        self._log("="*60)
-        self._log(f"   Total values searched: {total_values}")
-        self._log(f"   ✓ Found: {total_found} ({match_percentage:.1f}%)")
+        self._log("\n" + "=" * 60)
+        self._log("📊 COMPARISON COMPLETE")
+        self._log("=" * 60)
+        self._log(f"   Total searched: {total_values}")
+        self._log(f"   ✓ Found: {total_found} ({match_pct:.1f}%)")
         self._log(f"   ✗ Not found: {total_not_found}")
-        self._log(f"   PDFs searched: {total_pdfs}")
         
-        # Show not found samples
         if total_not_found > 0 and total_not_found <= 10:
-            self._log(f"\n   Not found values: {list(still_not_found)}")
+            self._log(f"   Missing: {list(still_not_found)}")
         elif total_not_found > 10:
-            self._log(f"\n   Sample not found: {list(still_not_found)[:5]}...")
-        
-        self._log("="*60)
+            self._log(f"   Missing (first 5): {list(still_not_found)[:5]}")
         
         return {
             'source_file': Path(source_file).name,
@@ -524,51 +470,55 @@ class MultiPDFComparator:
             'not_found': list(still_not_found),
             'found_count': total_found,
             'not_found_count': total_not_found,
-            'match_percentage': round(match_percentage, 2),
+            'match_percentage': round(match_pct, 2),
             'pdf_results': pdf_results,
             'timestamp': datetime.now().isoformat()
         }
     
-    def export_to_excel(self, result: Dict[str, Any], output_file: str) -> str:
-        """Export comparison results to Excel file."""
-        self._log(f"\n📥 Exporting report to Excel...")
+    def generate_excel_bytes(self, result: Dict[str, Any]) -> bytes:
+        """Generate Excel report as bytes (for direct download)."""
+        self._log("\n📥 Generating Excel report...")
+        
+        output = io.BytesIO()
         
         try:
             from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
             from openpyxl.utils import get_column_letter
             
-            # Summary sheet
+            # Summary data
             summary_data = {
                 'Metric': [
-                    'Source File', 'Column Name', 'Number of PDFs Searched',
-                    'Total Values', 'Found (Total)', 'Not Found', 'Match %',
-                    'Generated At'
+                    'Source File', 'Column Name', 'PDFs Searched',
+                    'Total Values', 'Found', 'Not Found', 'Match %', 'Generated'
                 ],
                 'Value': [
-                    result['source_file'], result['column_name'],
-                    len(result['pdf_files']), result['total_values'],
-                    result['found_count'], result['not_found_count'],
-                    f"{result['match_percentage']:.1f}%",
+                    result.get('source_file', ''),
+                    result.get('column_name', ''),
+                    len(result.get('pdf_files', [])),
+                    result.get('total_values', 0),
+                    result.get('found_count', 0),
+                    result.get('not_found_count', 0),
+                    f"{result.get('match_percentage', 0):.1f}%",
                     result.get('timestamp', datetime.now().isoformat())
                 ]
             }
             df_summary = pd.DataFrame(summary_data)
             
             # PDF summary
-            pdf_summary_rows = []
-            for pdf_result in result.get('pdf_results', []):
-                pdf_summary_rows.append({
-                    'PDF File': pdf_result['pdf_name'],
-                    'Matches Found': pdf_result['found_count']
+            pdf_rows = []
+            for pr in result.get('pdf_results', []):
+                pdf_rows.append({
+                    'PDF File': pr['pdf_name'],
+                    'Matches Found': pr['found_count']
                 })
-            df_pdf_summary = pd.DataFrame(pdf_summary_rows) if pdf_summary_rows else pd.DataFrame()
+            df_pdf_summary = pd.DataFrame(pdf_rows) if pdf_rows else pd.DataFrame()
             
             # Found values with locations
             found_rows = []
             for value, pdf_locations in result.get('all_found', {}).items():
                 for pdf_name, locations in pdf_locations.items():
                     if isinstance(locations, list):
-                        pages_str = ', '.join(f"Page {loc}" for loc in locations)
+                        pages_str = ', '.join(f"Page {p}" for p in locations)
                         page_count = len(locations)
                     else:
                         pages_str = str(locations)
@@ -577,7 +527,7 @@ class MultiPDFComparator:
                         'Value': value,
                         'Status': '✓ Found',
                         'PDF File': pdf_name,
-                        'Location': pages_str,
+                        'Pages': pages_str,
                         'Page Count': page_count
                     })
             df_found = pd.DataFrame(found_rows) if found_rows else pd.DataFrame()
@@ -590,7 +540,7 @@ class MultiPDFComparator:
             }) if not_found_list else pd.DataFrame()
             
             # Write to Excel with formatting
-            with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df_summary.to_excel(writer, sheet_name='Summary', index=False)
                 if not df_pdf_summary.empty:
                     df_pdf_summary.to_excel(writer, sheet_name='PDF Summary', index=False)
@@ -599,7 +549,7 @@ class MultiPDFComparator:
                 if not df_not_found.empty:
                     df_not_found.to_excel(writer, sheet_name='Not Found', index=False)
                 
-                # Apply styling
+                # Style workbook
                 workbook = writer.book
                 header_fill = PatternFill(start_color="667EEA", end_color="667EEA", fill_type="solid")
                 header_font = Font(bold=True, color="FFFFFF")
@@ -609,25 +559,25 @@ class MultiPDFComparator:
                 for sheet_name in workbook.sheetnames:
                     ws = workbook[sheet_name]
                     
-                    # Auto-adjust column widths
+                    # Auto-width columns
                     for column in ws.columns:
-                        max_length = 0
-                        column_letter = get_column_letter(column[0].column)
+                        max_len = 0
+                        col_letter = get_column_letter(column[0].column)
                         for cell in column:
                             try:
-                                if len(str(cell.value)) > max_length:
-                                    max_length = len(str(cell.value))
+                                if len(str(cell.value)) > max_len:
+                                    max_len = len(str(cell.value))
                             except:
                                 pass
-                        ws.column_dimensions[column_letter].width = min(max_length + 2, 50)
+                        ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
                     
-                    # Style header
+                    # Header style
                     for cell in ws[1]:
                         cell.fill = header_fill
                         cell.font = header_font
                         cell.alignment = Alignment(horizontal='center')
                     
-                    # Style data rows
+                    # Data style
                     if sheet_name == 'Found Values':
                         for row in ws.iter_rows(min_row=2):
                             for cell in row:
@@ -637,19 +587,19 @@ class MultiPDFComparator:
                             for cell in row:
                                 cell.fill = not_found_fill
             
-            self._log(f"   ✓ Report saved: {Path(output_file).name}")
-            return output_file
+            self._log("   ✓ Excel report generated")
+            output.seek(0)
+            return output.getvalue()
             
         except Exception as e:
-            self._log(f"   ✗ Error exporting to Excel: {e}")
+            self._log(f"   ✗ Error generating Excel: {e}")
             import traceback
             traceback.print_exc()
             raise
 
 
-# ==================== DJANGO INTEGRATION HELPERS ====================
+# ==================== DJANGO INTEGRATION ====================
 
-# Background job storage
 _report_jobs = {}
 
 
@@ -661,7 +611,7 @@ def create_report_job(
     pdf_filenames: List[str],
     use_ocr: bool = False
 ) -> str:
-    """Create a background report job."""
+    """Create background report job."""
     import threading
     import uuid
     
@@ -672,6 +622,7 @@ def create_report_job(
         'progress': 0,
         'progress_message': 'Starting...',
         'result': None,
+        'excel_bytes': None,
         'error': None,
         'source_file': source_filename,
         'column_name': column_name,
@@ -680,14 +631,12 @@ def create_report_job(
     }
     
     def add_log(message: str):
-        """Add log message to job."""
         timestamp = datetime.now().strftime("%H:%M:%S")
         log_entry = f"[{timestamp}] {message}"
         _report_jobs[job_id]['logs'].append(log_entry)
-        print(log_entry)  # Also print to console
+        print(log_entry)
     
     def update_progress(progress: int, message: str = ""):
-        """Update job progress."""
         _report_jobs[job_id]['progress'] = progress
         if message:
             _report_jobs[job_id]['progress_message'] = message
@@ -711,21 +660,19 @@ def create_report_job(
             
             update_progress(92, 'Generating Excel report...')
             
-            # Generate Excel report
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            reports_dir = os.path.join(os.path.dirname(__file__), '..', 'reports')
-            os.makedirs(reports_dir, exist_ok=True)
-            output_file = os.path.join(reports_dir, f'Report_{timestamp}.xlsx')
+            # Generate Excel in memory (no file save)
+            excel_bytes = comparator.generate_excel_bytes(result)
             
-            comparator.export_to_excel(result, output_file)
-            result['excel_report'] = output_file
+            # Store for download
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             result['excel_filename'] = f'Report_{timestamp}.xlsx'
             
             _report_jobs[job_id]['status'] = 'completed'
-            update_progress(100, 'Complete!')
             _report_jobs[job_id]['result'] = result
+            _report_jobs[job_id]['excel_bytes'] = excel_bytes
+            update_progress(100, 'Complete!')
             
-            add_log("✓ Job completed successfully!")
+            add_log("✓ Job completed!")
             
             # Cleanup temp files
             try:
@@ -749,11 +696,19 @@ def create_report_job(
 
 
 def get_report_job_status(job_id: str) -> Dict[str, Any]:
-    """Get status of a report job."""
+    """Get job status."""
     return _report_jobs.get(job_id, None)
 
 
+def get_report_excel_bytes(job_id: str) -> bytes:
+    """Get Excel bytes for download."""
+    job = _report_jobs.get(job_id)
+    if job and job.get('status') == 'completed':
+        return job.get('excel_bytes')
+    return None
+
+
 def get_file_columns(file_path: str) -> List[str]:
-    """Quick helper to get columns from a file."""
+    """Quick helper to get columns."""
     comparator = AdvancedComparator(use_ocr=False)
     return comparator.get_columns(file_path)
