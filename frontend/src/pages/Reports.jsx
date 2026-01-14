@@ -4,14 +4,22 @@ import { api } from '../services/api';
 import './Reports.css';
 
 function Reports() {
+  // Mode: 'single' or 'multi'
+  const [comparisonMode, setComparisonMode] = useState('multi');
+  
   // State for source file
   const [sourceFile, setSourceFile] = useState(null);
+  const [sourceFileId, setSourceFileId] = useState(null); // For lazy preview loading
   const [columns, setColumns] = useState([]);
+  const [columnPreview, setColumnPreview] = useState(null); // {column, preview, total_count}
   const [selectedColumn, setSelectedColumn] = useState('');
   const [loadingColumns, setLoadingColumns] = useState(false);
+  const [loadingPreview, setLoadingPreview] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
   
   // State for PDF files
   const [pdfFiles, setPdfFiles] = useState([]);
+  const [singlePdfFile, setSinglePdfFile] = useState(null);
   
   // Options
   const [useOcr, setUseOcr] = useState(false);
@@ -43,25 +51,26 @@ function Reports() {
     };
   }, []);
 
-  // Handle source file upload - extract columns
+  // Handle source file upload - extract columns only (fast)
   const handleSourceFileChange = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     
     setSourceFile(file);
+    setSourceFileId(null);
     setColumns([]);
+    setColumnPreview(null);
     setSelectedColumn('');
     setError('');
     setLoadingColumns(true);
+    setShowPreview(false);
     
     try {
       const { ok, data } = await api.getColumnsFromFile(file);
       
       if (ok && data.columns) {
         setColumns(data.columns);
-        if (data.columns.length > 0) {
-          setSelectedColumn(data.columns[0]);
-        }
+        setSourceFileId(data.file_id); // Store for preview requests
       } else {
         setError(data.error || 'Failed to extract columns');
       }
@@ -72,10 +81,45 @@ function Reports() {
     }
   };
 
-  // Handle PDF files selection
+  // Fetch preview for a specific column (lazy loading)
+  const fetchColumnPreview = async (columnName) => {
+    if (!sourceFileId) {
+      setError('Please re-upload the source file');
+      return;
+    }
+    
+    setLoadingPreview(true);
+    setColumnPreview(null);
+    setSelectedColumn(columnName);
+    setShowPreview(true);
+    
+    try {
+      const { ok, data } = await api.getColumnPreview(sourceFileId, columnName);
+      
+      if (ok) {
+        setColumnPreview(data);
+      } else {
+        setError(data.error || 'Failed to load preview');
+      }
+    } catch (err) {
+      setError('Failed to load column preview');
+    } finally {
+      setLoadingPreview(false);
+    }
+  };
+
+  // Handle PDF files selection (multi-mode)
   const handlePdfFilesChange = (e) => {
     const files = Array.from(e.target.files);
     setPdfFiles(prev => [...prev, ...files]);
+  };
+
+  // Handle single PDF file selection
+  const handleSinglePdfChange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      setSinglePdfFile(file);
+    }
   };
 
   // Remove a PDF file
@@ -83,8 +127,53 @@ function Reports() {
     setPdfFiles(prev => prev.filter((_, i) => i !== index));
   };
 
-  // Start comparison
+  // Start comparison (routes to single or multi based on mode)
   const handleStartComparison = async () => {
+    if (comparisonMode === 'single') {
+      await handleSingleComparison();
+    } else {
+      await handleMultiComparison();
+    }
+  };
+
+  // Single PDF comparison
+  const handleSingleComparison = async () => {
+    if (!sourceFile || !selectedColumn || !singlePdfFile) {
+      setError('Please select a source file, column, and a PDF to compare');
+      return;
+    }
+    
+    setError('');
+    setResult(null);
+    setIsProcessing(true);
+    setProgress(0);
+    setProgressMessage('Starting single PDF comparison...');
+    setProgressLogs([]);
+    setJobStatus('pending');
+    
+    try {
+      const { ok, data } = await api.startSinglePdfComparison(
+        sourceFile,
+        selectedColumn,
+        singlePdfFile,
+        useOcr
+      );
+      
+      if (ok && data.job_id) {
+        setJobId(data.job_id);
+        pollJobStatus(data.job_id);
+      } else {
+        setError(data.error || 'Failed to start comparison');
+        setIsProcessing(false);
+      }
+    } catch (err) {
+      setError('Network error: Could not start comparison');
+      setIsProcessing(false);
+    }
+  };
+
+  // Multi-PDF comparison
+  const handleMultiComparison = async () => {
     if (!sourceFile || !selectedColumn || pdfFiles.length === 0) {
       setError('Please select a source file, column, and at least one PDF');
       return;
@@ -155,15 +244,18 @@ function Reports() {
         setError('Polling error');
         setIsProcessing(false);
       }
-    }, 60000);
+    }, 60000); // Poll every 1 minute
   };
 
   // Reset form
   const handleReset = () => {
     setSourceFile(null);
+    setSourceFileId(null);
     setColumns([]);
+    setColumnPreview(null);
     setSelectedColumn('');
     setPdfFiles([]);
+    setSinglePdfFile(null);
     setResult(null);
     setError('');
     setJobId(null);
@@ -171,14 +263,15 @@ function Reports() {
     setProgress(0);
     setProgressMessage('');
     setProgressLogs([]);
+    setShowPreview(false);
+    setLoadingPreview(false);
   };
 
-  // Filter results based on search
-  const filteredFound = result?.all_found 
-    ? Object.entries(result.all_found).filter(([key]) => 
-        key.toLowerCase().includes(searchTerm.toLowerCase())
-      )
-    : [];
+  // Filter results based on search - handle both single and multi PDF results
+  const foundData = result?.all_found || result?.found || {};
+  const filteredFound = Object.entries(foundData).filter(([key]) => 
+    key.toLowerCase().includes(searchTerm.toLowerCase())
+  );
   
   const filteredNotFound = result?.not_found
     ? result.not_found.filter(item => 
@@ -199,12 +292,32 @@ function Reports() {
         <div className="reports-header">
           <div className="reports-badge">
             <i className="fa-solid fa-chart-bar"></i>
-            <span>Multi-PDF Comparator</span>
+            <span>PDF Comparator</span>
           </div>
           <h1 className="reports-title">Reports & Analysis</h1>
           <p className="reports-subtitle">
-            Compare values from Excel/PDF against multiple PDF documents
+            Compare values from Excel/PDF against PDF documents
           </p>
+          
+          {/* Mode Toggle */}
+          <div className="mode-toggle">
+            <button
+              className={`mode-btn ${comparisonMode === 'single' ? 'active' : ''}`}
+              onClick={() => setComparisonMode('single')}
+              disabled={isProcessing}
+            >
+              <i className="fa-solid fa-file-pdf"></i>
+              Single PDF
+            </button>
+            <button
+              className={`mode-btn ${comparisonMode === 'multi' ? 'active' : ''}`}
+              onClick={() => setComparisonMode('multi')}
+              disabled={isProcessing}
+            >
+              <i className="fa-solid fa-files-pdf"></i>
+              Multi-PDF
+            </button>
+          </div>
         </div>
 
         {/* Main Content */}
@@ -250,18 +363,111 @@ function Reports() {
                 </div>
               )}
               
-              {columns.length > 0 && (
-                <div className="column-select">
-                  <label>Select Column to Compare:</label>
-                  <select
-                    value={selectedColumn}
-                    onChange={(e) => setSelectedColumn(e.target.value)}
+              {columns.length > 0 && !selectedColumn && (
+                <div className="column-list">
+                  <label>Available Columns (click to preview):</label>
+                  <div className="column-items">
+                    {columns.map((col, idx) => (
+                      <button
+                        key={idx}
+                        className="column-item-btn"
+                        onClick={() => fetchColumnPreview(col)}
+                        disabled={isProcessing || loadingPreview}
+                      >
+                        <i className="fa-solid fa-table-columns"></i>
+                        <span>{col}</span>
+                        <i className="fa-solid fa-chevron-right"></i>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              
+              {/* Column Preview Panel - shown when a column is clicked */}
+              {selectedColumn && showPreview && (
+                <div className="column-preview-panel">
+                  <div className="preview-header-bar">
+                    <button 
+                      className="back-btn"
+                      onClick={() => {
+                        setSelectedColumn('');
+                        setShowPreview(false);
+                        setColumnPreview(null);
+                      }}
+                      disabled={isProcessing}
+                    >
+                      <i className="fa-solid fa-arrow-left"></i>
+                      Back
+                    </button>
+                    <span className="preview-column-name">{selectedColumn}</span>
+                    {columnPreview?.total_count > 0 && (
+                      <span className="preview-total-count">
+                        {columnPreview.total_count} values
+                      </span>
+                    )}
+                  </div>
+                  
+                  <div className="preview-content">
+                    {loadingPreview ? (
+                      <div className="preview-loading">
+                        <i className="fa-solid fa-spinner fa-spin"></i>
+                        <span>Loading preview...</span>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="preview-label">
+                          <i className="fa-solid fa-eye"></i>
+                          Sample values from this column:
+                        </div>
+                        <div className="preview-values-grid">
+                          {columnPreview?.preview?.length > 0 ? (
+                            columnPreview.preview.map((val, idx) => (
+                              <div key={idx} className="preview-value-item">
+                                <span className="value-number">{idx + 1}</span>
+                                <span className="value-text">{val}</span>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="preview-empty">
+                              <i className="fa-solid fa-info-circle"></i>
+                              No preview values available for this column
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  
+                  <button
+                    className="confirm-column-btn"
+                    onClick={() => setShowPreview(false)}
+                    disabled={isProcessing || loadingPreview}
+                  >
+                    <i className="fa-solid fa-check"></i>
+                    Use This Column {columnPreview?.total_count > 0 && `(${columnPreview.total_count} values)`}
+                  </button>
+                </div>
+              )}
+              
+              {/* Selected column display - shown after confirmation */}
+              {selectedColumn && !showPreview && (
+                <div className="selected-column-info">
+                  <div className="selected-column-header">
+                    <i className="fa-solid fa-check-circle"></i>
+                    <span>Selected Column:</span>
+                    {columnPreview?.total_count > 0 && (
+                      <span className="selected-count-badge">{columnPreview.total_count} values</span>
+                    )}
+                  </div>
+                  <div className="selected-column-name">{selectedColumn}</div>
+                  <button
+                    className="change-column-btn"
+                    onClick={() => setSelectedColumn('')}
                     disabled={isProcessing}
                   >
-                    {columns.map((col, idx) => (
-                      <option key={idx} value={col}>{col}</option>
-                    ))}
-                  </select>
+                    <i className="fa-solid fa-pen"></i>
+                    Change Column
+                  </button>
                 </div>
               )}
             </div>
@@ -269,45 +475,83 @@ function Reports() {
             <div className="config-card">
               <h3>
                 <i className="fa-solid fa-file-pdf"></i>
-                Target PDFs
+                {comparisonMode === 'single' ? 'Target PDF' : 'Target PDFs'}
               </h3>
               <p className="config-desc">
-                Upload PDF files to search in (can select multiple)
+                {comparisonMode === 'single' 
+                  ? 'Upload a PDF file to search in (supports mixed text/scanned)' 
+                  : 'Upload PDF files to search in (can select multiple)'}
               </p>
               
-              <input
-                type="file"
-                id="pdfFiles"
-                accept=".pdf"
-                multiple
-                onChange={handlePdfFilesChange}
-                style={{ display: 'none' }}
-              />
-              <button
-                className="upload-btn"
-                onClick={() => document.getElementById('pdfFiles').click()}
-                disabled={isProcessing}
-              >
-                <i className="fa-solid fa-plus"></i>
-                Add PDF Files
-              </button>
-              
-              {pdfFiles.length > 0 && (
-                <div className="pdf-list">
-                  {pdfFiles.map((file, idx) => (
-                    <div key={idx} className="pdf-item">
+              {comparisonMode === 'single' ? (
+                <>
+                  <input
+                    type="file"
+                    id="singlePdfFile"
+                    accept=".pdf"
+                    onChange={handleSinglePdfChange}
+                    style={{ display: 'none' }}
+                  />
+                  <button
+                    className="upload-btn"
+                    onClick={() => document.getElementById('singlePdfFile').click()}
+                    disabled={isProcessing}
+                  >
+                    <i className="fa-solid fa-cloud-arrow-up"></i>
+                    {singlePdfFile ? 'Change PDF' : 'Select PDF'}
+                  </button>
+                  
+                  {singlePdfFile && (
+                    <div className="file-info">
                       <i className="fa-solid fa-file-pdf"></i>
-                      <span>{file.name}</span>
+                      <span>{singlePdfFile.name}</span>
                       <button
-                        className="remove-btn"
-                        onClick={() => removePdfFile(idx)}
+                        className="remove-btn-inline"
+                        onClick={() => setSinglePdfFile(null)}
                         disabled={isProcessing}
                       >
                         <i className="fa-solid fa-times"></i>
                       </button>
                     </div>
-                  ))}
-                </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  <input
+                    type="file"
+                    id="pdfFiles"
+                    accept=".pdf"
+                    multiple
+                    onChange={handlePdfFilesChange}
+                    style={{ display: 'none' }}
+                  />
+                  <button
+                    className="upload-btn"
+                    onClick={() => document.getElementById('pdfFiles').click()}
+                    disabled={isProcessing}
+                  >
+                    <i className="fa-solid fa-plus"></i>
+                    Add PDF Files
+                  </button>
+                  
+                  {pdfFiles.length > 0 && (
+                    <div className="pdf-list">
+                      {pdfFiles.map((file, idx) => (
+                        <div key={idx} className="pdf-item">
+                          <i className="fa-solid fa-file-pdf"></i>
+                          <span>{file.name}</span>
+                          <button
+                            className="remove-btn"
+                            onClick={() => removePdfFile(idx)}
+                            disabled={isProcessing}
+                          >
+                            <i className="fa-solid fa-times"></i>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
               )}
             </div>
 
@@ -324,7 +568,12 @@ function Reports() {
                   onChange={(e) => setUseOcr(e.target.checked)}
                   disabled={isProcessing}
                 />
-                <span>Enable OCR (for scanned documents)</span>
+                <span>
+                  Enable OCR 
+                  {comparisonMode === 'single' 
+                    ? ' (hybrid: text + scanned pages)' 
+                    : ' (for scanned documents)'}
+                </span>
               </label>
             </div>
 
@@ -332,7 +581,12 @@ function Reports() {
               <button
                 className="start-btn"
                 onClick={handleStartComparison}
-                disabled={isProcessing || !sourceFile || !selectedColumn || pdfFiles.length === 0}
+                disabled={
+                  isProcessing || 
+                  !sourceFile || 
+                  !selectedColumn || 
+                  (comparisonMode === 'single' ? !singlePdfFile : pdfFiles.length === 0)
+                }
               >
                 {isProcessing ? (
                   <>
@@ -414,7 +668,7 @@ function Reports() {
                       <i className="fa-solid fa-list"></i>
                     </div>
                     <div className="summary-content">
-                      <span className="summary-value">{result.total_values}</span>
+                      <span className="summary-value">{result.total_values || 0}</span>
                       <span className="summary-label">Total Values</span>
                     </div>
                   </div>
@@ -424,7 +678,9 @@ function Reports() {
                       <i className="fa-solid fa-check"></i>
                     </div>
                     <div className="summary-content">
-                      <span className="summary-value">{result.found_count}</span>
+                      <span className="summary-value">
+                        {result.found_count ?? Object.keys(result.found || result.all_found || {}).length}
+                      </span>
                       <span className="summary-label">Found</span>
                     </div>
                   </div>
@@ -434,7 +690,9 @@ function Reports() {
                       <i className="fa-solid fa-times"></i>
                     </div>
                     <div className="summary-content">
-                      <span className="summary-value">{result.not_found_count}</span>
+                      <span className="summary-value">
+                        {result.not_found_count ?? (result.not_found?.length || 0)}
+                      </span>
                       <span className="summary-label">Not Found</span>
                     </div>
                   </div>
@@ -444,7 +702,13 @@ function Reports() {
                       <i className="fa-solid fa-percent"></i>
                     </div>
                     <div className="summary-content">
-                      <span className="summary-value">{result.match_percentage}%</span>
+                      <span className="summary-value">
+                        {result.match_percentage ?? (
+                          result.total_values > 0 
+                            ? Math.round((Object.keys(result.found || result.all_found || {}).length / result.total_values) * 100)
+                            : 0
+                        )}%
+                      </span>
                       <span className="summary-label">Match Rate</span>
                     </div>
                   </div>
@@ -482,14 +746,14 @@ function Reports() {
                       onClick={() => setActiveTab('found')}
                     >
                       <i className="fa-solid fa-check-circle"></i>
-                      Found ({result.found_count})
+                      Found ({Object.keys(result.found || result.all_found || {}).length})
                     </button>
                     <button
                       className={`tab-btn ${activeTab === 'not-found' ? 'active' : ''}`}
                       onClick={() => setActiveTab('not-found')}
                     >
                       <i className="fa-solid fa-times-circle"></i>
-                      Not Found ({result.not_found_count})
+                      Not Found ({result.not_found?.length || 0})
                     </button>
                   </div>
                 </div>
@@ -503,23 +767,34 @@ function Reports() {
                           <p>No matching found values</p>
                         </div>
                       ) : (
-                        filteredFound.map(([value, pdfLocations], idx) => (
+                        filteredFound.map(([value, locations], idx) => (
                           <div key={idx} className="result-item found">
                             <div className="result-value">
                               <i className="fa-solid fa-check"></i>
                               <span>{value}</span>
                             </div>
                             <div className="result-locations">
-                              {Object.entries(pdfLocations).map(([pdf, pages], pIdx) => (
-                                <div key={pIdx} className="location-item">
-                                  <span className="pdf-name">{pdf}</span>
+                              {/* Handle both single PDF (array) and multi-PDF (object) results */}
+                              {Array.isArray(locations) ? (
+                                // Single PDF mode - locations is an array like ["Page 1", "Page 5"]
+                                <div className="location-item">
                                   <span className="page-numbers">
-                                    {Array.isArray(pages) 
-                                      ? pages.map(p => `Page ${p}`).join(', ')
-                                      : pages}
+                                    {locations.join(', ')}
                                   </span>
                                 </div>
-                              ))}
+                              ) : (
+                                // Multi-PDF mode - locations is {pdfName: [pages], ...}
+                                Object.entries(locations).map(([pdf, pages], pIdx) => (
+                                  <div key={pIdx} className="location-item">
+                                    <span className="pdf-name">{pdf}</span>
+                                    <span className="page-numbers">
+                                      {Array.isArray(pages) 
+                                        ? pages.map(p => typeof p === 'number' ? `Page ${p}` : p).join(', ')
+                                        : pages}
+                                    </span>
+                                  </div>
+                                ))
+                              )}
                             </div>
                           </div>
                         ))

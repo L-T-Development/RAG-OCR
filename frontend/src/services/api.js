@@ -155,6 +155,7 @@ export const api = {
 
   /**
    * Extract columns from uploaded file (Excel, PDF, Image)
+   * Returns column names only (fast). Use getColumnPreview for values.
    */
   async getColumnsFromFile(file) {
     const formData = new FormData();
@@ -162,6 +163,21 @@ export const api = {
     const res = await fetch(`${API_BASE}/reports/columns/`, {
       method: 'POST',
       body: formData,
+    });
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  /**
+   * Get preview values for a specific column (lazy loading)
+   * @param {string} fileId - File ID from getColumnsFromFile response
+   * @param {string} columnName - Column to get preview for
+   * @returns {Promise<{column, preview: string[], total_count: number}>}
+   */
+  async getColumnPreview(fileId, columnName) {
+    const res = await fetch(`${API_BASE}/reports/column-preview/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_id: fileId, column_name: columnName }),
     });
     return { ok: res.ok, data: await res.json() };
   },
@@ -183,6 +199,27 @@ export const api = {
     formData.append('use_ocr', useOcr.toString());
     
     const res = await fetch(`${API_BASE}/reports/compare/`, {
+      method: 'POST',
+      body: formData,
+    });
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  /**
+   * Start single PDF comparison job (with hybrid OCR support)
+   * @param {File} sourceFile - Excel/PDF with values to search
+   * @param {string} columnName - Column to extract values from
+   * @param {File} pdfFile - Single PDF file to search in
+   * @param {boolean} useOcr - Enable hybrid OCR for mixed text/scanned pages
+   */
+  async startSinglePdfComparison(sourceFile, columnName, pdfFile, useOcr = true) {
+    const formData = new FormData();
+    formData.append('source_file', sourceFile);
+    formData.append('column_name', columnName);
+    formData.append('pdf_file', pdfFile);
+    formData.append('use_ocr', useOcr.toString());
+    
+    const res = await fetch(`${API_BASE}/reports/compare-single/`, {
       method: 'POST',
       body: formData,
     });

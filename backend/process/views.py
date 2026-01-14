@@ -30,8 +30,12 @@ from process.reports_engine import (
     get_report_job_status,
     get_report_excel_bytes,
     get_file_columns,
+    get_file_columns_with_preview,
+    get_column_preview,
+    create_single_pdf_job,
     AdvancedComparator,
-    MultiPDFComparator
+    MultiPDFComparator,
+    SinglePDFComparator
 )
 
 def home(request):
@@ -753,9 +757,10 @@ def llm_model_select(request):
 def get_columns_from_file(request):
     """
     Extract column headers from uploaded file (Excel, PDF, Image).
-    Used to let user select which column to compare.
+    Fast - only returns column names, no preview.
     
     POST /api/reports/columns/
+    Returns: {columns: [...], filename, file_type}
     """
     if request.method != "POST":
         return JsonResponse({"error": "POST method required"}, status=405)
@@ -775,24 +780,87 @@ def get_columns_from_file(request):
         }, status=400)
     
     try:
-        # Save to temp file
+        # Save to temp file and store path in session for later preview requests
         with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as f:
             for chunk in uploaded_file.chunks():
                 f.write(chunk)
             temp_path = f.name
         
-        # Extract columns
+        # Extract columns only (fast)
         columns = get_file_columns(temp_path)
         
-        # Cleanup
-        os.unlink(temp_path)
+        # Store temp path for later preview requests (we'll clean up after comparison)
+        # Using a simple in-memory cache
+        global _temp_file_cache
+        if '_temp_file_cache' not in globals():
+            _temp_file_cache = {}
+        
+        # Generate a file ID
+        import hashlib
+        file_id = hashlib.md5(f"{uploaded_file.name}_{temp_path}".encode()).hexdigest()[:12]
+        _temp_file_cache[file_id] = {
+            "path": temp_path,
+            "filename": uploaded_file.name,
+            "ext": ext
+        }
         
         return JsonResponse({
             "columns": columns,
             "filename": uploaded_file.name,
-            "file_type": ext
+            "file_type": ext,
+            "file_id": file_id  # Use this for preview requests
         })
         
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+# Temp file cache for preview requests
+_temp_file_cache = {}
+
+
+@csrf_exempt
+def get_column_preview_view(request):
+    """
+    Get preview for a specific column (lazy loading).
+    
+    POST /api/reports/column-preview/
+    - file_id: ID returned from get_columns_from_file
+    - column_name: Column to get preview for
+    
+    Returns: {column, preview: [...], total_count}
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "POST method required"}, status=405)
+    
+    try:
+        data = json.loads(request.body)
+        file_id = data.get("file_id")
+        column_name = data.get("column_name")
+        
+        if not file_id or not column_name:
+            return JsonResponse({"error": "file_id and column_name required"}, status=400)
+        
+        # Get file from cache
+        if file_id not in _temp_file_cache:
+            return JsonResponse({"error": "File not found. Please re-upload."}, status=404)
+        
+        file_info = _temp_file_cache[file_id]
+        temp_path = file_info["path"]
+        
+        if not os.path.exists(temp_path):
+            del _temp_file_cache[file_id]
+            return JsonResponse({"error": "File expired. Please re-upload."}, status=404)
+        
+        # Get preview for specific column
+        result = get_column_preview(temp_path, column_name, preview_count=10)
+        
+        return JsonResponse(result)
+        
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -973,6 +1041,75 @@ def quick_column_compare(request):
             "match_percentage": round(match_pct, 2),
             "found": {k: v for k, v in results['found'].items()},
             "not_found": list(results['not_found'])
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+def start_single_pdf_comparison(request):
+    """
+    Start a single PDF comparison job with hybrid OCR support.
+    For PDFs with mixed text and scanned content.
+    
+    POST /api/reports/compare-single/
+    - source_file: Excel/PDF file with values to search
+    - column_name: Column to extract values from
+    - pdf_file: Single PDF file to search in
+    - use_ocr: Enable OCR for scanned pages (default: true)
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "POST method required"}, status=405)
+    
+    source_file = request.FILES.get("source_file")
+    if not source_file:
+        return JsonResponse({"error": "Source file is required"}, status=400)
+    
+    column_name = request.POST.get("column_name")
+    if not column_name:
+        return JsonResponse({"error": "Column name is required"}, status=400)
+    
+    pdf_file = request.FILES.get("pdf_file")
+    if not pdf_file:
+        return JsonResponse({"error": "PDF file is required"}, status=400)
+    
+    use_ocr = request.POST.get("use_ocr", "true").lower() == "true"
+    
+    print(f"[Reports] Single PDF comparison: {source_file.name} ({column_name}) vs {pdf_file.name}")
+    
+    try:
+        # Save source file
+        source_ext = os.path.splitext(source_file.name)[1].lower()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=source_ext) as f:
+            for chunk in source_file.chunks():
+                f.write(chunk)
+            source_path = f.name
+        
+        # Save PDF file
+        pdf_ext = os.path.splitext(pdf_file.name)[1].lower()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=pdf_ext) as f:
+            for chunk in pdf_file.chunks():
+                f.write(chunk)
+            pdf_path = f.name
+        
+        # Create and start job
+        job_id = create_single_pdf_job(
+            source_path=source_path,
+            column_name=column_name,
+            pdf_path=pdf_path,
+            use_ocr=use_ocr
+        )
+        
+        return JsonResponse({
+            "job_id": job_id,
+            "message": "Single PDF comparison started",
+            "source_file": source_file.name,
+            "pdf_file": pdf_file.name,
+            "column_name": column_name,
+            "ocr_enabled": use_ocr
         })
         
     except Exception as e:
