@@ -1,0 +1,7 @@
+local_chroma_db/
+pdfs/
+db.sqlite3
+*.pdf
+_pycache_/
+venv/
+env/

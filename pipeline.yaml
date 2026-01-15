@@ -1,0 +1,11 @@
+type: python
+image: python:3.10-slim
+dir: "." # Required to fix the /app/null error
+
+scripts:
+  # Changed */*.py to . (current directory) to avoid fatal F0001 error
+  lint: "pip install pylint && pylint --fail-under=1.0 --disable=import-error,missing-docstring ."
+  test: "echo 'WARNING: No tests found. Skipping.' && exit 0"
+  build: "mkdir -p dist && zip -r dist/app-release.zip . -x '*.git*'"
+
+artifact_pattern: "dist/*.zip"

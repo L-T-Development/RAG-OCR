@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+venv/
+.venv/
+.env
+.env.local
+
+# Node
+node_modules/
+package-lock.json
+
+# Build outputs
+frontend/dist/
+frontend/build/
+backend/staticfiles/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Application specific
+*.bin
+*.pickle
+pdfs/
+backend/media/
+
+# Local data (don't commit large files)
+backend/local_chroma_db/
+backend/db.sqlite3
+backend/tables.db
+*.sqlite3
+models/
+backend/models/
+
+
+Comparator-main/
