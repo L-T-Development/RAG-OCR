@@ -190,27 +190,52 @@ class AdvancedComparator:
             values = set()
             lines = markdown.split('\n')
             column_index = -1
+            current_table_headers = []
+            in_table = False
             
             for i, line in enumerate(lines):
                 if '|' in line:
                     cells = [c.strip() for c in line.split('|') if c.strip()]
+                    
+                    # Detect table header row (followed by separator line)
                     if i + 1 < len(lines) and '---' in lines[i + 1]:
+                        current_table_headers = cells
+                        column_index = -1
+                        in_table = True
+                        
+                        # Find exact column match
                         for idx, cell in enumerate(cells):
                             if cell == column_name:
                                 column_index = idx
+                                self._log(f"  → Found column '{column_name}' at position {idx+1}/{len(cells)}")
                                 break
-                    elif column_index >= 0 and column_index < len(cells):
-                        val = cells[column_index].strip()
-                        if val and val != column_name and self._is_valid_value(val):
-                            values.add(val)
+                    
+                    # Extract data from the correct column only
+                    elif in_table and column_index >= 0:
+                        # More lenient: allow extraction if column position exists
+                        # OCR may have inconsistent cell counts
+                        if column_index < len(cells):
+                            val = cells[column_index].strip()
+                            if val and val != column_name and self._is_valid_value(val):
+                                values.add(val)
+                        # Only reset if cell count is drastically different (not just +/- 1-2)
+                        elif len(cells) < len(current_table_headers) - 2:
+                            # Major structure change, reset
+                            in_table = False
+                            column_index = -1
+                elif in_table and not line.strip():
+                    # Empty line indicates end of table
+                    in_table = False
+                    column_index = -1
             
-            self._log(f"✓ Extracted {len(values)} values from PDF column")
+            self._log(f"✓ Extracted {len(values)} values from PDF column '{column_name}'")
             return values
         except Exception as e:
             self._log(f"✗ Error: {e}")
             return set()
     
     def _extract_image_column(self, file_path: str, column_name: str) -> Set[str]:
+        """Extract column from image using same logic as PDF - maintains column structure."""
         return self._extract_pdf_column(file_path, column_name)
     
     # ==================== SEARCH FUNCTIONS ====================
@@ -251,116 +276,127 @@ class AdvancedComparator:
     
     def _search_in_pdf(self, file_path: str, search_values: Set[str]) -> Dict[str, Any]:
         """
-        Search values in PDF using Docling + PyPDF2 for accurate page numbers.
-        This is the HYBRID approach from Comparator-main.
+        Search values in PDF using HYBRID approach:
+        1. PyPDF2 for text extraction and page numbers
+        2. Docling OCR for scanned/image pages
+        Handles mixed documents with both text and scanned photos/tables.
         """
         found = {}
         not_found = set(search_values)
         
-        # Step 1: Use Docling to find which values exist in PDF
-        values_in_pdf = set()
+        # Step 1: Try PyPDF2 text extraction first (fast for text PDFs)
+        page_texts_pypdf = {}
+        scanned_pages = []  # Pages that need OCR
         
-        if self.converter:
-            try:
-                self._log("  → Converting PDF with Docling...")
-                result = self.converter.convert(str(file_path))
-                full_text = result.document.export_to_markdown()
-                
-                for search_val in search_values:
-                    if str(search_val).strip() in full_text:
-                        values_in_pdf.add(search_val)
-                
-                self._log(f"  → Docling found {len(values_in_pdf)} values in text")
-            except Exception as e:
-                self._log(f"  → Docling error: {e}, using PyPDF2 only")
-                values_in_pdf = search_values
-        else:
-            values_in_pdf = search_values
-        
-        # Step 2: Use PyPDF2 for accurate page number detection
-        # This is the KEY improvement - scan each page ONCE for all values
         try:
             import PyPDF2
-            
-            with open(file_path, 'rb') as pdf_file:
-                pdf_reader = PyPDF2.PdfReader(pdf_file)
-                total_pages = len(pdf_reader.pages)
-                self._log(f"  → Total pages to scan: {total_pages}")
+            with open(file_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                total_pages = len(reader.pages)
+                self._log(f"  → Scanning {total_pages} pages...")
                 
-                # Track pages for each value
-                value_pages = {val: [] for val in values_in_pdf}
-                matches_found = 0
-                
-                # OPTIMIZED: Scan each page once and check ALL values
                 for page_num in range(total_pages):
-                    try:
-                        page = pdf_reader.pages[page_num]
-                        page_text = page.extract_text() or ""
-                        
-                        page_matches = 0
-                        # Check all values against this page
-                        for search_val in values_in_pdf:
-                            search_str = str(search_val).strip()
-                            if search_str in page_text:
-                                if not value_pages[search_val]:  # First time finding this value
-                                    matches_found += 1
-                                value_pages[search_val].append(page_num + 1)
-                                page_matches += 1
-                        
-                        # Progress every 10 pages or if matches found
-                        if (page_num + 1) % 10 == 0 or page_num == total_pages - 1:
-                            self._log(f"  → Page {page_num + 1}/{total_pages} done | Matches: {matches_found}/{len(values_in_pdf)}")
-                        elif page_matches > 0:
-                            self._log(f"  → Page {page_num + 1}: Found {page_matches} value(s)")
-                            
-                    except Exception as page_err:
-                        self._log(f"  → Page {page_num + 1}: Error reading - {page_err}")
-                        continue
+                    page_text = reader.pages[page_num].extract_text() or ""
+                    page_texts_pypdf[page_num + 1] = page_text
+                    
+                    # If page has very little text, it might be scanned
+                    if len(page_text.strip()) < 50:
+                        scanned_pages.append(page_num + 1)
                 
-                self._log(f"  → Scan complete: {matches_found} values found across {total_pages} pages")
-                
-                # Build results
-                final_found = 0
-                for search_val, pages in value_pages.items():
-                    if pages:
-                        found[search_val] = pages
-                        not_found.discard(search_val)
-                        final_found += 1
-                    elif search_val in values_in_pdf:
-                        # Docling found it but PyPDF2 didn't (might be in images)
-                        found[search_val] = ["Found (page detection failed)"]
-                        not_found.discard(search_val)
-                        final_found += 1
-                
-                self._log(f"  → Results: {final_found} found, {len(not_found)} not found")
-                        
-        except ImportError:
-            self._log("  → PyPDF2 not available")
-            # Fallback: mark Docling-found values without page numbers
-            for val in values_in_pdf:
-                found[val] = ["Page info unavailable"]
-                not_found.discard(val)
+                if scanned_pages:
+                    self._log(f"  → {len(scanned_pages)} pages may be scanned (need OCR)")
         except Exception as e:
             self._log(f"  → PyPDF2 error: {e}")
+            # Fallback to OCR for entire document
+            scanned_pages = list(range(1, 100))  # Assume all pages need OCR
+        
+        # Step 2: Use Docling OCR for scanned pages (handles images, tables, text)
+        ocr_full_text = ""
+        if self.converter and (scanned_pages or not page_texts_pypdf):
+            try:
+                self._log("  → Running OCR with Docling (handles scanned photos, tables, text)...")
+                result = self.converter.convert(str(file_path))
+                ocr_full_text = result.document.export_to_markdown()
+                self._log(f"  → OCR extracted {len(ocr_full_text)} characters")
+            except Exception as e:
+                self._log(f"  → OCR error: {e}")
+        
+        # Step 3: Combine PyPDF2 and OCR results for comprehensive search
+        values_in_pdf = set()
+        
+        # Step 4: Search page-by-page with hybrid text (PyPDF2 + OCR)
+        value_pages = {val: [] for val in search_values}
+        matches_found = 0
+        
+        # Scan each page with PyPDF2 text
+        for page_num, page_text in page_texts_pypdf.items():
+            # For scanned pages, also check OCR text
+            if page_num in scanned_pages and ocr_full_text:
+                # OCR text contains all pages merged, but we search it anyway
+                combined_text = page_text + "\n" + ocr_full_text
+            else:
+                combined_text = page_text
+            
+            page_matches = 0
+            for search_val in search_values:
+                search_str = str(search_val).strip()
+                if search_str in combined_text:
+                    if not value_pages[search_val]:  # First match
+                        matches_found += 1
+                    if page_num not in value_pages[search_val]:
+                        value_pages[search_val].append(page_num)
+                    page_matches += 1
+            
+            # Progress logging
+            if page_num % 10 == 0 or page_num == len(page_texts_pypdf):
+                self._log(f"  → Page {page_num}/{len(page_texts_pypdf)} | Found: {matches_found}/{len(search_values)}")
+            elif page_matches > 0:
+                self._log(f"  → Page {page_num}: {page_matches} match(es)")
+        
+        # Step 5: For values still not found, do a final OCR-only check
+        if ocr_full_text:
+            for search_val in search_values:
+                if not value_pages[search_val]:  # Not found in PyPDF2 text
+                    search_str = str(search_val).strip()
+                    if search_str in ocr_full_text:
+                        value_pages[search_val].append("OCR Detected")
+                        matches_found += 1
+                        self._log(f"  → '{search_str}' found via OCR (scanned content)")
+        
+        # Build final results with page numbers
+        for search_val, pages in value_pages.items():
+            if pages:
+                found[search_val] = pages
+                not_found.discard(search_val)
+        
+        self._log(f"  → Final: {len(found)} found, {len(not_found)} not found")
         
         return {'found': found, 'not_found': not_found}
     
     def _search_in_image(self, file_path: str, search_values: Set[str]) -> Dict[str, Any]:
+        """Search in image files with OCR - handles scanned photos with tables and text."""
         if not self.converter:
+            self._log("  → No OCR engine available for image")
             return {'found': {}, 'not_found': search_values}
         try:
+            self._log("  → Running OCR on image (handles tables, text, photos)...")
             result = self.converter.convert(str(file_path))
             text = result.document.export_to_markdown()
             
+            self._log(f"  → OCR extracted {len(text)} characters")
+            
             found = {}
             for search_val in search_values:
-                if str(search_val).strip() in text:
-                    found[search_val] = ["Image"]
+                search_str = str(search_val).strip()
+                if search_str in text:
+                    found[search_val] = ["Image (OCR)"]
+                    self._log(f"  → Found '{search_str}' in image")
             
             not_found = search_values - set(found.keys())
+            self._log(f"  → Image results: {len(found)} found, {len(not_found)} not found")
             return {'found': found, 'not_found': not_found}
         except Exception as e:
-            self._log(f"✗ Error: {e}")
+            self._log(f"✗ OCR Error: {e}")
             return {'found': {}, 'not_found': search_values}
 
 
@@ -513,12 +549,19 @@ class MultiPDFComparator:
                 })
             df_pdf_summary = pd.DataFrame(pdf_rows) if pdf_rows else pd.DataFrame()
             
-            # Found values with locations
+            # Found values with locations (like Comparator-main format)
             found_rows = []
             for value, pdf_locations in result.get('all_found', {}).items():
                 for pdf_name, locations in pdf_locations.items():
                     if isinstance(locations, list):
-                        pages_str = ', '.join(f"Page {p}" for p in locations)
+                        # Format: "Page 1, Page 3, Page 5" or "OCR Detected"
+                        pages_formatted = []
+                        for loc in locations:
+                            if isinstance(loc, int):
+                                pages_formatted.append(f"Page {loc}")
+                            else:
+                                pages_formatted.append(str(loc))
+                        pages_str = ', '.join(pages_formatted)
                         page_count = len(locations)
                     else:
                         pages_str = str(locations)
@@ -527,8 +570,8 @@ class MultiPDFComparator:
                         'Value': value,
                         'Status': '✓ Found',
                         'PDF File': pdf_name,
-                        'Pages': pages_str,
-                        'Page Count': page_count
+                        'Found At': pages_str,
+                        'Occurrences': page_count
                     })
             df_found = pd.DataFrame(found_rows) if found_rows else pd.DataFrame()
             
@@ -744,7 +787,7 @@ def get_column_preview(file_path: str, column_name: str, preview_count: int = 10
             print(f"[Preview] Excel error: {e}")
     
     elif ext == '.pdf':
-        # PDF files - extract specific column using Docling
+        # PDF files - extract specific column using Docling with strict position tracking
         try:
             if comparator.converter:
                 result = comparator.converter.convert(str(file_path))
@@ -754,24 +797,35 @@ def get_column_preview(file_path: str, column_name: str, preview_count: int = 10
                 column_values = []
                 current_headers = []
                 column_index = -1
+                table_active = False
                 
                 for i, line in enumerate(lines):
                     if '|' in line:
                         cells = [c.strip() for c in line.split('|') if c.strip()]
                         
-                        # Header row
+                        # Header row (followed by separator)
                         if i + 1 < len(lines) and '---' in lines[i + 1]:
                             current_headers = cells
-                            # Find column index
+                            table_active = True
+                            column_index = -1
+                            # Find exact column match
                             for idx, h in enumerate(cells):
                                 if h == column_name:
                                     column_index = idx
+                                    print(f"[Preview] Column '{column_name}' at position {idx+1}/{len(cells)}")
                                     break
-                        # Data row
-                        elif column_index >= 0 and column_index < len(cells):
-                            cell = cells[column_index].strip()
-                            if comparator._is_valid_value(cell) and cell not in column_values:
-                                column_values.append(cell)
+                        # Data row - more lenient for OCR variations
+                        elif table_active and column_index >= 0:
+                            if column_index < len(cells):
+                                cell = cells[column_index].strip()
+                                if comparator._is_valid_value(cell) and cell not in column_values:
+                                    column_values.append(cell)
+                            # Only reset if drastically different structure
+                            elif len(cells) < len(current_headers) - 2:
+                                table_active = False
+                    elif table_active and not line.strip():
+                        # Empty line ends table
+                        table_active = False
                 
                 # Handle [All extracted text]
                 if column_name == "[All extracted text]":
@@ -875,10 +929,11 @@ def get_file_columns_with_preview(file_path: str, preview_count: int = 5) -> Dic
                 result = comparator.converter.convert(str(file_path))
                 markdown = result.document.export_to_markdown()
                 
-                # Parse markdown tables to extract column values
+                # Parse markdown tables with strict column position tracking
                 lines = markdown.split('\n')
                 table_data = {}  # {column_name: [values]}
                 current_headers = []
+                table_active = False
                 
                 for i, line in enumerate(lines):
                     if '|' in line:
@@ -887,17 +942,28 @@ def get_file_columns_with_preview(file_path: str, preview_count: int = 5) -> Dic
                         # Check if this is a header row (next line has ---)
                         if i + 1 < len(lines) and '---' in lines[i + 1]:
                             current_headers = cells
+                            table_active = True
                             for h in current_headers:
                                 if h not in table_data:
                                     table_data[h] = []
-                        # Data row
-                        elif current_headers and len(cells) > 0:
-                            for idx, cell in enumerate(cells):
-                                if idx < len(current_headers):
-                                    header = current_headers[idx]
-                                    if header in table_data and comparator._is_valid_value(cell):
-                                        if cell not in table_data[header]:  # Avoid duplicates
-                                            table_data[header].append(cell)
+                            print(f"[Preview] Found table with {len(current_headers)} columns: {current_headers[:3]}...")
+                        
+                        # Data row - lenient for OCR variations
+                        elif table_active and current_headers:
+                            # Process cells that exist, even if count doesn't match exactly
+                            max_idx = min(len(cells), len(current_headers))
+                            for idx in range(max_idx):
+                                cell = cells[idx]
+                                header = current_headers[idx]
+                                if header in table_data and comparator._is_valid_value(cell):
+                                    if cell not in table_data[header]:  # Avoid duplicates
+                                        table_data[header].append(cell)
+                            # Only reset if drastically different
+                            if len(cells) < len(current_headers) - 2:
+                                table_active = False
+                    elif table_active and not line.strip():
+                        # Empty line ends table
+                        table_active = False
                 
                 # Build preview from extracted data
                 for col in columns:
@@ -936,10 +1002,11 @@ def get_file_columns_with_preview(file_path: str, preview_count: int = 5) -> Dic
                 result = comparator.converter.convert(str(file_path))
                 markdown = result.document.export_to_markdown()
                 
-                # Parse same as PDF
+                # Parse with strict column structure validation (same as PDF)
                 lines = markdown.split('\n')
                 table_data = {}
                 current_headers = []
+                table_active = False
                 
                 for i, line in enumerate(lines):
                     if '|' in line:
@@ -947,16 +1014,26 @@ def get_file_columns_with_preview(file_path: str, preview_count: int = 5) -> Dic
                         
                         if i + 1 < len(lines) and '---' in lines[i + 1]:
                             current_headers = cells
+                            table_active = True
                             for h in current_headers:
                                 if h not in table_data:
                                     table_data[h] = []
-                        elif current_headers and len(cells) > 0:
-                            for idx, cell in enumerate(cells):
-                                if idx < len(current_headers):
-                                    header = current_headers[idx]
-                                    if header in table_data and comparator._is_valid_value(cell):
-                                        if cell not in table_data[header]:
-                                            table_data[header].append(cell)
+                            print(f"[Preview] Image table: {len(current_headers)} columns")
+                        
+                        elif table_active and current_headers:
+                            # More lenient: process available cells
+                            max_idx = min(len(cells), len(current_headers))
+                            for idx in range(max_idx):
+                                cell = cells[idx]
+                                header = current_headers[idx]
+                                if header in table_data and comparator._is_valid_value(cell):
+                                    if cell not in table_data[header]:
+                                        table_data[header].append(cell)
+                            # Only reset if major structure change
+                            if len(cells) < len(current_headers) - 2:
+                                table_active = False
+                    elif table_active and not line.strip():
+                        table_active = False
                 
                 for col in columns:
                     if col in table_data and table_data[col]:
@@ -1105,17 +1182,26 @@ class SinglePDFComparator:
             total_pages = 0
         
         # Second pass: If OCR enabled and converter available, process scanned pages
+        # This handles scanned photos with tables and text
         if self.use_ocr and self.converter and pages_need_ocr:
-            self._log(f"🔍 Running OCR on {len(pages_need_ocr)} pages...")
+            self._log(f"🔍 Running OCR on {len(pages_need_ocr)} scanned pages...")
+            self._log("   (Detecting tables, text, and images in scanned content)")
             try:
                 result = self.converter.convert(str(pdf_path))
                 ocr_text = result.document.export_to_markdown()
                 
-                # For OCR results, we'll use the full text but mark as "OCR"
-                # Note: Docling doesn't give per-page OCR text easily
+                self._log(f"   OCR extracted {len(ocr_text)} characters from scanned pages")
+                
+                # For OCR results, enhance scanned page texts
+                # Since Docling gives full document, we add it to scanned pages
                 for page_num in pages_need_ocr:
                     if page_num in page_texts:
+                        # Combine existing text with OCR (OCR contains tables/images)
                         page_texts[page_num] = page_texts[page_num] + "\n" + ocr_text
+                    else:
+                        page_texts[page_num] = ocr_text
+                        
+                self._log(f"   Enhanced {len(pages_need_ocr)} pages with OCR data")
             except Exception as e:
                 self._log(f"⚠ OCR error: {e}")
         
@@ -1182,6 +1268,83 @@ def create_single_pdf_job(source_path: str, column_name: str, pdf_path: str,
     thread.start()
     
     return job_id
+
+
+def get_multi_pdf_columns_with_preview(pdf_paths: List[str], preview_count: int = 10) -> Dict[str, Any]:
+    """
+    Extract columns from multiple PDFs and merge tables with matching column names.
+    If tables have same columns, merge data; otherwise keep separate.
+    
+    Returns: {"columns": [...], "preview": {"col1": [values...], ...}, "merged_tables": int}
+    """
+    from collections import defaultdict
+    
+    print(f"[MultiPDF] Processing {len(pdf_paths)} PDFs for column extraction...")
+    
+    # Track all columns and their data across PDFs
+    all_column_data = defaultdict(list)  # {column_name: [values from all PDFs]}
+    all_columns_set = set()
+    merged_count = 0
+    
+    comparator = AdvancedComparator(use_ocr=True)
+    
+    for i, pdf_path in enumerate(pdf_paths, 1):
+        pdf_name = Path(pdf_path).name
+        print(f"[MultiPDF] Processing PDF {i}/{len(pdf_paths)}: {pdf_name}")
+        
+        try:
+            # Get columns and preview from this PDF
+            result = get_file_columns_with_preview(pdf_path, preview_count=preview_count * 2)
+            pdf_columns = result.get('columns', [])
+            pdf_preview = result.get('preview', {})
+            
+            print(f"[MultiPDF]   Found {len(pdf_columns)} columns in {pdf_name}")
+            
+            # Check which columns match with existing ones (for merging)
+            for col in pdf_columns:
+                if col in all_columns_set:
+                    # Column exists - merge data
+                    print(f"[MultiPDF]   Merging column '{col}' from {pdf_name}")
+                    merged_count += 1
+                    if col in pdf_preview:
+                        # Add new values, avoiding duplicates
+                        for val in pdf_preview[col]:
+                            if val not in all_column_data[col]:
+                                all_column_data[col].append(val)
+                else:
+                    # New column
+                    all_columns_set.add(col)
+                    if col in pdf_preview:
+                        all_column_data[col].extend(pdf_preview[col])
+        
+        except Exception as e:
+            print(f"[MultiPDF] Error processing {pdf_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+    
+    # Limit preview values
+    final_preview = {}
+    for col, values in all_column_data.items():
+        # Remove duplicates while preserving order
+        unique_values = []
+        seen = set()
+        for val in values:
+            if val not in seen:
+                unique_values.append(val)
+                seen.add(val)
+        final_preview[col] = unique_values[:preview_count]
+    
+    all_columns = sorted(list(all_columns_set))
+    
+    print(f"[MultiPDF] Complete: {len(all_columns)} unique columns, {merged_count} merges")
+    
+    return {
+        "columns": all_columns,
+        "preview": final_preview,
+        "merged_tables": merged_count,
+        "total_pdfs": len(pdf_paths)
+    }
 
 
 def generate_single_pdf_excel(result: Dict[str, Any]) -> bytes:

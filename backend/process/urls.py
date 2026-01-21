@@ -45,6 +45,7 @@ urlpatterns = [
     # ==================== REPORTS / COMPARATOR ENDPOINTS ====================
     path('api/reports/columns/', views.get_columns_from_file, name='get_columns'),
     path('api/reports/column-preview/', views.get_column_preview_view, name='column_preview'),
+    path('api/reports/multi-pdf-columns/', views.get_multi_pdf_columns_preview, name='multi_pdf_columns'),
     path('api/reports/compare/', views.start_multi_pdf_comparison, name='multi_pdf_compare'),
     path('api/reports/compare-single/', views.start_single_pdf_comparison, name='single_pdf_compare'),
     path('api/reports/status/<str:job_id>/', views.get_report_status, name='report_status'),

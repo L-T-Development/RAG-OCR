@@ -31,6 +31,7 @@ from process.reports_engine import (
     get_report_excel_bytes,
     get_file_columns,
     get_file_columns_with_preview,
+    get_multi_pdf_columns_with_preview,
     get_column_preview,
     create_single_pdf_job,
     AdvancedComparator,
@@ -1033,6 +1034,59 @@ def get_report_status(request, job_id):
         response["error"] = job.get("error")
     
     return JsonResponse(response)
+
+
+@csrf_exempt
+def get_multi_pdf_columns_preview(request):
+    """
+    Get columns and preview from multiple PDFs - merges tables with matching columns.
+    
+    POST /api/reports/multi-pdf-columns/
+    - pdf_files[]: Multiple PDF files to analyze
+    - use_ocr: Optional, enable OCR (default: true)
+    
+    Returns: {"columns": [...], "preview": {"col1": ["val1", ...], ...}}
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "POST method required"}, status=405)
+    
+    # Get PDF files
+    pdf_files = request.FILES.getlist("pdf_files")
+    if not pdf_files or len(pdf_files) == 0:
+        return JsonResponse({"error": "At least one PDF file is required"}, status=400)
+    
+    # Get OCR option (default to True for multi-PDF)
+    use_ocr_param = request.POST.get("use_ocr", "true").lower()
+    use_ocr = use_ocr_param == "true"
+    
+    print(f"[MultiPDF Columns] Processing {len(pdf_files)} PDFs with OCR={use_ocr}")
+    
+    try:
+        # Save PDF files temporarily
+        pdf_paths = []
+        for pdf_file in pdf_files:
+            pdf_ext = os.path.splitext(pdf_file.name)[1].lower()
+            with tempfile.NamedTemporaryFile(delete=False, suffix=pdf_ext) as f:
+                for chunk in pdf_file.chunks():
+                    f.write(chunk)
+                pdf_paths.append(f.name)
+        
+        # Get columns with preview - merged across all PDFs
+        result = get_multi_pdf_columns_with_preview(pdf_paths, preview_count=10)
+        
+        # Cleanup temp files
+        for pdf_path in pdf_paths:
+            try:
+                os.unlink(pdf_path)
+            except:
+                pass
+        
+        return JsonResponse(result)
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({"error": str(e)}, status=500)
 
 
 @csrf_exempt

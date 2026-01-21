@@ -183,6 +183,26 @@ export const api = {
   },
 
   /**
+   * Get columns and preview from multiple PDFs - merges tables with matching columns
+   * @param {File[]} pdfFiles - Array of PDF files to analyze
+   * @param {boolean} useOcr - Enable OCR (default: true)
+   * @returns {Promise<{columns: string[], preview: {[column]: string[]}}>}
+   */
+  async getMultiPdfColumnsPreview(pdfFiles, useOcr = true) {
+    const formData = new FormData();
+    pdfFiles.forEach(file => {
+      formData.append('pdf_files', file);
+    });
+    formData.append('use_ocr', useOcr.toString());
+    
+    const res = await fetch(`${API_BASE}/reports/multi-pdf-columns/`, {
+      method: 'POST',
+      body: formData,
+    });
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  /**
    * Start multi-PDF comparison job
    * @param {File} sourceFile - Excel/PDF with values to search
    * @param {string} columnName - Column to extract values from
