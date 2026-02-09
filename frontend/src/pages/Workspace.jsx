@@ -167,10 +167,10 @@ export function Workspace() {
     }
   };
 
-  const handleUpload = async (file) => {
+  const handleUpload = async (file, category = 'other') => {
     if (!currentThreadId) {
       // No thread selected - use quick upload to create one
-      await handleQuickUpload(file);
+      await handleQuickUpload(file, category);
       return;
     }
 
@@ -187,7 +187,7 @@ export function Workspace() {
     }, 100);
 
     try {
-      const { ok, data } = await api.uploadFile(currentThreadId, file);
+      const { ok, data } = await api.uploadFile(currentThreadId, file, category);
       clearInterval(progressInterval);
       
       if (ok) {
@@ -226,7 +226,7 @@ export function Workspace() {
     }
   };
 
-  const handleQuickUpload = async (file) => {
+  const handleQuickUpload = async (file, category = 'other') => {
     setIsUploading(true);
     setUploadProgress(10);
     setUploadStatus('Uploading...');
@@ -240,7 +240,7 @@ export function Workspace() {
     }, 100);
 
     try {
-      const { ok, data } = await api.quickUpload(file);
+      const { ok, data } = await api.quickUpload(file, category);
       clearInterval(progressInterval);
       
       if (ok && data.thread) {

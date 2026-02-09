@@ -105,6 +105,16 @@
   position: relative;
 }
 
+/* Nested levels styling */
+.thread-item__header--nested {
+  font-size: calc(var(--text-sm) - 1px);
+}
+
+.thread-item__header--nested .thread-item__icon {
+  width: 28px;
+  height: 28px;
+}
+
 .thread-item__header:hover {
   background: var(--color-sidebar-hover);
 }
@@ -212,9 +222,9 @@
   color: var(--color-error);
 }
 
-/* Sub-threads */
+/* Sub-threads / Nested children */
 .thread-item__children {
-  padding-left: var(--spacing-lg);
+  margin-top: 2px;
   overflow: hidden;
   animation: slideDown var(--transition-fast) ease-out;
 }
@@ -222,11 +232,11 @@
 @keyframes slideDown {
   from {
     opacity: 0;
-    transform: translateY(-10px);
+    max-height: 0;
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    max-height: 1000px;
   }
 }
 

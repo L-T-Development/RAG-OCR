@@ -15,23 +15,28 @@ import './Sidebar.css';
 function ThreadItem({ 
   thread, 
   isActive, 
-  activeSubId,
   onSelect, 
   onCreateSub, 
   onDelete,
-  expanded,
-  onToggleExpand
+  expandedThreads,
+  onToggleExpand,
+  level = 0,  // Track nesting level
+  parentId = null
 }) {
   const hasChildren = thread.sub_threads && thread.sub_threads.length > 0;
+  const isRootLevel = level === 0;
+  const isExpanded = expandedThreads.has(thread.id);
+  const isCurrentActive = isActive === thread.id;
 
   return (
-    <div className="thread-item">
+    <div className="thread-item" style={{ '--nest-level': level }}>
       <div 
-        className={`thread-item__header ${isActive && !activeSubId ? 'thread-item__header--active' : ''}`}
-        onClick={() => onSelect(thread.id, thread.name)}
+        className={`thread-item__header ${isCurrentActive ? 'thread-item__header--active' : ''} ${!isRootLevel ? 'thread-item__header--nested' : ''}`}
+        onClick={() => onSelect(thread.id, thread.name, parentId)}
+        style={{ paddingLeft: `${12 + level * 20}px` }}
       >
         <span 
-          className={`thread-item__expand ${hasChildren ? '' : 'thread-item__expand--hidden'} ${expanded ? 'thread-item__expand--rotated' : ''}`}
+          className={`thread-item__expand ${hasChildren ? '' : 'thread-item__expand--hidden'} ${isExpanded ? 'thread-item__expand--rotated' : ''}`}
           onClick={(e) => {
             e.stopPropagation();
             onToggleExpand(thread.id);
@@ -41,7 +46,7 @@ function ThreadItem({
         </span>
         
         <div className="thread-item__icon">
-          <MessageSquare size={16} />
+          {isRootLevel ? <MessageSquare size={16} /> : <FileText size={14} />}
         </div>
         
         <div className="thread-item__content">
@@ -77,31 +82,21 @@ function ThreadItem({
         </div>
       </div>
       
-      {hasChildren && expanded && (
+      {hasChildren && isExpanded && (
         <div className="thread-item__children">
           {thread.sub_threads.map(sub => (
-            <div
+            <ThreadItem
               key={sub.id}
-              className={`subthread-item ${activeSubId === sub.id ? 'subthread-item--active' : ''}`}
-              onClick={() => onSelect(sub.id, sub.name, thread.id)}
-            >
-              <span className="subthread-item__icon">
-                <FileText size={14} />
-              </span>
-              <span className="subthread-item__name">{sub.name}</span>
-              <div className="subthread-item__actions">
-                <button
-                  className="thread-item__action-btn thread-item__action-btn--danger"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete(sub.id);
-                  }}
-                  title="Delete sub-thread"
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            </div>
+              thread={sub}
+              isActive={isActive}
+              expandedThreads={expandedThreads}
+              onToggleExpand={onToggleExpand}
+              onSelect={onSelect}
+              onCreateSub={onCreateSub}
+              onDelete={onDelete}
+              level={level + 1}
+              parentId={thread.id}
+            />
           ))}
         </div>
       )}
@@ -132,29 +127,39 @@ export function Sidebar({
     });
   };
 
-  // Find if current thread is a sub-thread
-  let activeParentId = null;
-  let activeSubId = null;
-  
-  for (const thread of threads) {
-    if (thread.id === currentThreadId) {
-      activeParentId = thread.id;
-      break;
-    }
-    if (thread.sub_threads) {
-      const sub = thread.sub_threads.find(s => s.id === currentThreadId);
-      if (sub) {
-        activeParentId = thread.id;
-        activeSubId = sub.id;
-        break;
+  // Recursively find thread and its parents
+  const findThreadPath = (threads, targetId, path = []) => {
+    for (const thread of threads) {
+      if (thread.id === targetId) {
+        return [...path, thread.id];
+      }
+      if (thread.sub_threads && thread.sub_threads.length > 0) {
+        const found = findThreadPath(thread.sub_threads, targetId, [...path, thread.id]);
+        if (found) return found;
       }
     }
+    return null;
+  };
+
+  // Auto-expand all parents of current thread
+  const threadPath = findThreadPath(threads, currentThreadId);
+  if (threadPath) {
+    const parentsToExpand = threadPath.slice(0, -1); // All except the current thread itself
+    parentsToExpand.forEach(parentId => {
+      if (!expandedThreads.has(parentId)) {
+        setExpandedThreads(prev => new Set([...prev, parentId]));
+      }
+    });
   }
 
-  // Auto-expand parent if sub-thread is selected
-  if (activeParentId && activeSubId && !expandedThreads.has(activeParentId)) {
-    setExpandedThreads(prev => new Set([...prev, activeParentId]));
-  }
+  // Helper to check if a thread is active (recursively)
+  const isThreadActive = (thread, currentId) => {
+    if (thread.id === currentId) return true;
+    if (thread.sub_threads) {
+      return thread.sub_threads.some(sub => isThreadActive(sub, currentId));
+    }
+    return false;
+  };
 
   return (
     <aside className="sidebar">
@@ -181,13 +186,14 @@ export function Sidebar({
               <ThreadItem
                 key={thread.id}
                 thread={thread}
-                isActive={activeParentId === thread.id}
-                activeSubId={activeSubId}
-                expanded={expandedThreads.has(thread.id)}
+                isActive={currentThreadId}
+                expandedThreads={expandedThreads}
                 onToggleExpand={toggleExpand}
                 onSelect={onSelectThread}
                 onCreateSub={onCreateSubThread}
                 onDelete={onDeleteThread}
+                level={0}
+                parentId={null}
               />
             ))}
           </>

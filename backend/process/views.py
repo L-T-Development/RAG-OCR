@@ -14,6 +14,7 @@ import json
 import os
 import time
 import tempfile
+from typing import Optional
 from process.document_compare import (
     compare_pdfs,
     compare_docx,
@@ -39,6 +40,10 @@ from process.reports_engine import (
     SinglePDFComparator
 )
 
+# Table Search Engine imports
+from process.table_search_engine import search_in_pdf, get_pdf_table_info
+import re
+
 def home(request):
     return render(request, 'home.html')
 def compare_page(request):
@@ -57,8 +62,7 @@ def create_thread(request):
         if parent_id:
             try:
                 parent_thread = Thread.objects.get(id=parent_id)
-                if parent_thread.parent:
-                    return JsonResponse({'error': 'Max nesting level reached'}, status=400)
+                # Removed nesting level restriction - now supports unlimited nesting
             except Thread.DoesNotExist:
                 return JsonResponse({'error': 'Parent not found'}, status=404)
 
@@ -69,16 +73,18 @@ def create_thread(request):
             'parent_id': str(parent_thread.id) if parent_thread else None
         })
 
-# --- List Threads (Same as before) ---
+# --- List Threads (UPDATED FOR UNLIMITED NESTING) ---
 def list_threads(request):
-    parents = Thread.objects.filter(parent__isnull=True).prefetch_related('sub_threads')
-    data = []
-    for p in parents:
-        data.append({
-            'id': str(p.id),
-            'name': p.name,
-            'sub_threads': [{'id': str(s.id), 'name': s.name} for s in p.sub_threads.all()]
-        })
+    def serialize_thread(thread):
+        """Recursively serialize thread with all nested sub-threads"""
+        return {
+            'id': str(thread.id),
+            'name': thread.name,
+            'sub_threads': [serialize_thread(sub) for sub in thread.sub_threads.all()]
+        }
+    
+    parents = Thread.objects.filter(parent__isnull=True)
+    data = [serialize_thread(p) for p in parents]
     return JsonResponse({'threads': data})
 
 # --- Upload File (UPDATED WITH AI VECTORIZATION) ---
@@ -90,6 +96,7 @@ def upload_file(request, thread_id):
     if request.method == 'POST' and request.FILES.get('file'):
         thread = get_object_or_404(Thread, id=thread_id)
         uploaded_file = request.FILES['file']
+        category = request.POST.get('category', 'other')  # Get category from request
 
         # Check file type
         ext = os.path.splitext(uploaded_file.name)[1].lower()
@@ -98,11 +105,12 @@ def upload_file(request, thread_id):
                 'error': f'Unsupported file type. Supported: {", ".join(SUPPORTED_EXTENSIONS)}'
             }, status=400)
 
-        # 1. Save to SQL Database (Django)
+        # 1. Save to SQL Database (Django) with category
         doc = Document.objects.create(
             thread=thread,
             file=uploaded_file,
-            filename=uploaded_file.name
+            filename=uploaded_file.name,
+            category=category
         )
 
         # 2. Process for Vector Database (ChromaDB)
@@ -140,7 +148,7 @@ def upload_file(request, thread_id):
 
     return JsonResponse({'error': 'No file sent'}, status=400)
 
-# --- Get Files List (Same as before) ---
+# --- Get Files List with Category ---
 def get_thread_files(request, thread_id):
     current_thread = get_object_or_404(Thread, id=thread_id)
     if current_thread.parent:
@@ -152,6 +160,8 @@ def get_thread_files(request, thread_id):
         'id': str(d.id),
         'name': d.filename,
         'url': d.file.url,
+        'category': d.category if hasattr(d, 'category') else 'other',
+        'category_label': dict(d.CATEGORY_CHOICES).get(d.category, 'Other') if hasattr(d, 'category') else 'Other',
         'is_inherited': d.thread.id != current_thread.id,
         'source_thread': d.thread.name
     } for d in docs]
@@ -304,20 +314,87 @@ def chat_thread(request, thread_id):
                 content=query
             )
 
-            # Run RAG
-            result = query_rag(
-                query,
-                current_thread_id=thread.id,
-                parent_thread_id=parent_id
-            )
+            # Check if query is asking to search in tables
+            table_search_result = None
+            query_lower = query.lower()
+            
+            # Detect comparison query
+            is_comparison = any(keyword in query_lower for keyword in [
+                'compare', 'comparison', 'difference', 'differences', 'common',
+                'not in', 'missing', 'match between', 'vs', 'versus'
+            ])
+            
+            if is_comparison:
+                # Extract comparison details
+                comparison_result = _extract_comparison_info(query, thread)
+                
+                if comparison_result:
+                    table_search_result = comparison_result
+            else:
+                # Detect table search intent
+                is_table_search = any(keyword in query_lower for keyword in [
+                    'match', 'find', 'search', 'look for', 'drawing number', 'part number',
+                    'drg', 'p/n', 'item number'
+                ])
+                
+                # Also detect if query looks like a code (part/drawing number) even without keywords
+                # Pattern: alphanumeric codes with at least 5 chars and contains digits
+                import re
+                code_pattern = r'\b([A-Z0-9\-/\.]{5,})\b'
+                potential_codes = re.findall(code_pattern, query, re.IGNORECASE)
+                if potential_codes and any(any(c.isdigit() for c in code) for code in potential_codes):
+                    is_table_search = True
+                
+                if is_table_search:
+                    # Extract search term and type
+                    search_term, query_type = _extract_search_info(query)
+                    print(f"[TABLE_SEARCH] Detected search - Term: '{search_term}', Type: {query_type}")
+                    
+                    if search_term:
+                        # Get PDF files from thread documents
+                        docs = Document.objects.filter(thread=thread, filename__iendswith='.pdf')
+                        print(f"[TABLE_SEARCH] Found {docs.count()} PDF(s) in thread")
+                        
+                        for doc in docs:
+                            print(f"[TABLE_SEARCH] Checking {doc.filename}: exists={os.path.exists(doc.file.path)}")
+                            if os.path.exists(doc.file.path):
+                                try:
+                                    print(f"[TABLE_SEARCH] Searching in {doc.filename}...")
+                                    search_result = search_in_pdf(doc.file.path, search_term, query_type)
+                                    print(f"[TABLE_SEARCH] Result: found={search_result.get('found')}, matches={search_result.get('total_matches', 0)}")
+                                    
+                                    if search_result.get('found'):
+                                        table_search_result = search_result
+                                        print(f"[TABLE_SEARCH] Using pdfplumber search results!")
+                                        break
+                                except Exception as e:
+                                    print(f"[TABLE_SEARCH] Error searching {doc.filename}: {e}")
+                                    import traceback
+                                    traceback.print_exc()
+            
+            # If table search found results, use that; otherwise use RAG
+            if table_search_result and table_search_result.get('found'):
+                answer = _format_table_search_response(table_search_result)
+                sources = [{'page': p} for p in table_search_result.get('pages_with_matches', [])]
+                chunks = []
+                confidence = 0.95
+                confidence_label = 'High'
+            else:
+                # Run standard RAG query
+                result = query_rag(
+                    query,
+                    current_thread_id=thread.id,
+                    parent_thread_id=parent_id
+                )
+                
+                answer = result.get('answer') or result.get('response') or ""
+                sources = result.get('sources', [])
+                chunks = result.get('chunks', [])
+                confidence = result.get('confidence', 0)
+                confidence_label = result.get('confidence_label', '')
+            
             processing_time = round(time.perf_counter() - start_time, 3)
             print(f"[API] Chat processing time: {processing_time}s")
-
-            answer = result.get('answer') or result.get('response') or ""
-            sources = result.get('sources', [])
-            chunks = result.get('chunks', [])
-            confidence = result.get('confidence', 0)
-            confidence_label = result.get('confidence_label', '')
 
             # Save AI message with metadata
             ChatMessage.objects.create(
@@ -349,6 +426,309 @@ def chat_thread(request, thread_id):
             return JsonResponse({'error': str(e)}, status=500)
 
     return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+def _extract_search_info(query: str) -> tuple:
+    """
+    Extract search term and query type from natural language query.
+    Returns: (search_term, query_type)
+    """
+    query_lower = query.lower()
+    
+    # Determine query type
+    if any(kw in query_lower for kw in ['drawing number', 'drg', 'drg.', 'drawing no']):
+        query_type = 'drawing_number'
+    elif any(kw in query_lower for kw in ['part number', 'part no', 'p/n', 'item number']):
+        query_type = 'part_number'
+    else:
+        query_type = 'general'
+    
+    # Extract the search term using patterns
+    patterns = [
+        r'(?:for|find|search|match|lookup)\s+["\']?([A-Z0-9\-/\.]+)["\']?',
+        r'["\']([A-Z0-9\-/\.]+)["\']',
+        r'(?:number|no\.?|#)\s*:?\s*([A-Z0-9\-/\.]+)',
+        r'\b([A-Z0-9]{5,})\b',  # Alphanumeric code with at least 5 chars
+        r'\b(\d{10,})\b',  # Long numeric code
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, query, re.IGNORECASE)
+        if match:
+            return match.group(1).strip(), query_type
+    
+    # Fallback: take last word if it looks like a code
+    words = query.split()
+    for word in reversed(words):
+        clean_word = word.strip('.,?!\'"')
+        if len(clean_word) >= 5 and any(c.isdigit() for c in clean_word):
+            return clean_word, query_type
+    
+    return None, query_type
+
+
+def _extract_comparison_info(query: str, thread) -> Optional[dict]:
+    """
+    Extract comparison parameters from natural language query.
+    
+    Examples:
+    - "Compare part numbers in mrls with ispl"
+    - "Show differences between mrls and ispl drawing numbers"
+    - "What parts are in mrls but not in ispl"
+    
+    Returns:
+        Comparison result dictionary or None
+    """
+    from .table_search_engine import compare_pdfs
+    
+    query_lower = query.lower()
+    
+    # Determine comparison type
+    if any(kw in query_lower for kw in ['difference', 'not in', 'missing', 'only in']):
+        comparison_type = 'difference'
+    elif any(kw in query_lower for kw in ['common', 'both', 'shared', 'in both']):
+        comparison_type = 'common'
+    elif any(kw in query_lower for kw in ['unique', 'unique to each', 'each']):
+        comparison_type = 'unique_both'
+    elif 'all' in query_lower or 'complete' in query_lower:
+        comparison_type = 'all'
+    else:
+        comparison_type = 'difference'  # Default
+    
+    # Extract column name
+    column_keywords = {
+        'part': ['part number', 'part no', 'p/n', 'part'],
+        'drawing': ['drawing number', 'drg', 'drawing no', 'dwg'],
+        'nomenclature': ['nomenclature', 'name', 'description'],
+        'nsn': ['nsn', 'national stock']
+    }
+    
+    column_name = None
+    for col_type, keywords in column_keywords.items():
+        if any(kw in query_lower for kw in keywords):
+            column_name = col_type
+            break
+    
+    if not column_name:
+        column_name = 'part'  # Default to part number
+    
+    # Get PDFs from thread
+    docs = Document.objects.filter(thread=thread, filename__iendswith='.pdf')
+    
+    if docs.count() < 2:
+        return None
+    
+    # Try to identify which PDFs to compare
+    # Priority 1: Use categories if they match query keywords
+    pdf1_doc = None
+    pdf2_doc = None
+    
+    # Check for category-based matching first
+    category_patterns = {
+        'mrls': ['mrls', 'mrl', 'maintenance', 'repair'],
+        'ispl': ['ispl', 'isp', 'spare', 'parts list'],
+        'manual': ['manual', 'handbook', 'guide'],
+        'catalog': ['catalog', 'catalogue'],
+        'specification': ['spec', 'specification'],
+        'drawing': ['drawing', 'dwg']
+    }
+    
+    # Try to find documents by category mentioned in query
+    for category, patterns in category_patterns.items():
+        if any(p in query_lower for p in patterns):
+            matching_docs = [d for d in docs if d.category == category]
+            if matching_docs:
+                if not pdf1_doc:
+                    pdf1_doc = matching_docs[0]
+                elif not pdf2_doc and matching_docs[0] != pdf1_doc:
+                    pdf2_doc = matching_docs[0]
+    
+    # Priority 2: Match by filename patterns
+    if not pdf1_doc or not pdf2_doc:
+        for doc in docs:
+            filename_lower = doc.filename.lower()
+            
+            # MRLS patterns
+            if not pdf1_doc and any(p in filename_lower for p in ['mrls', 'mrl']):
+                pdf1_doc = doc
+            # ISPL patterns
+            elif not pdf2_doc and any(p in filename_lower for p in ['ispl', 'isp']):
+                pdf2_doc = doc
+    
+    # Priority 3: Use first two PDFs if still not found
+    if not pdf1_doc or not pdf2_doc:
+        doc_list = list(docs)
+        if len(doc_list) >= 2:
+            pdf1_doc = pdf1_doc or doc_list[0]
+            pdf2_doc = pdf2_doc or doc_list[1] if doc_list[1] != pdf1_doc else (doc_list[2] if len(doc_list) > 2 else None)
+    
+    if not pdf1_doc or not pdf2_doc:
+        return None
+    
+    try:
+        result = compare_pdfs(pdf1_doc.file.path, pdf2_doc.file.path, column_name, comparison_type)
+        
+        if result.get('found'):
+            # Format the result
+            result['formatted_answer'] = _format_comparison_response(result)
+            return result
+    except Exception as e:
+        print(f"[COMPARISON] Error: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return None
+
+
+def _format_comparison_response(comparison_result: dict) -> str:
+    """Format comparison results as readable text with better structure."""
+    summary = comparison_result.get('summary', '')
+    pdf1 = comparison_result.get('pdf1', 'PDF 1')
+    pdf2 = comparison_result.get('pdf2', 'PDF 2')
+    column = comparison_result.get('column', 'items')
+    
+    # Add header
+    response = f"# 📊 File Comparison Results\n\n"
+    response += f"**Comparing:** {pdf1} ↔️ {pdf2}\n"
+    response += f"**Column:** {column}\n\n"
+    response += "---\n\n"
+    response += summary + "\n\n"
+    
+    # Show sample data
+    results_data = comparison_result.get('results', {})
+    
+    if 'in_pdf1_only' in results_data and results_data['in_pdf1_only']['count'] > 0:
+        response += f"## 📄 Unique to {pdf1}\n"
+        response += f"**Count:** {results_data['in_pdf1_only']['count']} items\n\n"
+        rows = results_data['in_pdf1_only'].get('rows', [])[:8]
+        
+        for i, row in enumerate(rows, 1):
+            value = row.get('_matched_value', 'N/A')
+            page = row.get('_page', 'Unknown')
+            response += f"**{i}.** `{value}` _(Page {page})_\n"
+            
+            # Show important fields (exclude internal fields)
+            fields = []
+            for key, val in row.items():
+                if not key.startswith('_') and val and str(val).strip() and key.lower() != column.lower():
+                    fields.append(f"**{key}:** {val}")
+            
+            if fields:
+                response += "   " + " | ".join(fields[:3]) + "\n"
+            response += "\n"
+        
+        if results_data['in_pdf1_only']['count'] > 8:
+            response += f"_... and {results_data['in_pdf1_only']['count'] - 8} more items_\n\n"
+    
+    if 'common' in results_data and results_data['common']['count'] > 0:
+        response += f"## ✅ Common Items (in both files)\n"
+        response += f"**Count:** {results_data['common']['count']} items\n\n"
+        values = results_data['common'].get('values', [])[:15]
+        if values:
+            # Format as comma-separated list
+            response += "**Examples:** "
+            response += ", ".join([f"`{v}`" for v in values[:15]])
+            if results_data['common']['count'] > 15:
+                response += f" ... _(+{results_data['common']['count'] - 15} more)_"
+            response += "\n\n"
+    
+    if 'in_pdf2_only' in results_data and results_data['in_pdf2_only']['count'] > 0:
+        response += f"## 📄 Unique to {pdf2}\n"
+        response += f"**Count:** {results_data['in_pdf2_only']['count']} items\n\n"
+        rows = results_data['in_pdf2_only'].get('rows', [])[:8]
+        
+        for i, row in enumerate(rows, 1):
+            value = row.get('_matched_value', 'N/A')
+            page = row.get('_page', 'Unknown')
+            response += f"**{i}.** `{value}` _(Page {page})_\n"
+            
+            fields = []
+            for key, val in row.items():
+                if not key.startswith('_') and val and str(val).strip() and key.lower() != column.lower():
+                    fields.append(f"**{key}:** {val}")
+            
+            if fields:
+                response += "   " + " | ".join(fields[:3]) + "\n"
+            response += "\n"
+        
+        if results_data['in_pdf2_only']['count'] > 8:
+            response += f"_... and {results_data['in_pdf2_only']['count'] - 8} more items_\n\n"
+    
+    response += "\n---\n"
+    response += "_💡 Tip: Ask me to show more details about specific items or different columns!_"
+    
+    return response
+
+
+def _format_table_search_response(search_result: dict) -> str:
+    """Format table search results as readable text with better structure."""
+    # Check if this is a comparison result
+    if 'formatted_answer' in search_result:
+        return search_result['formatted_answer']
+    
+    summary = search_result.get('summary_text', '')
+    results = search_result.get('results', [])
+    search_term = search_result.get('search_term', '')
+    query_type = search_result.get('query_type', 'general')
+    
+    if not results:
+        return summary or f"No matches found for '{search_term}'."
+    
+    # Generate structured response
+    total = len(results)
+    pages = sorted(set(r.get('page', 0) for r in results if r.get('page')))
+    
+    response = f"# 🔍 Search Results\n\n"
+    response += f"**Search Term:** `{search_term}`\n"
+    response += f"**Search Type:** {query_type.replace('_', ' ').title()}\n"
+    response += f"**Matches Found:** {total}\n"
+    response += f"**Pages:** {', '.join(map(str, pages[:10]))}"
+    if len(pages) > 10:
+        response += f" ... (+{len(pages) - 10} more)"
+    response += "\n\n---\n\n"
+    
+    # Show detailed results
+    for i, result in enumerate(results[:12], 1):
+        row_data = result.get('row_data', {})
+        page = result.get('page')
+        
+        response += f"## Match {i}"
+        if page:
+            response += f" _(Page {page})_"
+        response += "\n\n"
+        
+        # Show relevant fields in a structured way
+        important_fields = []
+        other_fields = []
+        
+        for key, value in row_data.items():
+            if value and str(value).strip():
+                clean_key = key.strip()
+                clean_value = str(value).strip()
+                
+                # Prioritize important columns
+                if any(kw in clean_key.lower() for kw in ['part', 'drg', 'drawing', 'nsn', 'nomenclature']):
+                    important_fields.append((clean_key, clean_value))
+                else:
+                    other_fields.append((clean_key, clean_value))
+        
+        # Display important fields first
+        for key, value in important_fields:
+            response += f"- **{key}:** `{value}`\n"
+        
+        # Then show other fields (limit to 5 total)
+        for key, value in other_fields[:max(0, 5 - len(important_fields))]:
+            response += f"- **{key}:** {value}\n"
+        
+        response += "\n"
+    
+    if total > 12:
+        response += f"---\n\n_... and {total - 12} more matches_\n\n"
+    
+    response += "---\n"
+    response += "_💡 Tip: Refine your search or ask for specific details about any item!_"
+    
+    return response
 
 
 def get_chat_history(request, thread_id):

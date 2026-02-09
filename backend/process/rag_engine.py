@@ -258,7 +258,11 @@ def store_table(table_id, doc_id, thread_id, parent_id, source, page, table_inde
                 if col_idx >= column_count:
                     break
 
-                col_name = headers[col_idx] if headers and col_idx < len(headers) else f'Column {col_idx}'
+                # Ensure column name is never None
+                if headers and col_idx < len(headers) and headers[col_idx]:
+                    col_name = str(headers[col_idx])
+                else:
+                    col_name = f'Column {col_idx}'
 
                 TableCell.objects.create(
                     row=data_row,
@@ -361,9 +365,9 @@ class EmbeddingModelManager:
             return None
 
     def _get_default_model_path(self):
-        """Get default model path (legacy support)"""
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(base_dir, "models", "all-MiniLM-L6-v2")
+        """Get default model path (returns relative path for portability)"""
+        # Return relative path - will be resolved to absolute when loading
+        return "models/all-MiniLM-L6-v2"
 
     def load_model(self, model_path=None, force_reload=False):
         """
@@ -384,12 +388,20 @@ class EmbeddingModelManager:
             if model_path is None:
                 model_path = self._get_default_model_path()
 
+            # Convert relative paths to absolute
+            if model_path and not os.path.isabs(model_path):
+                # Get project root (two levels up from backend/process/)
+                backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                project_root = os.path.dirname(backend_dir)
+                model_path = os.path.normpath(os.path.join(project_root, model_path))
+                print(f"[RAG] Resolved relative path to: {model_path}")
+
             # Check if we need to reload
             if self._model is not None and self._model_path == model_path and not force_reload:
                 return True
 
             # Check if it's a HuggingFace model name (allow auto-download)
-            is_hf_model = '/' in model_path or not os.path.isabs(model_path)
+            is_hf_model = '/' in model_path or (not os.path.isabs(model_path) and not os.path.exists(model_path))
 
             # Validate local path exists (skip for HuggingFace model names)
             if not is_hf_model and not os.path.exists(model_path):
@@ -498,6 +510,8 @@ class EmbeddingModelManager:
 # Global singleton instance
 model_manager = EmbeddingModelManager()
 
+# Model will auto-initialize on first use through Django's AppConfig ready() method
+
 
 def get_model_status():
     """Get the current embedding model status"""
@@ -509,12 +523,15 @@ def configure_model_path(path):
     Configure and load the embedding model from a new path.
 
     Args:
-        path: Path to the model directory
+        path: Path to the model directory (can be relative or absolute)
 
     Returns:
         dict with status information
     """
-    # Save to database
+    # Normalize path - convert backslashes to forward slashes for portability
+    path = path.replace('\\', '/')
+    
+    # Save to database (save as-is, will be resolved when loading)
     try:
         from .models import AppConfig
         AppConfig.set_value('embedding_model_path', path)

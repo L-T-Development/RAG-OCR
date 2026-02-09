@@ -26,13 +26,17 @@ export const api = {
 
   // Files
   async getThreadFiles(threadId) {
+    if (!threadId || threadId === 'undefined' || threadId === 'null') {
+      return { files: [] };
+    }
     const res = await fetch(`${API_BASE}/files/${threadId}/`);
     return res.json();
   },
 
-  async uploadFile(threadId, file) {
+  async uploadFile(threadId, file, category = 'other') {
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('category', category);
     const res = await fetch(`${API_BASE}/upload/${threadId}/`, {
       method: 'POST',
       body: formData,
@@ -48,9 +52,10 @@ export const api = {
   },
 
   // Quick Upload - auto-creates thread named after PDF
-  async quickUpload(file) {
+  async quickUpload(file, category = 'other') {
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('category', category);
     const res = await fetch(`${API_BASE}/quick-upload/`, {
       method: 'POST',
       body: formData,
@@ -60,6 +65,9 @@ export const api = {
 
   // Chat
   async getChatHistory(threadId) {
+    if (!threadId || threadId === 'undefined' || threadId === 'null') {
+      return { messages: [] };
+    }
     const res = await fetch(`${API_BASE}/chat/history/${threadId}/`);
     if (!res.ok) return { messages: [] };
     return res.json();

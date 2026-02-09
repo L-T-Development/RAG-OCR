@@ -48,10 +48,15 @@ export function Settings() {
           setModelPath(result.data.saved_path);
         } else if (result.data.path) {
           setModelPath(result.data.path);
+        } else {
+          // Set default relative path if nothing configured
+          setModelPath('models/all-MiniLM-L6-v2');
         }
       }
     } catch (error) {
       console.error('Failed to fetch model status:', error);
+      // Set default on error
+      setModelPath('models/all-MiniLM-L6-v2');
     } finally {
       setIsLoading(false);
     }
@@ -223,7 +228,7 @@ export function Settings() {
                 </button>
               </div>
               <p className="settings-form__hint">
-                Path to local SentenceTransformer model (e.g., all-MiniLM-L6-v2)
+                Relative path from project root (e.g., models/all-MiniLM-L6-v2) or absolute path. Works automatically on any machine.
               </p>
             </div>
 
