@@ -36,6 +36,7 @@ urlpatterns = [
     path('api/model/status/', views.model_status, name='model_status'),
     path('api/model/configure/', views.model_configure, name='model_configure'),
     path('api/model/validate/', views.model_validate, name='model_validate'),
+    path('api/embedding/configure/', views.embedding_provider_configure, name='embedding_provider_configure'),
     path('api/config/', views.get_app_config, name='app_config'),
 
     # LLM Model Selection Endpoints

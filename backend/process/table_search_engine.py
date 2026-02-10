@@ -582,3 +582,139 @@ def compare_pdfs(pdf1_path: str, pdf2_path: str, column_name: str,
         extract_and_index_pdf(pdf2_path)
     
     return _search_engine.compare_tables(pdf1_name, pdf2_name, column_name, comparison_type)
+
+
+def detect_conflicts(pdf1_path: str, pdf2_path: str = None) -> Dict[str, Any]:
+    """
+    Detect data conflicts within a PDF or between two PDFs:
+    - Same nomenclature with different part numbers
+    - Same part number with different nomenclatures
+    
+    Args:
+        pdf1_path: Path to first PDF (required)
+        pdf2_path: Path to second PDF (optional, for cross-file conflicts)
+    
+    Returns:
+        Dictionary with conflict analysis
+    """
+    pdf1_name = Path(pdf1_path).name
+    
+    # Extract tables if not already done
+    if pdf1_name not in _search_engine.extracted_tables:
+        extract_and_index_pdf(pdf1_path)
+    
+    # Collect all part-nomenclature mappings
+    part_to_nomenclature = {}  # {part_number: [nomenclature1, nomenclature2, ...]}
+    nomenclature_to_part = {}  # {nomenclature: [part_number1, part_number2, ...]}
+    
+    def extract_mappings(pdf_name, source_label):
+        """Extract part number and nomenclature mappings from a PDF."""
+        tables = _search_engine.extracted_tables.get(pdf_name, [])
+        
+        for df in tables:
+            # Find part number columns
+            part_cols = [col for col in df.columns if not col.startswith('_') and 
+                        any(kw in col.lower() for kw in ['part', 'p/n', 'drg', 'dwg', 'drawing'])]
+            
+            # Find nomenclature columns
+            nom_cols = [col for col in df.columns if not col.startswith('_') and 
+                       any(kw in col.lower() for kw in ['nomenclature', 'designation', 'description', 'name', 'item'])]
+            
+            if not part_cols or not nom_cols:
+                continue
+            
+            # Use first matching columns
+            part_col = part_cols[0]
+            nom_col = nom_cols[0]
+            
+            for _, row in df.iterrows():
+                part_val = str(row[part_col]).strip().upper() if pd.notna(row[part_col]) else ''
+                nom_val = str(row[nom_col]).strip().upper() if pd.notna(row[nom_col]) else ''
+                
+                if not part_val or not nom_val or part_val.lower() in ['nan', 'none', ''] or nom_val.lower() in ['nan', 'none', '']:
+                    continue
+                
+                # Track mappings with source info
+                if part_val not in part_to_nomenclature:
+                    part_to_nomenclature[part_val] = []
+                
+                entry = {'nomenclature': nom_val, 'source': source_label}
+                if '_source_page' in row:
+                    entry['page'] = int(row['_source_page'])
+                
+                # Avoid duplicate entries
+                if not any(e['nomenclature'] == nom_val for e in part_to_nomenclature[part_val]):
+                    part_to_nomenclature[part_val].append(entry)
+                
+                if nom_val not in nomenclature_to_part:
+                    nomenclature_to_part[nom_val] = []
+                
+                part_entry = {'part': part_val, 'source': source_label}
+                if '_source_page' in row:
+                    part_entry['page'] = int(row['_source_page'])
+                
+                if not any(e['part'] == part_val for e in nomenclature_to_part[nom_val]):
+                    nomenclature_to_part[nom_val].append(part_entry)
+    
+    # Extract from PDF1
+    extract_mappings(pdf1_name, pdf1_name)
+    
+    # Extract from PDF2 if provided
+    if pdf2_path:
+        pdf2_name = Path(pdf2_path).name
+        if pdf2_name not in _search_engine.extracted_tables:
+            extract_and_index_pdf(pdf2_path)
+        extract_mappings(pdf2_name, pdf2_name)
+    
+    # Find conflicts
+    conflicts = {
+        'part_number_conflicts': [],  # Same part with different nomenclatures
+        'nomenclature_conflicts': []  # Same nomenclature with different parts
+    }
+    
+    # Check for part number conflicts
+    for part, entries in part_to_nomenclature.items():
+        unique_nomenclatures = list(set(e['nomenclature'] for e in entries))
+        if len(unique_nomenclatures) > 1:
+            conflicts['part_number_conflicts'].append({
+                'part_number': part,
+                'nomenclatures': unique_nomenclatures,
+                'count': len(unique_nomenclatures),
+                'sources': entries
+            })
+    
+    # Check for nomenclature conflicts
+    for nomenclature, entries in nomenclature_to_part.items():
+        unique_parts = list(set(e['part'] for e in entries))
+        if len(unique_parts) > 1:
+            conflicts['nomenclature_conflicts'].append({
+                'nomenclature': nomenclature,
+                'part_numbers': unique_parts,
+                'count': len(unique_parts),
+                'sources': entries
+            })
+    
+    # Generate summary
+    summary = "## 🔍 Data Conflict Analysis\n\n"
+    
+    if pdf2_path:
+        summary += f"**Comparing:** {pdf1_name} ↔️ {Path(pdf2_path).name}\n\n"
+    else:
+        summary += f"**Analyzing:** {pdf1_name}\n\n"
+    
+    part_conflicts = len(conflicts['part_number_conflicts'])
+    nom_conflicts = len(conflicts['nomenclature_conflicts'])
+    
+    if part_conflicts == 0 and nom_conflicts == 0:
+        summary += "✅ **No conflicts detected!** All part numbers have consistent nomenclatures.\n"
+    else:
+        if part_conflicts > 0:
+            summary += f"⚠️ **{part_conflicts} Part Number Conflicts** - Same part with different nomenclatures\n"
+        if nom_conflicts > 0:
+            summary += f"⚠️ **{nom_conflicts} Nomenclature Conflicts** - Same nomenclature with different parts\n"
+    
+    conflicts['summary'] = summary
+    conflicts['found'] = True
+    conflicts['total_conflicts'] = part_conflicts + nom_conflicts
+    
+    return conflicts

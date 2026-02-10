@@ -130,6 +130,15 @@ export const api = {
     return { ok: res.ok, data: await res.json() };
   },
 
+  async configureEmbeddingProvider(provider, model) {
+    const res = await fetch(`${API_BASE}/embedding/configure/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, model }),
+    });
+    return { ok: res.ok, data: await res.json() };
+  },
+
   async validateModelPath(path) {
     const res = await fetch(`${API_BASE}/model/validate/`, {
       method: 'POST',

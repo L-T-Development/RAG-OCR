@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Plus,
   MessageSquare,
@@ -141,16 +141,20 @@ export function Sidebar({
     return null;
   };
 
-  // Auto-expand all parents of current thread
-  const threadPath = findThreadPath(threads, currentThreadId);
-  if (threadPath) {
-    const parentsToExpand = threadPath.slice(0, -1); // All except the current thread itself
-    parentsToExpand.forEach(parentId => {
-      if (!expandedThreads.has(parentId)) {
-        setExpandedThreads(prev => new Set([...prev, parentId]));
+  // Auto-expand all parents of current thread (in useEffect to avoid render issues)
+  useEffect(() => {
+    if (currentThreadId && threads.length > 0) {
+      const threadPath = findThreadPath(threads, currentThreadId);
+      if (threadPath && threadPath.length > 1) {
+        const parentsToExpand = threadPath.slice(0, -1); // All except the current thread itself
+        setExpandedThreads(prev => {
+          const next = new Set(prev);
+          parentsToExpand.forEach(parentId => next.add(parentId));
+          return next;
+        });
       }
-    });
-  }
+    }
+  }, [currentThreadId, threads]);
 
   // Helper to check if a thread is active (recursively)
   const isThreadActive = (thread, currentId) => {

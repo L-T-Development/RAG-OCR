@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Sidebar, ChatArea, DocumentPanel, DropZone } from '../components/workspace';
+import { CategorySelector } from '../components/workspace/CategorySelector';
 import { Navigation } from '../components/shared/Navigation';
 import { api } from '../services/api';
 import { X, MessageSquare, FolderPlus } from 'lucide-react';
@@ -29,11 +30,48 @@ export function Workspace() {
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [createDialogParentId, setCreateDialogParentId] = useState(null);
   const [newThreadName, setNewThreadName] = useState('');
+  
+  // Category selector state
+  const [showCategorySelector, setShowCategorySelector] = useState(false);
+  const [pendingFile, setPendingFile] = useState(null);
 
   // Fetch threads on mount
   useEffect(() => {
     fetchThreads();
   }, []);
+
+  // Helper function to recursively find a thread at any nesting level
+  const findThreadById = useCallback((threadList, id) => {
+    if (!threadList || !id) return null;
+    for (const thread of threadList) {
+      if (thread.id === id) return thread;
+      if (thread.sub_threads && thread.sub_threads.length > 0) {
+        const found = findThreadById(thread.sub_threads, id);
+        if (found) return found;
+      }
+    }
+    return null;
+  }, []);
+
+  // Auto-select last used thread on mount (works for any nesting level)
+  useEffect(() => {
+    const lastThreadId = localStorage.getItem('lastThreadId');
+    const lastThreadName = localStorage.getItem('lastThreadName');
+    
+    if (lastThreadId && threads.length > 0 && !currentThreadId) {
+      const thread = findThreadById(threads, lastThreadId);
+      if (thread) {
+        // Thread exists at any level - restore it
+        console.log('[Workspace] Restoring thread:', thread.name, 'ID:', thread.id);
+        handleSelectThread(thread.id, thread.name || lastThreadName);
+      } else {
+        console.log('[Workspace] Saved thread not found, clearing localStorage');
+        localStorage.removeItem('lastThreadId');
+        localStorage.removeItem('lastThreadName');
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threads.length]); // Only trigger when threads are first loaded
 
   const fetchThreads = async () => {
     try {
@@ -45,12 +83,19 @@ export function Workspace() {
   };
 
   const handleSelectThread = async (threadId, threadName, parentId = null) => {
+    console.log('[Workspace] Selecting thread:', { threadId, threadName, parentId });
+    
     setCurrentThreadId(threadId);
     setCurrentThreadName(threadName);
+    
+    // Save to localStorage for persistence across refreshes
+    localStorage.setItem('lastThreadId', threadId);
+    localStorage.setItem('lastThreadName', threadName);
     
     // Load documents
     try {
       const data = await api.getThreadFiles(threadId);
+      console.log('[Workspace] Loaded documents:', data.files?.length || 0);
       setDocuments(data.files || []);
     } catch (e) {
       console.error('Error fetching files:', e);
@@ -60,6 +105,7 @@ export function Workspace() {
     // Load chat history
     try {
       const data = await api.getChatHistory(threadId);
+      console.log('[Workspace] Loaded chat history:', data.messages?.length || 0, 'messages');
       const formattedMessages = (data.messages || []).map((msg, idx) => ({
         id: msg.id || `msg-${idx}`,
         role: msg.role === 'ai' ? 'assistant' : msg.role,
@@ -72,6 +118,7 @@ export function Workspace() {
       }));
       setMessages(formattedMessages);
     } catch (e) {
+      console.error('Error fetching chat history:', e);
       setMessages([]);
     }
   };
@@ -114,6 +161,10 @@ export function Workspace() {
         setCurrentThreadName('');
         setMessages([]);
         setDocuments([]);
+        
+        // Clear localStorage if this was the active thread
+        localStorage.removeItem('lastThreadId');
+        localStorage.removeItem('lastThreadName');
       }
     } catch (e) {
       console.error('Error deleting thread:', e);
@@ -293,12 +344,28 @@ export function Workspace() {
   };
 
   const handleDrop = useCallback((file) => {
-    if (currentThreadId) {
-      handleUpload(file);
-    } else {
-      handleQuickUpload(file);
+    // Show category selector before upload
+    setPendingFile(file);
+    setShowCategorySelector(true);
+  }, []);
+
+  const handleCategorySelect = async (category) => {
+    setShowCategorySelector(false);
+    
+    if (pendingFile) {
+      if (currentThreadId) {
+        await handleUpload(pendingFile, category);
+      } else {
+        await handleQuickUpload(pendingFile, category);
+      }
+      setPendingFile(null);
     }
-  }, [currentThreadId]);
+  };
+
+  const handleCategoryCancel = () => {
+    setShowCategorySelector(false);
+    setPendingFile(null);
+  };
 
   // Document Summary Handlers
   const handleSummarizeThread = async () => {
@@ -395,6 +462,15 @@ export function Workspace() {
       </div>
 
       <DropZone onDrop={handleDrop} disabled={isUploading} />
+
+      {/* Category Selector Modal */}
+      {showCategorySelector && pendingFile && (
+        <CategorySelector
+          fileName={pendingFile.name}
+          onSelect={handleCategorySelect}
+          onCancel={handleCategoryCancel}
+        />
+      )}
 
       {/* Create Thread Dialog - Improved */}
       {showCreateDialog && (

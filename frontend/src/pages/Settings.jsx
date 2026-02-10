@@ -25,6 +25,8 @@ export function Settings() {
   const { theme, setTheme } = useTheme();
 
   // Embedding model state
+  const [embeddingProvider, setEmbeddingProvider] = useState('sentence-transformers');
+  const [ollamaModel, setOllamaModel] = useState('nomic-embed-text');
   const [modelPath, setModelPath] = useState('');
   const [modelStatus, setModelStatus] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -44,18 +46,26 @@ export function Settings() {
       const result = await api.getModelStatus();
       if (result.ok) {
         setModelStatus(result.data);
-        if (result.data.saved_path) {
-          setModelPath(result.data.saved_path);
-        } else if (result.data.path) {
-          setModelPath(result.data.path);
+        
+        // Set provider type
+        const provider = result.data.provider || 'sentence-transformers';
+        setEmbeddingProvider(provider);
+        
+        // Set model path or name based on provider
+        if (provider === 'ollama') {
+          setOllamaModel(result.data.ollama_model || 'nomic-embed-text');
         } else {
-          // Set default relative path if nothing configured
-          setModelPath('models/all-MiniLM-L6-v2');
+          if (result.data.saved_path) {
+            setModelPath(result.data.saved_path);
+          } else if (result.data.path) {
+            setModelPath(result.data.path);
+          } else {
+            setModelPath('models/all-MiniLM-L6-v2');
+          }
         }
       }
     } catch (error) {
       console.error('Failed to fetch model status:', error);
-      // Set default on error
       setModelPath('models/all-MiniLM-L6-v2');
     } finally {
       setIsLoading(false);
@@ -120,8 +130,13 @@ export function Settings() {
   };
 
   const handleSave = async () => {
-    if (!modelPath.trim()) {
-      setSaveMessage({ type: 'error', text: 'Please enter a model path' });
+    const model = embeddingProvider === 'ollama' ? ollamaModel : modelPath;
+    
+    if (!model.trim()) {
+      setSaveMessage({ 
+        type: 'error', 
+        text: embeddingProvider === 'ollama' ? 'Please enter an Ollama model name' : 'Please enter a model path' 
+      });
       return;
     }
 
@@ -129,11 +144,11 @@ export function Settings() {
     setSaveMessage(null);
 
     try {
-      const result = await api.configureModel(modelPath);
+      const result = await api.configureEmbeddingProvider(embeddingProvider, model);
       if (result.ok && result.data.status?.loaded) {
         setSaveMessage({
           type: 'success',
-          text: 'Model configured successfully!',
+          text: `${embeddingProvider === 'ollama' ? 'Ollama' : 'Embedding'} model configured successfully!`,
         });
         setModelStatus(result.data.status);
       } else {
@@ -148,7 +163,7 @@ export function Settings() {
     } catch (error) {
       setSaveMessage({
         type: 'error',
-        text: 'Network error. Please try again.',
+        text: 'Network error. Is Ollama running?' + (embeddingProvider === 'ollama' ? ' (http://localhost:11434)' : ''),
       });
     } finally {
       setIsSaving(false);
@@ -200,37 +215,101 @@ export function Settings() {
               <div className="status-card__content">
                 <div className="status-card__title">Model Status</div>
                 <div className="status-card__text">{getStatusText()}</div>
+                {modelStatus?.provider && (
+                  <div className="status-card__text" style={{fontSize: '0.75rem', opacity: 0.7, marginTop: '4px'}}>
+                    Provider: {modelStatus.provider === 'ollama' ? 'Ollama (nomic-embed-text: 768 dims, 8K context)' : 'SentenceTransformers (384 dims, 256 tokens)'}
+                  </div>
+                )}
               </div>
               {isLoading && <Loader2 size={18} className="animate-spin" />}
             </div>
 
             <div className="settings-form__group">
-              <label className="settings-form__label">Model Path</label>
-              <div className="settings-form__input-wrapper">
-                <input
-                  type="text"
-                  className="settings-form__input"
-                  placeholder="Enter path to embedding model folder..."
-                  value={modelPath}
-                  onChange={(e) => setModelPath(e.target.value)}
-                />
+              <label className="settings-form__label">Embedding Provider</label>
+              <div className="provider-selector">
                 <button
-                  className="settings-btn settings-btn--primary"
-                  onClick={handleSave}
-                  disabled={isSaving || !modelPath.trim()}
+                  className={`provider-btn ${embeddingProvider === 'sentence-transformers' ? 'provider-btn--active' : ''}`}
+                  onClick={() => setEmbeddingProvider('sentence-transformers')}
+                  disabled={isSaving}
                 >
-                  {isSaving ? (
-                    <Loader2 size={16} className="animate-spin" />
-                  ) : (
-                    <Save size={16} />
-                  )}
-                  Save
+                  <Monitor size={16} />
+                  <span>Local (SentenceTransformers)</span>
+                  <span className="provider-badge">Fast</span>
+                </button>
+                <button
+                  className={`provider-btn ${embeddingProvider === 'ollama' ? 'provider-btn--active' : ''}`}
+                  onClick={() => setEmbeddingProvider('ollama')}
+                  disabled={isSaving}
+                >
+                  <Sparkles size={16} />
+                  <span>Ollama (nomic-embed-text)</span>
+                  <span className="provider-badge">Better Quality</span>
                 </button>
               </div>
               <p className="settings-form__hint">
-                Relative path from project root (e.g., models/all-MiniLM-L6-v2) or absolute path. Works automatically on any machine.
+                {embeddingProvider === 'ollama' 
+                  ? '✨ Ollama provides 768-dim embeddings with 8K context - better for technical documents, part numbers, and long table rows. Requires Ollama running.'
+                  : '⚡ Local model is faster and works offline - good for general documents with shorter text.'}
               </p>
             </div>
+
+            {embeddingProvider === 'sentence-transformers' ? (
+              <div className="settings-form__group">
+                <label className="settings-form__label">Model Path</label>
+                <div className="settings-form__input-wrapper">
+                  <input
+                    type="text"
+                    className="settings-form__input"
+                    placeholder="Enter path to embedding model folder..."
+                    value={modelPath}
+                    onChange={(e) => setModelPath(e.target.value)}
+                  />
+                  <button
+                    className="settings-btn settings-btn--primary"
+                    onClick={handleSave}
+                    disabled={isSaving || !modelPath.trim()}
+                  >
+                    {isSaving ? (
+                      <Loader2 size={16} className="animate-spin" />
+                    ) : (
+                      <Save size={16} />
+                    )}
+                    Save
+                  </button>
+                </div>
+                <p className="settings-form__hint">
+                  Relative path from project root (e.g., models/all-MiniLM-L6-v2) or absolute path.
+                </p>
+              </div>
+            ) : (
+              <div className="settings-form__group">
+                <label className="settings-form__label">Ollama Model</label>
+                <div className="settings-form__input-wrapper">
+                  <input
+                    type="text"
+                    className="settings-form__input"
+                    placeholder="nomic-embed-text"
+                    value={ollamaModel}
+                    onChange={(e) => setOllamaModel(e.target.value)}
+                  />
+                  <button
+                    className="settings-btn settings-btn--primary"
+                    onClick={handleSave}
+                    disabled={isSaving || !ollamaModel.trim()}
+                  >
+                    {isSaving ? (
+                      <Loader2 size={16} className="animate-spin" />
+                    ) : (
+                      <Save size={16} />
+                    )}
+                    Apply
+                  </button>
+                </div>
+                <p className="settings-form__hint">
+                  Ollama model name (e.g., nomic-embed-text). Run 'ollama pull nomic-embed-text' first.
+                </p>
+              </div>
+            )}
 
             {saveMessage && (
               <div

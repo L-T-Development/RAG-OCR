@@ -14,7 +14,10 @@ import json
 import os
 import time
 import tempfile
+import uuid
+import io
 from typing import Optional
+from datetime import datetime
 from process.document_compare import (
     compare_pdfs,
     compare_docx,
@@ -89,7 +92,7 @@ def list_threads(request):
 
 # --- Upload File (UPDATED WITH AI VECTORIZATION) ---
 # Supported file types for RAG chat
-SUPPORTED_EXTENSIONS = ['.pdf', '.xlsx', '.xls', '.docx']
+SUPPORTED_EXTENSIONS = ['.pdf', '.xlsx', '.xls', '.docx', '.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']
 
 @csrf_exempt
 def upload_file(request, thread_id):
@@ -148,11 +151,28 @@ def upload_file(request, thread_id):
 
     return JsonResponse({'error': 'No file sent'}, status=400)
 
+# --- Helper: Get All Ancestor Thread IDs ---
+def get_ancestor_thread_ids(thread):
+    """Recursively get all ancestor thread IDs (parent, grandparent, etc.)"""
+    ancestor_ids = []
+    current = thread
+    while current.parent:
+        ancestor_ids.append(current.parent.id)
+        current = current.parent
+    return ancestor_ids
+
 # --- Get Files List with Category ---
 def get_thread_files(request, thread_id):
     current_thread = get_object_or_404(Thread, id=thread_id)
-    if current_thread.parent:
-        docs = Document.objects.filter(Q(thread=current_thread) | Q(thread=current_thread.parent)).order_by('-uploaded_at')
+    
+    # Get all ancestor IDs for inheritance
+    ancestor_ids = get_ancestor_thread_ids(current_thread)
+    
+    if ancestor_ids:
+        # Include documents from current thread and all ancestors
+        docs = Document.objects.filter(
+            Q(thread=current_thread) | Q(thread_id__in=ancestor_ids)
+        ).order_by('-uploaded_at')
     else:
         docs = Document.objects.filter(thread=current_thread).order_by('-uploaded_at')
 
@@ -191,6 +211,9 @@ def extract_document_title(file_path, filename):
             return os.path.splitext(filename)[0]
         except:
             return os.path.splitext(filename)[0]
+    elif ext in ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']:
+        # For images, use filename without extension
+        return os.path.splitext(filename)[0]
     else:
         return os.path.splitext(filename)[0]
 
@@ -201,7 +224,7 @@ def quick_upload(request):
     """
     Upload a document and automatically create a thread named after it.
     Used for drag & drop upload when no thread is selected.
-    Supports PDF, Excel (.xlsx, .xls), and Word (.docx) files.
+    Supports PDF, Excel (.xlsx, .xls), Word (.docx), and Image files (.jpg, .png, etc.).
     """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST method required'}, status=405)
@@ -234,11 +257,15 @@ def quick_upload(request):
         # Reset file position for upload
         uploaded_file.seek(0)
 
+        # Get category from request
+        category = request.POST.get('category', 'other')
+
         # Create document record
         doc = Document.objects.create(
             thread=thread,
             file=uploaded_file,
-            filename=uploaded_file.name
+            filename=uploaded_file.name,
+            category=category
         )
 
         # Store file path before processing
@@ -307,6 +334,21 @@ def chat_thread(request, thread_id):
             thread = get_object_or_404(Thread, id=thread_id)
             parent_id = thread.parent.id if thread.parent else None
 
+            # Get conversation history for context (last 5 messages)
+            recent_messages = ChatMessage.objects.filter(
+                thread=thread
+            ).order_by('-timestamp')[:5][::-1]  # Get last 5, reverse to chronological
+            
+            conversation_context = ""
+            if recent_messages:
+                conversation_context = "\n\n**Recent conversation:**\n"
+                for msg in recent_messages:
+                    role_label = "User" if msg.role == 'user' else "Assistant"
+                    # Truncate long messages for context
+                    content = msg.content[:300] + "..." if len(msg.content) > 300 else msg.content
+                    conversation_context += f"{role_label}: {content}\n"
+                conversation_context += f"User (current): {query}\n"
+
             # Save user message
             ChatMessage.objects.create(
                 thread=thread,
@@ -318,13 +360,63 @@ def chat_thread(request, thread_id):
             table_search_result = None
             query_lower = query.lower()
             
+            # Resolve conversation references (this, that, compare, etc.)
+            resolved_query = _resolve_conversation_references(query, recent_messages, thread)
+            if resolved_query != query:
+                print(f"[CONTEXT] Original: {query}")
+                print(f"[CONTEXT] Resolved: {resolved_query}")
+                query = resolved_query
+                query_lower = query.lower()
+            
+            # Detect conflict detection query
+            is_conflict_query = any(keyword in query_lower for keyword in [
+                'repeated', 'duplicate', 'conflict', 'inconsistent', 'same nomenclature',
+                'different part number', 'different drawing', 'multiple part', 'multiple drawing'
+            ])
+            
+            if is_conflict_query:
+                # Detect conflict analysis
+                from .table_search_engine import detect_conflicts
+                
+                docs = Document.objects.filter(thread=thread, filename__iendswith='.pdf')
+                
+                if docs.count() >= 1:
+                    pdf1 = docs.first()
+                    pdf2 = docs[1] if docs.count() >= 2 else None
+                    
+                    try:
+                        conflict_result = detect_conflicts(
+                            pdf1.file.path,
+                            pdf2.file.path if pdf2 else None
+                        )
+                        
+                        if conflict_result.get('found'):
+                            # Generate Excel report
+                            excel_bytes = generate_conflict_excel(conflict_result)
+                            job_id = store_comparison_report('Conflict_Analysis', conflict_result, excel_bytes)
+                            
+                            # Format conflicts nicely
+                            formatted_answer = _format_conflict_response(conflict_result)
+                            formatted_answer += f"\n\n---\n\n📥 **[Download Excel Report](/api/reports/download/{job_id}/)**"
+                            
+                            table_search_result = {
+                                'found': True,
+                                'answer': formatted_answer,
+                                'type': 'conflict_analysis',
+                                'report_job_id': job_id
+                            }
+                    except Exception as e:
+                        print(f"[CONFLICT] Error: {e}")
+                        import traceback
+                        traceback.print_exc()
+            
             # Detect comparison query
             is_comparison = any(keyword in query_lower for keyword in [
                 'compare', 'comparison', 'difference', 'differences', 'common',
                 'not in', 'missing', 'match between', 'vs', 'versus'
             ])
             
-            if is_comparison:
+            if is_comparison and not table_search_result:
                 # Extract comparison details
                 comparison_result = _extract_comparison_info(query, thread)
                 
@@ -426,6 +518,94 @@ def chat_thread(request, thread_id):
             return JsonResponse({'error': str(e)}, status=500)
 
     return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+def _resolve_conversation_references(query: str, recent_messages, thread) -> str:
+    """
+    Resolve conversation references like 'this', 'that', 'compare' based on chat history.
+    Makes queries context-aware for multi-turn conversations.
+    """
+    query_lower = query.lower().strip()
+    
+    # Check if query contains reference words that need context
+    reference_patterns = [
+        'this', 'that', 'these', 'those', 'them', 'it',
+        'compare', 'now compare', 'compare this', 'compare that',
+        'with', 'to', 'versus', 'vs', 'against'
+    ]
+    
+    has_reference = any(pattern in query_lower for pattern in reference_patterns)
+    
+    if not has_reference or not recent_messages:
+        return query
+    
+    # Analyze last few messages to understand context
+    last_user_msg = None
+    last_ai_msg = None
+    
+    for msg in reversed(recent_messages):
+        if msg.role == 'user' and not last_user_msg:
+            last_user_msg = msg
+        elif msg.role == 'ai' and not last_ai_msg:
+            last_ai_msg = msg
+        if last_user_msg and last_ai_msg:
+            break
+    
+    if not last_user_msg:
+        return query
+    
+    # Detect if previous query was a list/extraction query
+    prev_query = last_user_msg.content.lower()
+    extracted_data_type = None
+    source_file = None
+    
+    # Extract what was listed/searched in previous query
+    if 'list' in prev_query or 'show' in prev_query or 'get' in prev_query:
+        # Extract data type
+        if any(kw in prev_query for kw in ['sr.no', 'sr no', 'serial', 'sl.no']):
+            extracted_data_type = 'sr.no'
+        elif any(kw in prev_query for kw in ['part', 'part no', 'part number']):
+            extracted_data_type = 'part numbers'
+        elif any(kw in prev_query for kw in ['drg', 'drawing', 'dwg']):
+            extracted_data_type = 'drawing numbers'
+        elif any(kw in prev_query for kw in ['nomenclature', 'name', 'designation']):
+            extracted_data_type = 'nomenclatures'
+        
+        # Extract source file using @filename pattern
+        import re
+        file_match = re.search(r'@([\w\-\.]+\.pdf)', prev_query)
+        if file_match:
+            source_file = file_match.group(1)
+    
+    # Build context-aware query
+    resolved_query = query
+    
+    # Pattern 1: "now compare this to @file.pdf" or "compare this to"
+    if 'compare' in query_lower and any(ref in query_lower for ref in ['this', 'that', 'these', 'those']):
+        if extracted_data_type and source_file:
+            # Find the target file in current query
+            import re
+            target_file_match = re.search(r'@([\w\-\.]+\.pdf)', query)
+            
+            if target_file_match:
+                target_file = target_file_match.group(1)
+                resolved_query = f"Compare {extracted_data_type} from @{source_file} with {extracted_data_type} in @{target_file}"
+            else:
+                # No target file specified, try to infer from uploaded files
+                docs = Document.objects.filter(thread=thread, filename__iendswith='.pdf').exclude(filename__icontains=source_file.replace('.pdf', ''))
+                if docs.exists():
+                    target_file = docs.first().filename
+                    resolved_query = f"Compare {extracted_data_type} from @{source_file} with {extracted_data_type} in @{target_file}"
+    
+    # Pattern 2: "@file.pdf now compare this to" (target first, then reference)
+    elif 'compare' in query_lower:
+        import re
+        file_match = re.search(r'@([\w\-\.]+\.pdf)', query)
+        if file_match and extracted_data_type and source_file:
+            target_file = file_match.group(1)
+            resolved_query = f"Compare {extracted_data_type} from @{source_file} with {extracted_data_type} in @{target_file}"
+    
+    return resolved_query
 
 
 def _extract_search_info(query: str) -> tuple:
@@ -571,6 +751,15 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
         if result.get('found'):
             # Format the result
             result['formatted_answer'] = _format_comparison_response(result)
+            
+            # Generate Excel report
+            excel_bytes = generate_comparison_excel(result)
+            job_id = store_comparison_report('Comparison_Report', result, excel_bytes)
+            
+            # Add download link to formatted answer
+            result['formatted_answer'] += f"\n\n---\n\n📥 **[Download Excel Report](/api/reports/download/{job_id}/)**"
+            result['report_job_id'] = job_id
+            
             return result
     except Exception as e:
         print(f"[COMPARISON] Error: {e}")
@@ -581,81 +770,115 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
 
 
 def _format_comparison_response(comparison_result: dict) -> str:
-    """Format comparison results as readable text with better structure."""
+    """Format comparison results as natural QA-style structured answer."""
     summary = comparison_result.get('summary', '')
     pdf1 = comparison_result.get('pdf1', 'PDF 1')
     pdf2 = comparison_result.get('pdf2', 'PDF 2')
     column = comparison_result.get('column', 'items')
+    pdf1_total = comparison_result.get('pdf1_total', 0)
+    pdf2_total = comparison_result.get('pdf2_total', 0)
     
-    # Add header
-    response = f"# 📊 File Comparison Results\n\n"
-    response += f"**Comparing:** {pdf1} ↔️ {pdf2}\n"
-    response += f"**Column:** {column}\n\n"
-    response += "---\n\n"
-    response += summary + "\n\n"
-    
-    # Show sample data
     results_data = comparison_result.get('results', {})
     
+    # Start with clear natural language answer
+    response = f"## 📊 QA Comparison: {pdf1} vs {pdf2}\n\n"
+    
+    # Executive Summary
+    response += f"**Column Compared:** {column}\n\n"
+    
+    # Key Findings
+    response += "### 🎯 Key Findings:\n\n"
+    
+    if 'in_pdf1_only' in results_data:
+        missing_count = results_data['in_pdf1_only']['count']
+        if missing_count > 0:
+            percentage = (missing_count / pdf1_total * 100) if pdf1_total > 0 else 0
+            response += f"❌ **{missing_count} items** from {pdf1} are **NOT found** in {pdf2} ({percentage:.1f}%)\n\n"
+        else:
+            response += f"✅ **All items** from {pdf1} are present in {pdf2}\n\n"
+    
+    if 'common' in results_data:
+        common_count = results_data['common']['count']
+        if common_count > 0:
+            percentage = (common_count / pdf1_total * 100) if pdf1_total > 0 else 0
+            response += f"✅ **{common_count} items** are **common** to both files ({percentage:.1f}%)\n\n"
+    
+    if 'in_pdf2_only' in results_data:
+        extra_count = results_data['in_pdf2_only']['count']
+        if extra_count > 0:
+            response += f"ℹ️ **{extra_count} additional items** exist only in {pdf2}\n\n"
+    
+    response += "---\n\n"
+    
+    # Detailed Missing Items
     if 'in_pdf1_only' in results_data and results_data['in_pdf1_only']['count'] > 0:
-        response += f"## 📄 Unique to {pdf1}\n"
-        response += f"**Count:** {results_data['in_pdf1_only']['count']} items\n\n"
-        rows = results_data['in_pdf1_only'].get('rows', [])[:8]
+        response += f"### ❌ Missing from {pdf2} (found in {pdf1} only)\n\n"
+        response += f"**Total Missing:** {results_data['in_pdf1_only']['count']}\n\n"
+        
+        rows = results_data['in_pdf1_only'].get('rows', [])[:10]
         
         for i, row in enumerate(rows, 1):
             value = row.get('_matched_value', 'N/A')
             page = row.get('_page', 'Unknown')
-            response += f"**{i}.** `{value}` _(Page {page})_\n"
             
-            # Show important fields (exclude internal fields)
+            response += f"**{i}. `{value}`** _(from page {page})_\n"
+            
+            # Show nomenclature or description if available
             fields = []
             for key, val in row.items():
-                if not key.startswith('_') and val and str(val).strip() and key.lower() != column.lower():
-                    fields.append(f"**{key}:** {val}")
+                if not key.startswith('_') and val and str(val).strip():
+                    key_lower = key.lower()
+                    if any(kw in key_lower for kw in ['nomenclature', 'designation', 'description', 'name']):
+                        fields.append(f"**{key}:** {val}")
             
             if fields:
-                response += "   " + " | ".join(fields[:3]) + "\n"
+                response += "   " + " | ".join(fields[:2]) + "\n"
             response += "\n"
         
-        if results_data['in_pdf1_only']['count'] > 8:
-            response += f"_... and {results_data['in_pdf1_only']['count'] - 8} more items_\n\n"
+        if results_data['in_pdf1_only']['count'] > 10:
+            response += f"_... and {results_data['in_pdf1_only']['count'] - 10} more missing items_\n\n"
+        
+        response += "---\n\n"
     
+    # Common Items Summary
     if 'common' in results_data and results_data['common']['count'] > 0:
-        response += f"## ✅ Common Items (in both files)\n"
-        response += f"**Count:** {results_data['common']['count']} items\n\n"
-        values = results_data['common'].get('values', [])[:15]
-        if values:
-            # Format as comma-separated list
-            response += "**Examples:** "
-            response += ", ".join([f"`{v}`" for v in values[:15]])
-            if results_data['common']['count'] > 15:
-                response += f" ... _(+{results_data['common']['count'] - 15} more)_"
-            response += "\n\n"
+        response += f"### ✅ Common Items (verified in both)\n\n"
+        response += f"**Total Verified:** {results_data['common']['count']} items\n\n"
+        
+        values = results_data['common'].get('values', [])[:20]
+        if len(values) <= 10:
+            # Show all if <=10
+            for v in values:
+                response += f"- `{v}`\n"
+        else:
+            # Show first 5 and indicate more
+            for v in values[:5]:
+                response += f"- `{v}`\n"
+            response += f"\n_... and {results_data['common']['count'] - 5} more verified items_\n"
+        
+        response += "\n---\n\n"
     
+    # Additional Items in PDF2
     if 'in_pdf2_only' in results_data and results_data['in_pdf2_only']['count'] > 0:
-        response += f"## 📄 Unique to {pdf2}\n"
-        response += f"**Count:** {results_data['in_pdf2_only']['count']} items\n\n"
-        rows = results_data['in_pdf2_only'].get('rows', [])[:8]
+        response += f"### ℹ️ Additional in {pdf2} (not in {pdf1})\n\n"
+        response += f"**Total Additional:** {results_data['in_pdf2_only']['count']}\n\n"
         
-        for i, row in enumerate(rows, 1):
-            value = row.get('_matched_value', 'N/A')
-            page = row.get('_page', 'Unknown')
-            response += f"**{i}.** `{value}` _(Page {page})_\n"
-            
-            fields = []
-            for key, val in row.items():
-                if not key.startswith('_') and val and str(val).strip() and key.lower() != column.lower():
-                    fields.append(f"**{key}:** {val}")
-            
-            if fields:
-                response += "   " + " | ".join(fields[:3]) + "\n"
-            response += "\n"
+        values = results_data['in_pdf2_only'].get('values', [])[:10]
+        for v in values:
+            response += f"- `{v}`\n"
         
-        if results_data['in_pdf2_only']['count'] > 8:
-            response += f"_... and {results_data['in_pdf2_only']['count'] - 8} more items_\n\n"
+        if results_data['in_pdf2_only']['count'] > 10:
+            response += f"\n_... and {results_data['in_pdf2_only']['count'] - 10} more items_\n"
+        
+        response += "\n---\n\n"
     
-    response += "\n---\n"
-    response += "_💡 Tip: Ask me to show more details about specific items or different columns!_"
+    # Recommendations
+    response += "### 💡 Quality Check Summary:\n\n"
+    
+    if 'in_pdf1_only' in results_data and results_data['in_pdf1_only']['count'] > 0:
+        response += f"⚠️ **Action Required:** {results_data['in_pdf1_only']['count']} spare parts from {pdf1} need to be verified in {pdf2}\n"
+    else:
+        response += f"✅ **Quality OK:** All parts are properly cross-referenced\n"
     
     return response
 
@@ -727,6 +950,85 @@ def _format_table_search_response(search_result: dict) -> str:
     
     response += "---\n"
     response += "_💡 Tip: Refine your search or ask for specific details about any item!_"
+    
+    return response
+
+
+def _format_conflict_response(conflict_result: dict) -> str:
+    """Format conflict detection results as natural QA-style answer."""
+    summary = conflict_result.get('summary', '')
+    part_conflicts = conflict_result.get('part_number_conflicts', [])
+    nom_conflicts = conflict_result.get('nomenclature_conflicts', [])
+    
+    response = summary + "\n"
+    
+    # Part Number Conflicts (same part with different nomenclatures)
+    if part_conflicts:
+        response += "\n### ⚠️ Part Number Conflicts\n"
+        response += "_Same part number is used for different nomenclatures:_\n\n"
+        
+        for i, conflict in enumerate(part_conflicts[:15], 1):
+            part = conflict['part_number']
+            nomenclatures = conflict['nomenclatures']
+            sources = conflict['sources']
+            
+            response += f"**{i}. Part: `{part}`** has {len(nomenclatures)} different nomenclatures:\n"
+            
+            for j, nom in enumerate(nomenclatures, 1):
+                # Find source info for this nomenclature
+                source_info = [s for s in sources if s['nomenclature'] == nom]
+                if source_info:
+                    src = source_info[0]
+                    source_text = f"{src['source']}"
+                    if 'page' in src:
+                        source_text += f" (Page {src['page']})"
+                    response += f"   {j}. {nom} _{source_text}_\n"
+                else:
+                    response += f"   {j}. {nom}\n"
+            
+            response += "\n"
+        
+        if len(part_conflicts) > 15:
+            response += f"_... and {len(part_conflicts) - 15} more conflicts_\n\n"
+    
+    # Nomenclature Conflicts (same nomenclature with different parts)
+    if nom_conflicts:
+        response += "\n### ⚠️ Nomenclature Conflicts\n"
+        response += "_Same nomenclature is used for different part numbers:_\n\n"
+        
+        for i, conflict in enumerate(nom_conflicts[:15], 1):
+            nomenclature = conflict['nomenclature']
+            parts = conflict['part_numbers']
+            sources = conflict['sources']
+            
+            response += f"**{i}. Nomenclature: \"{nomenclature}\"** has {len(parts)} different parts:\n"
+            
+            for j, part in enumerate(parts, 1):
+                # Find source info for this part
+                source_info = [s for s in sources if s['part'] == part]
+                if source_info:
+                    src = source_info[0]
+                    source_text = f"{src['source']}"
+                    if 'page' in src:
+                        source_text += f" (Page {src['page']})"
+                    response += f"   {j}. `{part}` _{source_text}_\n"
+                else:
+                    response += f"   {j}. `{part}`\n"
+            
+            response += "\n"
+        
+        if len(nom_conflicts) > 15:
+            response += f"_... and {len(nom_conflicts) - 15} more conflicts_\n\n"
+    
+    # Add recommendations
+    if part_conflicts or nom_conflicts:
+        response += "\n---\n\n"
+        response += "### 📋 Recommended Actions:\n"
+        if part_conflicts:
+            response += "- **Part Number Conflicts:** Review and standardize nomenclatures for affected parts\n"
+        if nom_conflicts:
+            response += "- **Nomenclature Conflicts:** Verify if these are truly different parts or need unique nomenclatures\n"
+        response += "\n_💡 These conflicts may indicate data entry errors or actual design variations._"
     
     return response
 
@@ -1061,10 +1363,58 @@ def model_status(request):
 
     try:
         status = get_model_status()
-        # Also get saved path from DB
+        # Also get saved configuration from DB
+        provider = AppConfig.get_value('embedding_provider', 'sentence-transformers')
         saved_path = AppConfig.get_value('embedding_model_path', None)
+        ollama_model = AppConfig.get_value('ollama_embedding_model', 'nomic-embed-text')
+        
         status['saved_path'] = saved_path
+        status['provider'] = status.get('provider', provider)
+        status['ollama_model'] = ollama_model
+        
         return JsonResponse(status)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+def embedding_provider_configure(request):
+    """Configure the embedding provider (sentence-transformers or Ollama)"""
+    if request.method != "POST":
+        return JsonResponse({"error": "POST method required"}, status=405)
+
+    try:
+        data = json.loads(request.body)
+        provider_type = data.get('provider', '').strip().lower()
+        model = data.get('model', '').strip()
+
+        if not provider_type:
+            return JsonResponse({"error": "Provider type is required (sentence-transformers or ollama)"}, status=400)
+
+        if not model:
+            return JsonResponse({"error": "Model path or name is required"}, status=400)
+
+        # Import the new configuration function
+        from .rag_engine import configure_embedding_provider
+        
+        # Configure the embedding provider
+        result = configure_embedding_provider(provider_type, model)
+
+        if result.get('success'):
+            return JsonResponse({
+                "message": f"Embedding provider configured successfully: {provider_type}",
+                "status": result.get('status', {}),
+                "provider": result.get('provider'),
+                "model": result.get('model')
+            })
+        else:
+            return JsonResponse({
+                "error": result.get('error', 'Unknown error'),
+                "status": result.get('status', {})
+            }, status=400)
+
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
 
@@ -1615,30 +1965,247 @@ def start_single_pdf_comparison(request):
         return JsonResponse({"error": str(e)}, status=500)
 
 
+# In-memory storage for comparison reports
+_comparison_reports = {}
+
+def store_comparison_report(report_type: str, result: dict, excel_bytes: bytes) -> str:
+    """Store comparison report and return job_id for download."""
+    job_id = str(uuid.uuid4())
+    _comparison_reports[job_id] = {
+        'status': 'completed',
+        'created_at': datetime.now().isoformat(),
+        'report_type': report_type,
+        'result': result,
+        'excel_bytes': excel_bytes,
+        'filename': f"{report_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    }
+    return job_id
+
+def generate_comparison_excel(comparison_result: dict) -> bytes:
+    """Generate Excel report from comparison results."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)  # Remove default sheet
+    
+    # Sheet 1: Summary
+    summary_sheet = wb.create_sheet("Summary")
+    summary_sheet['A1'] = 'Comparison Report'
+    summary_sheet['A1'].font = Font(size=16, bold=True)
+    
+    summary_sheet['A3'] = 'Files Compared:'
+    summary_sheet['A3'].font = Font(bold=True)
+    summary_sheet['B3'] = comparison_result.get('pdf1', 'File 1')
+    summary_sheet['A4'] = ''  
+    summary_sheet['B4'] = comparison_result.get('pdf2', 'File 2')
+    
+    summary_sheet['A6'] = 'Column:'
+    summary_sheet['A6'].font = Font(bold=True)
+    summary_sheet['B6'] = comparison_result.get('column', 'N/A')
+    
+    summary_sheet['A8'] = 'Total in File 1:'
+    summary_sheet['B8'] = comparison_result.get('pdf1_total', 0)
+    summary_sheet['A9'] = 'Total in File 2:'
+    summary_sheet['B9'] = comparison_result.get('pdf2_total', 0)
+    
+    results_data = comparison_result.get('results', {})
+    
+    row = 11
+    if 'in_pdf1_only' in results_data:
+        count = results_data['in_pdf1_only']['count']
+        summary_sheet[f'A{row}'] = 'Missing from File 2:'
+        summary_sheet[f'A{row}'].font = Font(bold=True, color='FF0000')
+        summary_sheet[f'B{row}'] = count
+        row += 1
+    
+    if 'common' in results_data:
+        count = results_data['common']['count']
+        summary_sheet[f'A{row}'] = 'Common (in both):'
+        summary_sheet[f'A{row}'].font = Font(bold=True, color='008000')
+        summary_sheet[f'B{row}'] = count
+        row += 1
+    
+    if 'in_pdf2_only' in results_data:
+        count = results_data['in_pdf2_only']['count']
+        summary_sheet[f'A{row}'] = 'Additional in File 2:'
+        summary_sheet[f'A{row}'].font = Font(bold=True, color='0000FF')
+        summary_sheet[f'B{row}'] = count
+    
+    # Sheet 2: Missing Items
+    if 'in_pdf1_only' in results_data and results_data['in_pdf1_only']['count'] > 0:
+        missing_sheet = wb.create_sheet("Missing from File 2")
+        missing_sheet['A1'] = f"Items in {comparison_result.get('pdf1')} NOT found in {comparison_result.get('pdf2')}"
+        missing_sheet['A1'].font = Font(size=14, bold=True)
+        missing_sheet['A1'].fill = PatternFill(start_color='FFCCCC', end_color='FFCCCC', fill_type='solid')
+        
+        rows = results_data['in_pdf1_only'].get('rows', [])
+        if rows:
+            # Headers
+            headers = [k for k in rows[0].keys() if not k.startswith('_')]
+            for col_idx, header in enumerate(headers, 1):
+                cell = missing_sheet.cell(row=3, column=col_idx)
+                cell.value = header
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
+            
+            # Data
+            for row_idx, row_data in enumerate(rows, 4):
+                for col_idx, header in enumerate(headers, 1):
+                    missing_sheet.cell(row=row_idx, column=col_idx, value=row_data.get(header, ''))
+    
+    # Sheet 3: Common Items
+    if 'common' in results_data and results_data['common']['count'] > 0:
+        common_sheet = wb.create_sheet("Common Items")
+        common_sheet['A1'] = "Items Found in Both Files"
+        common_sheet['A1'].font = Font(size=14, bold=True)
+        common_sheet['A1'].fill = PatternFill(start_color='CCFFCC', end_color='CCFFCC', fill_type='solid')
+        
+        values = results_data['common'].get('values', [])
+        common_sheet['A3'] = comparison_result.get('column', 'Value')
+        common_sheet['A3'].font = Font(bold=True)
+        
+        for row_idx, value in enumerate(values, 4):
+            common_sheet[f'A{row_idx}'] = value
+    
+    # Save to bytes
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+def generate_conflict_excel(conflict_result: dict) -> bytes:
+    """Generate Excel report from conflict detection results."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill
+    
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    
+    # Summary Sheet
+    summary_sheet = wb.create_sheet("Conflict Summary")
+    summary_sheet['A1'] = 'Data Conflict Analysis Report'
+    summary_sheet['A1'].font = Font(size=16, bold=True)
+    
+    summary_sheet['A3'] = 'Total Conflicts Found:'
+    summary_sheet['A3'].font = Font(bold=True)
+    summary_sheet['B3'] = conflict_result.get('total_conflicts', 0)
+    
+    part_conflicts = len(conflict_result.get('part_number_conflicts', []))
+    nom_conflicts = len(conflict_result.get('nomenclature_conflicts', []))
+    
+    summary_sheet['A5'] = 'Part Number Conflicts:'
+    summary_sheet['B5'] = part_conflicts
+    summary_sheet['A6'] = 'Nomenclature Conflicts:'
+    summary_sheet['B6'] = nom_conflicts
+    
+    # Part Number Conflicts Sheet
+    if part_conflicts > 0:
+        part_sheet = wb.create_sheet("Part Number Conflicts")
+        part_sheet['A1'] = 'Same Part Number - Different Nomenclatures'
+        part_sheet['A1'].font = Font(size=14, bold=True)
+        part_sheet['A1'].fill = PatternFill(start_color='FFCCCC', end_color='FFCCCC', fill_type='solid')
+        
+        part_sheet['A3'] = 'Part Number'
+        part_sheet['B3'] = 'Nomenclature'
+        part_sheet['C3'] = 'Source'
+        part_sheet['D3'] = 'Page'
+        
+        for cell in [part_sheet['A3'], part_sheet['B3'], part_sheet['C3'], part_sheet['D3']]:
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
+        
+        row_idx = 4
+        for conflict in conflict_result.get('part_number_conflicts', []):
+            part_num = conflict['part_number']
+            sources = conflict['sources']
+            
+            for source in sources:
+                part_sheet[f'A{row_idx}'] = part_num
+                part_sheet[f'B{row_idx}'] = source['nomenclature']
+                part_sheet[f'C{row_idx}'] = source['source']
+                part_sheet[f'D{row_idx}'] = source.get('page', 'N/A')
+                row_idx += 1
+    
+    # Nomenclature Conflicts Sheet
+    if nom_conflicts > 0:
+        nom_sheet = wb.create_sheet("Nomenclature Conflicts")
+        nom_sheet['A1'] = 'Same Nomenclature - Different Part Numbers'
+        nom_sheet['A1'].font = Font(size=14, bold=True)
+        nom_sheet['A1'].fill = PatternFill(start_color='FFFFCC', end_color='FFFFCC', fill_type='solid')
+        
+        nom_sheet['A3'] = 'Nomenclature'
+        nom_sheet['B3'] = 'Part Number'
+        nom_sheet['C3'] = 'Source'
+        nom_sheet['D3'] = 'Page'
+        
+        for cell in [nom_sheet['A3'], nom_sheet['B3'], nom_sheet['C3'], nom_sheet['D3']]:
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
+        
+        row_idx = 4
+        for conflict in conflict_result.get('nomenclature_conflicts', []):
+            nomenclature = conflict['nomenclature']
+            sources = conflict['sources']
+            
+            for source in sources:
+                nom_sheet[f'A{row_idx}'] = nomenclature
+                nom_sheet[f'B{row_idx}'] = source['part']
+                nom_sheet[f'C{row_idx}'] = source['source']
+                nom_sheet[f'D{row_idx}'] = source.get('page', 'N/A')
+                row_idx += 1
+    
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
 def download_report(request, job_id):
     """
-    Download the Excel report for a completed job.
+    Download Excel report for comparisons or conflicts.
     Serves directly from memory, no file saved on disk.
     
     GET /api/reports/download/<job_id>/
     """
-    job = get_report_job_status(job_id)
+    # Check comparison reports first
+    report = _comparison_reports.get(job_id)
     
-    if not job:
-        return JsonResponse({"error": "Job not found"}, status=404)
+    if not report:
+        # Fallback to old report system
+        from .reports_engine_merge import get_report_job_status, get_report_excel_bytes
+        job = get_report_job_status(job_id)
+        
+        if not job:
+            return JsonResponse({"error": "Report not found"}, status=404)
+        
+        if job.get('status') != 'completed':
+            return JsonResponse({"error": "Report not ready yet"}, status=400)
+        
+        excel_bytes = get_report_excel_bytes(job_id)
+        
+        if not excel_bytes:
+            return JsonResponse({"error": "Report data not found"}, status=404)
+        
+        from django.http import HttpResponse
+        
+        result = job.get('result', {})
+        filename = result.get('excel_filename', f'Report_{job_id[:8]}.xlsx')
+        
+        response = HttpResponse(
+            excel_bytes,
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
     
-    if job.get('status') != 'completed':
-        return JsonResponse({"error": "Report not ready yet"}, status=400)
-    
-    excel_bytes = get_report_excel_bytes(job_id)
-    
-    if not excel_bytes:
-        return JsonResponse({"error": "Report data not found"}, status=404)
-    
+    # Serve comparison report
     from django.http import HttpResponse
     
-    result = job.get('result', {})
-    filename = result.get('excel_filename', f'Report_{job_id[:8]}.xlsx')
+    excel_bytes = report.get('excel_bytes')
+    if not excel_bytes:
+        return JsonResponse({"error": "Report data not available"}, status=404)
+    
+    filename = report.get('filename', f'Report_{job_id[:8]}.xlsx')
     
     response = HttpResponse(
         excel_bytes,

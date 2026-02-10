@@ -9,6 +9,7 @@ import psutil
 import threading
 import re
 import sqlite3
+from PIL import Image
 
 # Excel and Word document support
 import openpyxl
@@ -31,7 +32,11 @@ from .eval_utils import (
 CHROMA_PATH = "./local_chroma_db"
 TABLES_DB_PATH = "./tables.db"
 OLLAMA_API = "http://localhost:11434/api/generate"
+OLLAMA_EMBED_API = "http://localhost:11434/api/embeddings"
 DEFAULT_LLM_MODEL = "llama3.1:8b"
+DEFAULT_EMBEDDING_PROVIDER = "ollama"  # "sentence-transformers" or "ollama"
+DEFAULT_EMBEDDING_MODEL = "models/all-MiniLM-L6-v2"  # sentence-transformers path
+DEFAULT_OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"  # Ollama model name
 
 # Available LLM models configuration
 AVAILABLE_LLM_MODELS = {
@@ -113,6 +118,92 @@ EMBEDDING_BATCH_SIZE = 128  # Process 128 chunks at a time for optimal GPU usage
 
 # Disable ChromaDB telemetry (PostHog)
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
+
+
+# ---------------- OLLAMA EMBEDDING PROVIDER ----------------
+class OllamaEmbeddingProvider:
+    """Embedding provider using Ollama API for nomic-embed-text and other models."""
+    
+    def __init__(self, model_name="nomic-embed-text", api_url=OLLAMA_EMBED_API):
+        self.model_name = model_name
+        self.api_url = api_url
+        self._test_connection()
+    
+    def _test_connection(self):
+        """Test if Ollama is available and model exists."""
+        try:
+            response = requests.post(
+                self.api_url,
+                json={"model": self.model_name, "prompt": "test"},
+                timeout=10
+            )
+            if response.status_code != 200:
+                print(f"[OLLAMA] Warning: Model {self.model_name} may not be available (status {response.status_code})")
+        except requests.exceptions.RequestException as e:
+            print(f"[OLLAMA] Warning: Cannot connect to Ollama at {self.api_url}: {e}")
+    
+    def encode(self, texts, batch_size=32, show_progress_bar=False):
+        """Encode texts to embeddings using Ollama API.
+        
+        Args:
+            texts: List of strings or single string to encode
+            batch_size: Number of texts to process at once
+            show_progress_bar: Ignored (for compatibility with SentenceTransformer)
+        
+        Returns:
+            numpy array of embeddings
+        """
+        import numpy as np
+        
+        # Handle single string input
+        if isinstance(texts, str):
+            texts = [texts]
+        
+        embeddings = []
+        total = len(texts)
+        
+        # Process in batches
+        for i in range(0, total, batch_size):
+            batch = texts[i:i+batch_size]
+            batch_embeddings = []
+            
+            for text in batch:
+                try:
+                    response = requests.post(
+                        self.api_url,
+                        json={"model": self.model_name, "prompt": text},
+                        timeout=30
+                    )
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        embedding = result.get('embedding', [])
+                        if embedding:
+                            batch_embeddings.append(embedding)
+                        else:
+                            print(f"[OLLAMA] Warning: Empty embedding for text: {text[:50]}...")
+                            # Use zero vector as fallback
+                            batch_embeddings.append([0.0] * 768)  # nomic-embed-text uses 768 dimensions
+                    else:
+                        print(f"[OLLAMA] Error {response.status_code}: {response.text}")
+                        batch_embeddings.append([0.0] * 768)
+                        
+                except Exception as e:
+                    print(f"[OLLAMA] Encoding error: {e}")
+                    batch_embeddings.append([0.0] * 768)
+            
+            embeddings.extend(batch_embeddings)
+            
+            if show_progress_bar and i % 100 == 0:
+                print(f"[OLLAMA] Encoded {min(i+batch_size, total)}/{total} texts")
+        
+        return np.array(embeddings)
+    
+    def get_dimension(self):
+        """Get embedding dimension (768 for nomic-embed-text)."""
+        if "nomic" in self.model_name.lower():
+            return 768
+        return 384  # Default fallback
 
 # Initialize ChromaDB (always available)
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
@@ -340,9 +431,12 @@ class EmbeddingModelManager:
             return
         self._model = None
         self._model_path = None
+        self._provider_type = None  # 'sentence-transformers' or 'ollama'
+        self._ollama_model_name = None
         self._device = "cuda" if CUDA_AVAILABLE else "cpu"
         self._status = {
             "loaded": False,
+            "provider": None,
             "path": None,
             "error": None,
             "device": self._device
@@ -355,38 +449,61 @@ class EmbeddingModelManager:
         else:
             print("[RAG] Running on CPU (CUDA not available)")
 
+    def _get_provider_type_from_db(self):
+        """Get embedding provider type from database."""
+        try:
+            from .models import AppConfig
+            return AppConfig.get_value('embedding_provider', DEFAULT_EMBEDDING_PROVIDER)
+        except Exception as e:
+            print(f"[RAG] Could not read provider type from DB: {e}")
+            return DEFAULT_EMBEDDING_PROVIDER
+    
     def _get_model_path_from_db(self):
         """Get model path from database configuration"""
         try:
             from .models import AppConfig
+            provider = self._get_provider_type_from_db()
+            if provider == 'ollama':
+                return AppConfig.get_value('ollama_embedding_model', DEFAULT_OLLAMA_EMBEDDING_MODEL)
             return AppConfig.get_value('embedding_model_path', None)
         except Exception as e:
             print(f"[RAG] Could not read model path from DB: {e}")
             return None
 
     def _get_default_model_path(self):
-        """Get default model path (returns relative path for portability)"""
-        # Return relative path - will be resolved to absolute when loading
-        return "models/all-MiniLM-L6-v2"
+        """Get default model path based on provider type."""
+        provider = self._get_provider_type_from_db()
+        if provider == 'ollama':
+            return DEFAULT_OLLAMA_EMBEDDING_MODEL
+        return DEFAULT_EMBEDDING_MODEL
 
-    def load_model(self, model_path=None, force_reload=False):
+    def load_model(self, model_path=None, provider_type=None, force_reload=False):
         """
-        Load the embedding model from specified path.
+        Load the embedding model from specified path or Ollama.
 
         Args:
-            model_path: Path to the model directory. If None, tries DB config then default.
+            model_path: Path to model directory (sentence-transformers) or model name (ollama)
+            provider_type: 'sentence-transformers' or 'ollama'. If None, reads from DB.
             force_reload: If True, reloads even if already loaded.
 
         Returns:
             bool: True if model loaded successfully
         """
         with self._lock:
-            # Determine which path to use
+            # Determine provider type
+            if provider_type is None:
+                provider_type = self._get_provider_type_from_db()
+            
+            # Determine which path/model to use
             if model_path is None:
                 model_path = self._get_model_path_from_db()
 
             if model_path is None:
                 model_path = self._get_default_model_path()
+            
+            # Handle Ollama provider
+            if provider_type == 'ollama':
+                return self._load_ollama_model(model_path, force_reload)
 
             # Convert relative paths to absolute
             if model_path and not os.path.isabs(model_path):
@@ -441,10 +558,12 @@ class EmbeddingModelManager:
 
                 self._model = SentenceTransformer(model_path, device=self._device)
                 self._model_path = model_path
+                self._provider_type = 'sentence-transformers'
 
                 load_time = time.time() - start_time
                 self._status = {
                     "loaded": True,
+                    "provider": "sentence-transformers",
                     "path": model_path,
                     "error": None,
                     "device": self._device,
@@ -457,12 +576,60 @@ class EmbeddingModelManager:
             except Exception as e:
                 self._status = {
                     "loaded": False,
+                    "provider": "sentence-transformers",
                     "path": model_path,
                     "error": str(e),
                     "device": self._device
                 }
                 print(f"[RAG] ERROR loading model: {e}")
                 return False
+    
+    def _load_ollama_model(self, model_name, force_reload=False):
+        """Load Ollama embedding model."""
+        # Check if already loaded
+        if (self._model is not None and 
+            self._provider_type == 'ollama' and 
+            self._ollama_model_name == model_name and 
+            not force_reload):
+            return True
+        
+        try:
+            print(f"[RAG] Loading Ollama embedding model: {model_name}")
+            start_time = time.time()
+            
+            # Unload previous model
+            if self._model is not None:
+                del self._model
+                self._model = None
+            
+            self._model = OllamaEmbeddingProvider(model_name)
+            self._ollama_model_name = model_name
+            self._provider_type = 'ollama'
+            
+            load_time = time.time() - start_time
+            self._status = {
+                "loaded": True,
+                "provider": "ollama",
+                "model": model_name,
+                "path": OLLAMA_EMBED_API,
+                "error": None,
+                "device": "api",
+                "load_time": round(load_time, 2)
+            }
+            
+            print(f"[RAG] [OK] Ollama embedding model ready: {model_name}")
+            return True
+            
+        except Exception as e:
+            self._status = {
+                "loaded": False,
+                "provider": "ollama",
+                "model": model_name,
+                "error": str(e),
+                "device": "api"
+            }
+            print(f"[RAG] ERROR loading Ollama model: {e}")
+            return False
 
     def get_model(self):
         """
@@ -516,6 +683,55 @@ model_manager = EmbeddingModelManager()
 def get_model_status():
     """Get the current embedding model status"""
     return model_manager.get_status()
+
+
+def configure_embedding_provider(provider_type, model_path_or_name):
+    """
+    Configure embedding provider (sentence-transformers or Ollama).
+    
+    Args:
+        provider_type: 'sentence-transformers' or 'ollama'
+        model_path_or_name: Path to model directory (sentence-transformers) or model name (ollama)
+    
+    Returns:
+        dict with status information
+    """
+    if provider_type not in ['sentence-transformers', 'ollama']:
+        return {
+            "success": False,
+            "error": f"Invalid provider type: {provider_type}. Must be 'sentence-transformers' or 'ollama'"
+        }
+    
+    try:
+        from .models import AppConfig
+        
+        # Save provider type
+        AppConfig.set_value('embedding_provider', provider_type)
+        
+        # Save model path/name based on provider
+        if provider_type == 'ollama':
+            AppConfig.set_value('ollama_embedding_model', model_path_or_name)
+        else:
+            # Normalize path for sentence-transformers
+            model_path_or_name = model_path_or_name.replace('\\', '/')
+            AppConfig.set_value('embedding_model_path', model_path_or_name)
+        
+        # Load the model with new configuration
+        success = model_manager.load_model(model_path_or_name, provider_type, force_reload=True)
+        status = model_manager.get_status()
+        
+        return {
+            "success": success,
+            "status": status,
+            "provider": provider_type,
+            "model": model_path_or_name
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to configure embedding provider: {e}"
+        }
 
 
 def configure_model_path(path):
@@ -608,6 +824,84 @@ def smart_chunk_text(text, max_words=200, overlap=40):
     return chunks
 
 
+# ---------------- MULTI-PAGE TABLE HELPERS ----------------
+def is_table_continuation(previous_table, current_table):
+    """
+    Detect if current table is a continuation of the previous table.
+    
+    Indicators:
+    - Similar column count
+    - Current table has no headers or weak headers
+    - Similar data structure
+    """
+    # Check column count similarity (within 1 column tolerance)
+    col_diff = abs(previous_table['column_count'] - current_table['column_count'])
+    if col_diff > 1:
+        return False
+    
+    # Check if current table has no meaningful headers
+    current_headers = current_table['headers']
+    if not current_headers or all(not str(h).strip() for h in current_headers):
+        return True  # No headers = likely continuation
+    
+    # Check if headers look like data (mostly numbers or very short)
+    header_str = ' '.join(str(h) for h in current_headers if h)
+    if len(header_str) < 10:  # Very short headers
+        return True
+    
+    # Check if previous table has headers and current doesn't match
+    if previous_table['headers']:
+        prev_headers_str = ' '.join(str(h) for h in previous_table['headers'] if h).lower()
+        curr_headers_str = header_str.lower()
+        
+        # If headers are very different (< 30% similarity), likely continuation
+        similarity = sum(1 for word in curr_headers_str.split() if word in prev_headers_str) / max(len(curr_headers_str.split()), 1)
+        if similarity < 0.3:
+            return True
+    
+    return False
+
+
+def _store_merged_table(merged_table, doc_id, thread_id, parent_id, filename):
+    """
+    Store a merged multi-page table to the database and optionally embed in ChromaDB.
+    """
+    # Generate table_id based on the starting page
+    page_num = merged_table['page_num']
+    table_id = f"{doc_id}_{page_num}_table_{merged_table['index']}"
+    
+    # Create page range string
+    if len(merged_table['pages']) > 1:
+        page_range = f"{merged_table['pages'][0]}-{merged_table['pages'][-1]}"
+    else:
+        page_range = str(merged_table['pages'][0])
+    
+    print(f"[RAG] Storing merged table: pages {page_range} ({merged_table['row_count']} rows)")
+    
+    # Store full table in tables.db with page range information
+    store_table(
+        table_id=table_id,
+        doc_id=doc_id,
+        thread_id=thread_id,
+        parent_id=parent_id,
+        source=filename,
+        page=merged_table['start_page'],  # Store starting page
+        table_index=merged_table['index'],
+        headers=merged_table['headers'],
+        row_count=merged_table['row_count'],
+        column_count=merged_table['column_count'],
+        table_data=merged_table['data']
+    )
+    
+    # For single-instance tables, embed in ChromaDB
+    rows = merged_table['data'][1:] if len(merged_table['data']) > 1 else merged_table['data']
+    table_type = classify_table_type(merged_table['headers'], rows, merged_table['row_count'], merged_table['column_count'])
+    
+    if table_type in ['key_value', 'single_row', 'single_cell']:
+        # This will be handled by the embedding logic in process_pdf if needed
+        pass
+
+
 # ---------------- PDF INGESTION ----------------
 def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
     # Ensure model is loaded
@@ -631,6 +925,10 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
     table_count = 0
     chunk_count = 0
     total_pages = len(doc)
+
+    # Multi-page table tracking
+    previous_table = None
+    merged_table_count = 0
 
     print(f"[RAG] Processing {total_pages} pages...")
 
@@ -657,56 +955,56 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
         # Extract tables from the page
         tables = extract_tables_from_page(page)
         if tables:
-            for table in tables:
-                table_id = f"{doc_id}_{page_num}_table_{table['index']}"
-
-                # Store full table in tables.db
-                store_table(
-                    table_id=table_id,
-                    doc_id=doc_id,
-                    thread_id=thread_id,
-                    parent_id=parent_id,
-                    source=filename,
-                    page=page_num + 1,
-                    table_index=table['index'],
-                    headers=table['headers'],
-                    row_count=table['row_count'],
-                    column_count=table['column_count'],
-                    table_data=table['data']
-                )
-                table_count += 1
-
-                # For single-instance tables, ALSO embed in ChromaDB
-                rows = table['data'][1:] if len(table['data']) > 1 else []
-                table_type = classify_table_type(table['headers'], rows, table['row_count'], table['column_count'])
-
-                if table_type in ['key_value', 'single_row', 'single_cell']:
-                    # Create semantic text representation
-                    table_text = f"Table {table['index'] + 1} on page {page_num + 1}:\n"
-                    if table['headers']:
-                        table_text += "Headers: " + ", ".join(str(h) for h in table['headers'] if h) + "\n"
-
-                    for row in rows[:5]:  # Limit to first 5 rows
-                        if row:
-                            table_text += " | ".join(str(cell) for cell in row if cell) + "\n"
-
-                    # Add to text chunks for embedding
-                    chunk_id = f"{doc_id}_{page_num}_table_{table['index']}_text"
-                    text_chunks.append(table_text)
-                    ids.append(chunk_id)
-                    metadatas.append({
-                        "doc_id": str(doc_id),
-                        "thread_id": str(thread_id),
-                        "parent_id": str(parent_id) if parent_id else "none",
-                        "source": filename,
-                        "page": page_num + 1,
-                        "type": "table_text",
-                        "table_id": table_id
-                    })
+            for table_idx, table in enumerate(tables):
+                # Check if this is a continuation of the previous table
+                is_continuation = False
+                if previous_table and table_idx == 0:  # Only check first table on page
+                    is_continuation = is_table_continuation(previous_table, table)
+                
+                if is_continuation:
+                    # Merge with previous table
+                    print(f"[RAG] Detected table continuation on page {page_num + 1} (merging...)")
+                    previous_table['data'].extend(table['data'])
+                    previous_table['row_count'] += table['row_count']
+                    previous_table['pages'].append(page_num + 1)
+                    merged_table_count += 1
+                    # Don't store yet, wait for actual end
+                    continue
+                else:
+                    # Store any accumulated previous table
+                    if previous_table:
+                        _store_merged_table(
+                            previous_table, doc_id, thread_id, parent_id, filename
+                        )
+                        table_count += 1
+                    
+                    # Start tracking new table
+                    previous_table = {
+                        'data': table['data'],
+                        'headers': table['headers'],
+                        'row_count': table['row_count'],
+                        'column_count': table['column_count'],
+                        'start_page': page_num + 1,
+                        'pages': [page_num + 1],
+                        'index': table['index'],
+                        'page_num': page_num  # Store page number for table_id generation
+                    }
 
         # Print progress every 100 pages
         if (page_num + 1) % 100 == 0 or (page_num + 1) == total_pages:
             print(f"[RAG] Progress: {page_num + 1}/{total_pages} pages | {chunk_count} chunks | {table_count} tables")
+
+    # Store any remaining accumulated table
+    if previous_table:
+        _store_merged_table(
+            previous_table, doc_id, thread_id, parent_id, filename
+        )
+        table_count += 1
+
+    doc.close()
+
+    if merged_table_count > 0:
+        print(f"[RAG] ✓ Merged {merged_table_count} table continuations across pages")
 
     if not text_chunks:
         print("[RAG] No valid text chunks found.")
@@ -1019,10 +1317,90 @@ def process_word(file_path, doc_id, thread_id, parent_id, filename):
     return {"text_chunks": len(text_chunks), "table_chunks": table_count}
 
 
+# ---------------- IMAGE PROCESSOR ----------------
+def process_image(file_path, doc_id, thread_id, parent_id, filename):
+    """
+    Process image files (.jpg, .jpeg, .png, .bmp, .tiff, .tif).
+    Creates a basic metadata entry and attempts to extract any embedded text.
+    For full OCR capabilities, pytesseract would be needed.
+    """
+    start_time = time.time()
+    print(f"\n[RAG] === Processing Image: {filename} ===")
+    
+    collection = get_collection()
+    text_chunks = []
+    metadatas = []
+    ids = []
+    
+    try:
+        # Open image with PyMuPDF/Pillow to get basic info
+        import fitz
+        from PIL import Image
+        
+        # Get image dimensions and basic info
+        try:
+            img = Image.open(file_path)
+            width, height = img.size
+            format_name = img.format
+            mode = img.mode
+            img.close()
+            
+            # Create descriptive metadata chunk
+            metadata_text = f"""Image: {filename}
+Format: {format_name}
+Dimensions: {width}x{height} pixels
+Color Mode: {mode}
+File Type: Image Document
+
+This is an image file uploaded to the system. You can reference this image when answering questions about visual content, diagrams, screenshots, or photos in the context."""
+            
+        except Exception as e:
+            print(f"[RAG] Warning: Could not read image metadata: {e}")
+            metadata_text = f"Image: {filename}\nFile Type: Image Document\n\nThis is an image file uploaded to the system."
+        
+        # Create chunks for the image metadata
+        chunk_id = f"{doc_id}_img_metadata"
+        text_chunks.append(metadata_text)
+        ids.append(chunk_id)
+        
+        metadatas.append({
+            "doc_id": str(doc_id),
+            "thread_id": str(thread_id),
+            "parent_id": str(parent_id) if parent_id else "none",
+            "source": filename,
+            "page": 1,
+            "type": "image_metadata"
+        })
+        
+        # Embed and store
+        if text_chunks:
+            print(f"[RAG] Embedding {len(text_chunks)} image metadata chunks...")
+            embeddings = model_manager.encode(text_chunks).tolist()
+            
+            collection.add(
+                documents=text_chunks,
+                embeddings=embeddings,
+                metadatas=metadatas,
+                ids=ids
+            )
+        
+        end_time = time.time()
+        print(f"[RAG] ✓ Image processed in {end_time - start_time:.1f}s | {len(text_chunks)} metadata chunks stored")
+        print(f"[RAG] Note: For OCR text extraction from images, pytesseract can be installed separately")
+        
+        return {"text_chunks": len(text_chunks), "table_chunks": 0}
+        
+    except Exception as e:
+        print(f"[RAG] Error processing image: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+
 # ---------------- UNIVERSAL DOCUMENT PROCESSOR ----------------
 def process_document(file_path, doc_id, thread_id, parent_id, filename):
     """
-    Universal document processor that handles PDF, Excel, and Word files.
+    Universal document processor that handles PDF, Excel, Word, and Image files.
     Automatically detects file type and calls the appropriate processor.
     """
     ext = os.path.splitext(filename)[1].lower()
@@ -1033,8 +1411,10 @@ def process_document(file_path, doc_id, thread_id, parent_id, filename):
         return process_excel(file_path, doc_id, thread_id, parent_id, filename)
     elif ext == '.docx':
         return process_word(file_path, doc_id, thread_id, parent_id, filename)
+    elif ext in ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']:
+        return process_image(file_path, doc_id, thread_id, parent_id, filename)
     else:
-        raise ValueError(f"Unsupported file type: {ext}. Supported: .pdf, .xlsx, .xls, .docx")
+        raise ValueError(f"Unsupported file type: {ext}. Supported: .pdf, .xlsx, .xls, .docx, .jpg, .jpeg, .png, .bmp, .tiff, .tif")
 
 
 def detect_table_query_intent(query_text):
@@ -1051,7 +1431,9 @@ def detect_table_query_intent(query_text):
         'configuration', 'setting', 'rating', 'capacity', 'range', 'limit',
         'requirement', 'criteria', 'threshold', 'tolerance', 'standard',
         'available', 'availability', 'stock', 'part', 'nsn', 'model', 'code',
-        'number', 'serial', 'item', 'component', 'product'
+        'number', 'serial', 'item', 'component', 'product',
+        'drg', 'dwg', 'drawing', 'nomenclature', 'ref', 'reference',
+        'plate', 'sr. no', 'sr.no', 'srno', 'sl. no', 'sl.no', 'slno'
     ]
 
     # Question patterns for data lookup
@@ -1059,10 +1441,12 @@ def detect_table_query_intent(query_text):
         r'what\s+(is|are)\s+the\s+\w+',
         r'how\s+much',
         r'how\s+many',
-        r'show\s+me',
-        r'list\s+the',
-        r'find\s+the',
-        r'get\s+the',
+        r'show(\s+me)?(\s+all)?',
+        r'list(\s+all)?(\s+the)?',
+        r'find(\s+all)?(\s+the)?',
+        r'get(\s+all)?(\s+the)?',
+        r'display(\s+all)?(\s+the)?',
+        r'give(\s+me)?(\s+all)?',
         r'is\s+it\s+available',
         r'is\s+there',
         r'do\s+you\s+have'
@@ -1276,6 +1660,7 @@ def search_tables_directly(query_text, thread_id, file_filter=None):
     Industry-ready SQL-based table search.
     Handles part numbers, part names, and various query formats.
     Returns ALL matching tables without limits.
+    Supports inheritance from ancestor threads.
     """
     from .models import ExtractedTable
     from django.db.models import Q
@@ -1283,8 +1668,12 @@ def search_tables_directly(query_text, thread_id, file_filter=None):
     print(f"\n[DEBUG-SQL-SEARCH] === search_tables_directly() ===")
     print(f"[DEBUG-SQL-SEARCH] Query: {query_text}")
 
-    # Build base filter
-    base_query = ExtractedTable.objects.filter(thread_id=thread_id)
+    # Build base filter with inheritance
+    ancestor_ids = get_all_ancestor_thread_ids(thread_id)
+    all_thread_ids = [thread_id] + ancestor_ids
+    print(f"[DEBUG-SQL-SEARCH] Searching in threads: {all_thread_ids}")
+    
+    base_query = ExtractedTable.objects.filter(thread_id__in=all_thread_ids)
     if file_filter:
         base_query = base_query.filter(source=file_filter)
         print(f"[DEBUG-SQL-SEARCH] File Filter: {file_filter}")
@@ -1366,6 +1755,24 @@ def search_tables_directly(query_text, thread_id, file_filter=None):
     return results
 
 
+# ---------------- HELPER: Get All Ancestor Thread IDs ----------------
+def get_all_ancestor_thread_ids(thread_id):
+    """Get all ancestor thread IDs (parent, grandparent, etc.) for inheritance."""
+    from process.models import Thread
+    
+    ancestor_ids = []
+    try:
+        thread = Thread.objects.get(id=thread_id)
+        current = thread
+        while current.parent:
+            ancestor_ids.append(str(current.parent.id))
+            current = current.parent
+    except Thread.DoesNotExist:
+        pass
+    
+    return ancestor_ids
+
+
 # ---------------- QUERY RAG ----------------
 def query_rag(query_text, current_thread_id, parent_thread_id=None):
     # Ensure model is loaded
@@ -1400,14 +1807,15 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
     is_table_query = detect_table_query_intent(query_text)
     print(f"[RAG] Table query intent: {is_table_query}")
 
-    # --- ACCESS CONTROL ---
-    if parent_thread_id:
-        base_filter = {
-            "$or": [
-                {"thread_id": {"$eq": str(current_thread_id)}},
-                {"thread_id": {"$eq": str(parent_thread_id)}}
-            ]
-        }
+    # --- ACCESS CONTROL: Include all ancestor threads for inheritance ---
+    ancestor_ids = get_all_ancestor_thread_ids(current_thread_id)
+    print(f"[RAG] Ancestor thread IDs: {ancestor_ids}")
+    
+    if ancestor_ids:
+        # Build filter for current thread + all ancestors
+        thread_filters = [{"thread_id": {"$eq": str(current_thread_id)}}]
+        thread_filters.extend([{"thread_id": {"$eq": aid}} for aid in ancestor_ids])
+        base_filter = {"$or": thread_filters}
     else:
         base_filter = {"thread_id": {"$eq": str(current_thread_id)}}
     if file_filter:
@@ -1590,18 +1998,24 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
 
         # Find/Locate indicators - just show locations
         find_patterns = [
-            'find ', 'locate ', 'show me where', 'where is', 'where are', 'where can i find',
-            'list all', 'show all', 'get all'
+            'locate ', 'show me where', 'where is', 'where are', 'where can i find'
+        ]
+        
+        # List indicators - extract and show actual data from specific columns
+        list_patterns = [
+            'list all', 'show all', 'get all', 'list the', 'show the', 'get the',
+            'display all', 'display the', 'give me all', 'give me the'
         ]
 
         is_question = any(query_lower.startswith(p) or p in query_lower for p in question_patterns)
         is_find_only = any(query_lower.startswith(p) for p in find_patterns)
+        is_list_query = any(query_lower.startswith(p) for p in list_patterns)
 
         # If it ends with '?' it's likely a question
         if query_text.strip().endswith('?'):
             is_question = True
 
-        print(f"[RAG] Query Analysis - Is Question: {is_question}, Is Find Only: {is_find_only}")
+        print(f"[RAG] Query Analysis - Is Question: {is_question}, Is Find Only: {is_find_only}, Is List Query: {is_list_query}")
 
         # Build table locations for reference
         table_locations = []
@@ -1611,8 +2025,120 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
 
         location_text = "\n".join(f"• {loc}" for loc in table_locations)
 
+        # --- LIST QUERY MODE - Extract specific column values ---
+        if is_list_query and len(sql_tables) > 0:
+            print(f"[RAG] List query detected - extracting column data from {len(sql_tables)} tables")
+            
+            # Identify target column from query
+            query_lower = query_text.lower()
+            target_column = None
+            column_keywords = {
+                'drg': ['drg', 'dwg', 'drawing', 'drg.', 'dwg.', 'drg. no', 'dwg. no', 'drawing no', 'drawing number'],
+                'part': ['part', 'part no', 'part number', 'part.no', 'partno'],
+                'nsn': ['nsn', 'n.s.n', 'stock number'],
+                'nomenclature': ['nomenclature', 'designation', 'description', 'name', 'item'],
+                'ref': ['ref', 'reference', 'ref no', 'ref.', 'ref. no'],
+                'plate': ['plate', 'plate ref'],
+                'sr': ['sr', 'sr.', 'sr no', 'sr. no', 'serial', 'sl', 'sl.', 'sl no']
+            }
+            
+            for col_type, keywords in column_keywords.items():
+                if any(kw in query_lower for kw in keywords):
+                    target_column = col_type
+                    break
+            
+            if not target_column:
+                target_column = 'all'  # Show all columns if can't determine
+            
+            print(f"[RAG] Target column type: {target_column}")
+            
+            # Extract column data from all tables
+            extracted_values = []
+            seen_values = set()
+            
+            for table in sql_tables:
+                headers = table.get('headers', [])
+                data = table.get('data', [])
+                source_info = f"{table['source']} (Page {table['page']})"
+                
+                if not headers or not data:
+                    continue
+                
+                # Find matching column index
+                header_lower = [str(h).lower().strip() for h in headers]
+                col_idx = None
+                
+                if target_column != 'all':
+                    for keywords in column_keywords[target_column]:
+                        for i, h in enumerate(header_lower):
+                            if keywords in h:
+                                col_idx = i
+                                break
+                        if col_idx is not None:
+                            break
+                
+                # Extract values
+                if col_idx is not None:
+                    # Extract specific column
+                    for row in data:
+                        if col_idx < len(row):
+                            value = str(row[col_idx]).strip()
+                            if value and value != 'None' and value not in seen_values:
+                                seen_values.add(value)
+                                extracted_values.append({
+                                    'value': value,
+                                    'source': source_info,
+                                    'column': headers[col_idx]
+                                })
+                elif target_column == 'all':
+                    # Show first few rows with all columns
+                    for row_idx, row in enumerate(data[:3]):  # First 3 rows per table
+                        row_data = ' | '.join(str(cell) for cell in row)
+                        extracted_values.append({
+                            'value': row_data,
+                            'source': source_info,
+                            'column': ' | '.join(str(h) for h in headers)
+                        })
+            
+            # Format results
+            if extracted_values:
+                answer = f"**Found {len(extracted_values)} entries:**\n\n"
+                
+                if target_column != 'all' and len(extracted_values) > 0:
+                    # Show column name
+                    answer += f"**{extracted_values[0]['column']}:**\n"
+                    for idx, item in enumerate(extracted_values[:100], 1):  # Limit to 100
+                        answer += f"{idx}. {item['value']}\n"
+                    
+                    if len(extracted_values) > 100:
+                        answer += f"\n... and {len(extracted_values) - 100} more entries"
+                else:
+                    # Show as table
+                    for item in extracted_values[:50]:  # Limit to 50 rows
+                        answer += f"\n**{item['source']}**\n"
+                        answer += f"{item['column']}\n"
+                        answer += f"{item['value']}\n"
+                
+                total_time = time.time() - start_time
+                end_memory = process.memory_info().rss / 1024 / 1024
+                
+                print(f"[RAG] List query completed in {total_time:.2f}s - {len(extracted_values)} values extracted")
+                
+                return {
+                    "answer": answer,
+                    "sources": list(set(table_locations)),
+                    "chunks": chunks_with_metadata,
+                    "confidence": 95.0,
+                    "confidence_label": "HIGH",
+                    "retrieval_type": "sql_list",
+                    "table_count": len(sql_tables),
+                    "extracted_count": len(extracted_values)
+                }
+            else:
+                print(f"[RAG] No values extracted - falling back to location response")
+
         # --- INTELLIGENT ANSWER MODE ---
-        if is_question and not is_find_only:
+        if is_question and not is_find_only and not is_list_query:
             print(f"[RAG] Generating intelligent answer using LLM...")
 
             # Extract search terms for context
@@ -1706,15 +2232,40 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
                             if i < len(match['row']):
                                 table_context += f"  {header}: {match['row'][i]}\n"
 
-            # If no matches at all, show raw table data
+            # If no matches at all, don't spam with all table data
             if not exact_matches and not partial_matches:
-                table_context += "\n=== TABLE DATA (No specific matches found) ===\n"
-                for idx, table in enumerate(sql_tables[:3]):
-                    table_context += f"\nTable from {table['source']} (Page {table['page']}):\n"
-                    headers = table.get('headers', [])
-                    table_context += f"Headers: {' | '.join(str(h) for h in headers)}\n"
-                    for row in table.get('data', [])[:5]:
-                        table_context += f"Row: {' | '.join(str(cell) for cell in row)}\n"
+                # Check if this looks like a vague/broad query
+                if len(sql_tables) > 50:
+                    # Too many tables = query is too broad or not specific enough
+                    answer = f"ℹ️ **Your query searched across {len(sql_tables)} tables**, but no specific matches were found.\n\n"
+                    answer += "💡 **Tip:** Try being more specific:\n"
+                    answer += "- Use exact codes/numbers (e.g., '410A310000100')\n"
+                    answer += "- Ask to compare specific columns (e.g., 'compare part numbers between files')\n"
+                    answer += "- Use list queries (e.g., 'list all drawing numbers')\n"
+                    answer += "- Reference specific files with @filename.pdf\n\n"
+                    answer += f"**Searched across:** {sql_tables[0]['source']} and other documents"
+                    
+                    total_time = time.time() - start_time
+                    end_memory = process.memory_info().rss / 1024 / 1024
+                    
+                    return {
+                        "answer": answer,
+                        "sources": [f"{sql_tables[0]['source']} (+{len(sql_tables)-1} more)"],  # Limit sources!
+                        "chunks": chunks_with_metadata[:5],  # Limit to 5
+                        "confidence": 30.0,
+                        "confidence_label": "LOW",
+                        "retrieval_type": "sql_no_match",
+                        "table_count": len(sql_tables)
+                    }
+                else:
+                    # Show sample table data for small result sets
+                    table_context += "\n=== TABLE DATA (Showing sample from first 3 tables) ===\n"
+                    for idx, table in enumerate(sql_tables[:3]):
+                        table_context += f"\nTable from {table['source']} (Page {table['page']}):\n"
+                        headers = table.get('headers', [])
+                        table_context += f"Headers: {' | '.join(str(h) for h in headers)}\n"
+                        for row in table.get('data', [])[:5]:
+                            table_context += f"Row: {' | '.join(str(cell) for cell in row)}\n"
 
             # Build intelligent prompt - OPTIMIZED FOR SMALLER LLMs
             system_prompt = """You are a precise document assistant. Answer questions using ONLY the provided data.

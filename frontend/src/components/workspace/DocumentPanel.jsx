@@ -9,12 +9,14 @@ import {
   Sparkles,
   FileSpreadsheet,
   File,
-  Tag
+  Tag,
+  FileImage
 } from 'lucide-react';
+import { CategorySelector } from './CategorySelector';
 import './DocumentPanel.css';
 
 // Supported file extensions for chat
-const SUPPORTED_EXTENSIONS = ['.pdf', '.xlsx', '.xls', '.docx'];
+const SUPPORTED_EXTENSIONS = ['.pdf', '.xlsx', '.xls', '.docx', '.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'];
 
 // Document categories
 const DOCUMENT_CATEGORIES = [
@@ -57,6 +59,7 @@ function getFileIcon(filename) {
   if (ext === 'pdf') return <FileText size={18} style={{ color: '#ef4444' }} />; // Red
   if (ext === 'xlsx' || ext === 'xls') return <FileSpreadsheet size={18} style={{ color: '#10b981' }} />; // Green
   if (ext === 'docx') return <File size={18} style={{ color: '#3b82f6' }} />; // Blue
+  if (ext === 'jpg' || ext === 'jpeg' || ext === 'png' || ext === 'bmp' || ext === 'tiff' || ext === 'tif') return <FileImage size={18} style={{ color: '#f59e0b' }} />; // Orange
   return <FileText size={18} />;
 }
 
@@ -138,30 +141,26 @@ export function DocumentPanel({
       // Check if file extension is supported
       const ext = '.' + file.name.toLowerCase().split('.').pop();
       if (SUPPORTED_EXTENSIONS.includes(ext)) {
-        // Show category selection modal for PDFs
-        if (ext === '.pdf') {
-          setSelectedFile(file);
-          setShowCategoryModal(true);
-          // Auto-detect category from filename
-          const filename = file.name.toLowerCase();
-          if (filename.includes('mrls') || filename.includes('mrl')) {
-            setSelectedCategory('mrls');
-          } else if (filename.includes('ispl') || filename.includes('isp')) {
-            setSelectedCategory('ispl');
-          } else if (filename.includes('manual')) {
-            setSelectedCategory('manual');
-          } else if (filename.includes('catalog')) {
-            setSelectedCategory('catalog');
-          } else if (filename.includes('spec')) {
-            setSelectedCategory('specification');
-          } else if (filename.includes('drawing') || filename.includes('dwg')) {
-            setSelectedCategory('drawing');
-          } else {
-            setSelectedCategory('other');
-          }
+        // Show category selection modal
+        setSelectedFile(file);
+        setShowCategoryModal(true);
+        
+        // Auto-detect category from filename
+        const filename = file.name.toLowerCase();
+        if (filename.includes('mrls') || filename.includes('mrl')) {
+          setSelectedCategory('mrls');
+        } else if (filename.includes('ispl') || filename.includes('isp')) {
+          setSelectedCategory('ispl');
+        } else if (filename.includes('manual')) {
+          setSelectedCategory('manual');
+        } else if (filename.includes('catalog')) {
+          setSelectedCategory('catalog');
+        } else if (filename.includes('spec')) {
+          setSelectedCategory('specification');
+        } else if (filename.includes('drawing') || filename.includes('dwg')) {
+          setSelectedCategory('drawing');
         } else {
-          // For non-PDF files, upload directly with 'other' category
-          onUpload(file, 'other');
+          setSelectedCategory('other');
         }
       } else {
         alert(`Unsupported file type. Supported: ${SUPPORTED_EXTENSIONS.join(', ')}`);
@@ -170,9 +169,9 @@ export function DocumentPanel({
     }
   };
 
-  const handleCategoryConfirm = () => {
+  const handleCategorySelect = (category) => {
     if (selectedFile) {
-      onUpload(selectedFile, selectedCategory);
+      onUpload(selectedFile, category);
       setShowCategoryModal(false);
       setSelectedFile(null);
       setSelectedCategory('other');
@@ -209,7 +208,7 @@ export function DocumentPanel({
           <span className="document-panel__upload-text">
             {isUploading ? uploadStatus || 'Uploading...' : 'Upload Document'}
           </span>
-          {!isUploading && <span className="document-panel__upload-hint">PDF, Excel, or Word</span>}
+          {!isUploading && <span className="document-panel__upload-hint">PDF, Excel, Word, or Images</span>}
         </button>
         {isUploading && uploadProgress > 0 && (
           <div className="document-panel__progress">
@@ -225,7 +224,7 @@ export function DocumentPanel({
         <input
           ref={fileInputRef}
           type="file"
-          accept=".pdf,.xlsx,.xls,.docx,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          accept=".pdf,.xlsx,.xls,.docx,.jpg,.jpeg,.png,.bmp,.tiff,.tif,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/*"
           onChange={handleFileChange}
           style={{ display: 'none' }}
         />
@@ -238,7 +237,7 @@ export function DocumentPanel({
           </div>
           <div className="document-panel__empty-title">No documents yet</div>
           <div className="document-panel__empty-text">
-            Upload PDF, Excel, or Word files to start
+            Upload PDF, Excel, Word, or Image files to start
           </div>
         </div>
       ) : (
@@ -261,60 +260,12 @@ export function DocumentPanel({
       )}
 
       {/* Category Selection Modal */}
-      {showCategoryModal && (
-        <div className="category-modal-overlay" onClick={handleCategoryCancel}>
-          <div className="category-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="category-modal__header">
-              <h3 className="category-modal__title">
-                <Tag size={18} />
-                Select Document Category
-              </h3>
-              <p className="category-modal__subtitle">
-                Categorize "{selectedFile?.name}" for better organization and search
-              </p>
-            </div>
-            <div className="category-modal__body">
-              {DOCUMENT_CATEGORIES.map((cat) => (
-                <label 
-                  key={cat.value} 
-                  className={`category-option ${selectedCategory === cat.value ? 'category-option--selected' : ''}`}
-                  style={{
-                    borderColor: selectedCategory === cat.value ? cat.color : 'transparent',
-                    backgroundColor: selectedCategory === cat.value ? `${cat.color}10` : 'transparent'
-                  }}
-                >
-                  <input
-                    type="radio"
-                    name="category"
-                    value={cat.value}
-                    checked={selectedCategory === cat.value}
-                    onChange={(e) => setSelectedCategory(e.target.value)}
-                    style={{ display: 'none' }}
-                  />
-                  <div 
-                    className="category-option__indicator"
-                    style={{ backgroundColor: cat.color }}
-                  />
-                  <span className="category-option__label">{cat.label}</span>
-                </label>
-              ))}
-            </div>
-            <div className="category-modal__footer">
-              <button 
-                className="category-modal__btn category-modal__btn--cancel"
-                onClick={handleCategoryCancel}
-              >
-                Cancel
-              </button>
-              <button 
-                className="category-modal__btn category-modal__btn--confirm"
-                onClick={handleCategoryConfirm}
-              >
-                Upload
-              </button>
-            </div>
-          </div>
-        </div>
+      {showCategoryModal && selectedFile && (
+        <CategorySelector
+          fileName={selectedFile.name}
+          onSelect={handleCategorySelect}
+          onCancel={handleCategoryCancel}
+        />
       )}
     </aside>
   );
