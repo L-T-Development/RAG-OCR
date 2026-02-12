@@ -23,6 +23,11 @@ urlpatterns = [
     # Delete Endpoints
     path('api/delete-thread/<str:thread_id>/', views.delete_thread, name='delete_thread'),
     path('api/delete-document/<str:doc_id>/', views.delete_document, name='delete_document'),
+    
+    # Document Metadata Endpoints
+    path('api/documents/<str:doc_id>/metadata/', views.document_metadata, name='document_metadata'),
+    path('api/documents/<str:doc_id>/link-version/', views.link_document_version, name='link_version'),
+    path('api/documents/<str:doc_id>/versions/', views.document_version_history, name='version_history'),
 
     path("api/compare-documents/", views.compare_documents),
     path("api/compare/status/<str:job_id>/", views.compare_status),

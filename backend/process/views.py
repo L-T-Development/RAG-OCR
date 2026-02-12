@@ -1135,6 +1135,162 @@ def delete_document(request, doc_id):
         traceback.print_exc()
         return JsonResponse({'error': f'Delete failed: {str(e)}'}, status=500)
 
+
+# ==================== DOCUMENT METADATA ENDPOINTS ====================
+
+@csrf_exempt
+@require_http_methods(["PATCH", "GET"])
+def document_metadata(request, doc_id):
+    """Update or get document metadata (tags, notes, version, revision_date)"""
+    try:
+        doc = get_object_or_404(Document, id=doc_id)
+        
+        if request.method == "GET":
+            return JsonResponse({
+                'id': str(doc.id),
+                'filename': doc.filename,
+                'tags': doc.tags or [],
+                'notes': doc.notes or '',
+                'version': doc.version or '',
+                'revision_date': doc.revision_date.isoformat() if doc.revision_date else None,
+                'previous_version_id': str(doc.previous_version.id) if doc.previous_version else None,
+                'category': doc.category
+            })
+        
+        # PATCH request
+        data = json.loads(request.body)
+        
+        # Update fields if provided
+        if 'tags' in data:
+            doc.tags = data['tags']  # Expecting a list of strings
+        
+        if 'notes' in data:
+            doc.notes = data['notes']
+        
+        if 'version' in data:
+            doc.version = data['version']
+        
+        if 'revision_date' in data:
+            from django.utils import timezone
+            from datetime import datetime
+            if data['revision_date']:
+                # Parse ISO format date string
+                doc.revision_date = datetime.fromisoformat(data['revision_date'].replace('Z', '+00:00'))
+            else:
+                doc.revision_date = None
+        
+        doc.save()
+        
+        return JsonResponse({
+            'message': 'Document metadata updated successfully',
+            'document': {
+                'id': str(doc.id),
+                'filename': doc.filename,
+                'tags': doc.tags,
+                'notes': doc.notes,
+                'version': doc.version,
+                'revision_date': doc.revision_date.isoformat() if doc.revision_date else None
+            }
+        })
+        
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({'error': f'Metadata update failed: {str(e)}'}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def link_document_version(request, doc_id):
+    """Link this document as a new version of another document"""
+    try:
+        doc = get_object_or_404(Document, id=doc_id)
+        data = json.loads(request.body)
+        
+        previous_version_id = data.get('previous_version_id')
+        if not previous_version_id:
+            return JsonResponse({'error': 'previous_version_id is required'}, status=400)
+        
+        previous_doc = get_object_or_404(Document, id=previous_version_id)
+        
+        # Link the versions
+        doc.previous_version = previous_doc
+        doc.save()
+        
+        return JsonResponse({
+            'message': 'Document versions linked successfully',
+            'current': str(doc.id),
+            'previous': str(previous_doc.id),
+            'previous_filename': previous_doc.filename
+        })
+        
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({'error': f'Version linking failed: {str(e)}'}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def document_version_history(request, doc_id):
+    """Get the version history chain for a document"""
+    try:
+        doc = get_object_or_404(Document, id=doc_id)
+        
+        # Build version chain (backwards to oldest)
+        versions = []
+        current = doc
+        visited = set()  # Prevent infinite loops
+        
+        while current and str(current.id) not in visited:
+            visited.add(str(current.id))
+            versions.append({
+                'id': str(current.id),
+                'filename': current.filename,
+                'version': current.version or '',
+                'revision_date': current.revision_date.isoformat() if current.revision_date else None,
+                'uploaded_at': current.uploaded_at.isoformat(),
+                'tags': current.tags or [],
+                'notes': current.notes or '',
+                'is_current': current.id == doc.id
+            })
+            current = current.previous_version
+        
+        # Also get newer versions (documents that point to this one)
+        newer_versions = Document.objects.filter(previous_version=doc).values(
+            'id', 'filename', 'version', 'revision_date', 'uploaded_at', 'tags', 'notes'
+        )
+        
+        newer_list = []
+        for newer in newer_versions:
+            newer_list.append({
+                'id': str(newer['id']),
+                'filename': newer['filename'],
+                'version': newer['version'] or '',
+                'revision_date': newer['revision_date'].isoformat() if newer['revision_date'] else None,
+                'uploaded_at': newer['uploaded_at'].isoformat(),
+                'tags': newer['tags'] or [],
+                'notes': newer['notes'] or '',
+                'is_current': False
+            })
+        
+        return JsonResponse({
+            'current_document_id': str(doc.id),
+            'previous_versions': versions[1:] if len(versions) > 1 else [],  # Exclude current doc
+            'newer_versions': newer_list,
+            'total_versions': len(versions) + len(newer_list)
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({'error': f'Version history retrieval failed: {str(e)}'}, status=500)
+
+
 #comparison
 @csrf_exempt
 def compare_documents(request):

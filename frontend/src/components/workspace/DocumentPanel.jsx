@@ -10,9 +10,17 @@ import {
   FileSpreadsheet,
   File,
   Tag,
-  FileImage
+  FileImage,
+  Edit3,
+  Save,
+  X,
+  ChevronDown,
+  ChevronRight,
+  Clock,
+  MessageSquare
 } from 'lucide-react';
 import { CategorySelector } from './CategorySelector';
+import { api } from '../../services/api';
 import './DocumentPanel.css';
 
 // Supported file extensions for chat
@@ -64,56 +72,219 @@ function getFileIcon(filename) {
 }
 
 function DocumentCard({ document, onDelete, onSummarize, isUploading = false }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [metadata, setMetadata] = useState({
+    tags: document.tags || [],
+    notes: document.notes || '',
+    version: document.version || '',
+    revision_date: document.revision_date || ''
+  });
+  const [newTag, setNewTag] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+
+  const handleSaveMetadata = async () => {
+    setIsSaving(true);
+    try {
+      const result = await api.updateDocumentMetadata(document.id, metadata);
+      if (result.ok) {
+        setIsEditing(false);
+        // Update local document object if parent provides callback
+      }
+    } catch (error) {
+      console.error('Failed to save metadata:', error);
+      alert('Failed to save metadata');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleAddTag = () => {
+    if (newTag.trim() && !metadata.tags?.includes(newTag.trim())) {
+      setMetadata(prev => ({ ...prev, tags: [...(prev.tags || []), newTag.trim()] }));
+      setNewTag('');
+    }
+  };
+
+  const handleRemoveTag = (tagToRemove) => {
+    setMetadata(prev => ({ ...prev, tags: prev.tags?.filter(t => t !== tagToRemove) || [] }));
+  };
+
   return (
-    <div className={`document-card ${isUploading ? 'document-card--uploading' : ''}`}>
-      <div className="document-card__icon">
-        {isUploading ? <Loader2 size={18} className="animate-spin" /> : getFileIcon(document.name)}
-      </div>
-      <div className="document-card__info">
-        <div className="document-card__name" title={document.name}>
-          {document.name}
+    <div className={`document-card ${isUploading ? 'document-card--uploading' : ''} ${isExpanded ? 'document-card--expanded' : ''}`}>
+      <div className="document-card__main" onClick={() => !isUploading && setIsExpanded(!isExpanded)}>
+        <button className="document-card__expand-btn">
+          {isExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+        </button>
+        <div className="document-card__icon">
+          {isUploading ? <Loader2 size={18} className="animate-spin" /> : getFileIcon(document.name)}
         </div>
-        <div className="document-card__meta">
-          {isUploading ? (
-            <span>Processing...</span>
-          ) : (
-            <>
-              {document.category && getCategoryBadge(document.category, document.category_label)}
-              {document.is_inherited && (
-                <span className="document-card__badge">Inherited</span>
-              )}
-            </>
+        <div className="document-card__info">
+          <div className="document-card__name" title={document.name}>
+            {document.name}
+          </div>
+          <div className="document-card__meta">
+            {isUploading ? (
+              <span>Processing...</span>
+            ) : (
+              <>
+                {document.category && getCategoryBadge(document.category, document.category_label)}
+                {metadata.version && (
+                  <span className="document-card__version-badge" title="Version">
+                    <Clock size={10} />
+                    {metadata.version}
+                  </span>
+                )}
+                {metadata.tags?.length > 0 && (
+                  <span className="document-card__tag-count" title={metadata.tags.join(', ')}>
+                    <Tag size={10} />
+                    {metadata.tags.length}
+                  </span>
+                )}
+                {document.is_inherited && (
+                  <span className="document-card__badge">Inherited</span>
+                )}
+              </>
+            )}
+          </div>
+          {isUploading && (
+            <div className="document-card__progress">
+              <div 
+                className="document-card__progress-bar" 
+                style={{ width: '60%' }}
+              />
+            </div>
           )}
         </div>
-        {isUploading && (
-          <div className="document-card__progress">
-            <div 
-              className="document-card__progress-bar" 
-              style={{ width: '60%' }}
-            />
+        {!isUploading && (
+          <div className="document-card__actions" onClick={(e) => e.stopPropagation()}>
+            {onSummarize && (
+              <button
+                className="document-card__action-btn document-card__action-btn--summarize"
+                onClick={() => onSummarize(document.id)}
+                title="Summarize document"
+              >
+                <Sparkles size={14} />
+              </button>
+            )}
+            {!document.is_inherited && (
+              <button
+                className="document-card__action-btn"
+                onClick={() => onDelete(document.id)}
+                title="Delete document"
+              >
+                <Trash2 size={14} />
+              </button>
+            )}
           </div>
         )}
       </div>
-      {!isUploading && (
-        <div className="document-card__actions">
-          {onSummarize && (
-            <button
-              className="document-card__action-btn document-card__action-btn--summarize"
-              onClick={() => onSummarize(document.id)}
-              title="Summarize document"
-            >
-              <Sparkles size={14} />
-            </button>
-          )}
-          {!document.is_inherited && (
-            <button
-              className="document-card__action-btn"
-              onClick={() => onDelete(document.id)}
-              title="Delete document"
-            >
-              <Trash2 size={14} />
-            </button>
-          )}
+
+      {/* Metadata Panel */}
+      {isExpanded && !isUploading && (
+        <div className="document-card__metadata" onClick={(e) => e.stopPropagation()}>
+          <div className="document-card__metadata-header">
+            <h4>Document Metadata</h4>
+            {!isEditing ? (
+              <button 
+                className="document-card__edit-btn" 
+                onClick={() => setIsEditing(true)}
+                title="Edit metadata"
+              >
+                <Edit3 size={14} />
+                Edit
+              </button>
+            ) : (
+              <div className="document-card__edit-actions">
+                <button 
+                  className="document-card__save-btn" 
+                  onClick={handleSaveMetadata}
+                  disabled={isSaving}
+                  title="Save changes"
+                >
+                  {isSaving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+                  Save
+                </button>
+                <button 
+                  className="document-card__cancel-btn" 
+                  onClick={() => {
+                    setIsEditing(false);
+                    setMetadata({
+                      tags: document.tags || [],
+                      notes: document.notes || '',
+                      version: document.version || '',
+                      revision_date: document.revision_date || ''
+                    });
+                  }}
+                  title="Cancel"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Version */}
+          <div className="document-card__metadata-field">
+            <label><Clock size={12} /> Version</label>
+            {isEditing ? (
+              <input
+                type="text"
+                value={metadata.version}
+                onChange={(e) => setMetadata(prev => ({ ...prev, version: e.target.value }))}
+                placeholder="e.g., v1.0, Rev A"
+                className="document-card__input"
+              />
+            ) : (
+              <span className="document-card__value">{metadata.version || 'Not set'}</span>
+            )}
+          </div>
+
+          {/* Tags */}
+          <div className="document-card__metadata-field">
+            <label><Tag size={12} /> Tags</label>
+            <div className="document-card__tags">
+              {metadata.tags?.map((tag, idx) => (
+                <span key={idx} className="document-card__tag">
+                  {tag}
+                  {isEditing && (
+                    <button onClick={() => handleRemoveTag(tag)} className="document-card__tag-remove">
+                      <X size={10} />
+                    </button>
+                  )}
+                </span>
+              ))}
+              {isEditing && (
+                <div className="document-card__tag-input">
+                  <input
+                    type="text"
+                    value={newTag}
+                    onChange={(e) => setNewTag(e.target.value)}
+                    onKeyPress={(e) => e.key === 'Enter' && handleAddTag()}
+                    placeholder="Add tag..."
+                    className="document-card__input document-card__input--small"
+                  />
+                  <button onClick={handleAddTag} className="document-card__tag-add">+</button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Notes */}
+          <div className="document-card__metadata-field">
+            <label><MessageSquare size={12} /> Notes</label>
+            {isEditing ? (
+              <textarea
+                value={metadata.notes}
+                onChange={(e) => setMetadata(prev => ({ ...prev, notes: e.target.value }))}
+                placeholder="Add notes or comments about this document..."
+                className="document-card__textarea"
+                rows={3}
+              />
+            ) : (
+              <span className="document-card__value document-card__value--notes">{metadata.notes || 'No notes'}</span>
+            )}
+          </div>
         </div>
       )}
     </div>

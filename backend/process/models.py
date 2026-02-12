@@ -66,6 +66,19 @@ class Document(models.Model):
     category = models.CharField(max_length=50, choices=CATEGORY_CHOICES, default='other', blank=True)
     uploaded_at = models.DateTimeField(auto_now_add=True)
     is_processed = models.BooleanField(default=False) # To track if vectorization is done
+    
+    # Document metadata and organization
+    tags = models.JSONField(default=list, blank=True)  # List of custom tags: ["Revision A", "Q1-2026", "Approved"]
+    notes = models.TextField(blank=True, default='')  # User annotations/comments
+    version = models.CharField(max_length=50, blank=True, default='')  # e.g., "v1.0", "Rev A", "2026-Q1"
+    revision_date = models.DateTimeField(null=True, blank=True)  # When this version was published
+    previous_version = models.ForeignKey(
+        'self', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True, 
+        related_name='next_versions'
+    )  # Link to previous document version
 
     def save(self, *args, **kwargs):
         if not self.filename:

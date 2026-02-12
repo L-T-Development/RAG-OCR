@@ -51,6 +51,35 @@ export const api = {
     return { ok: res.ok, data: await res.json() };
   },
 
+  // Document Metadata
+  async getDocumentMetadata(docId) {
+    const res = await fetch(`${API_BASE}/documents/${docId}/metadata/`);
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  async updateDocumentMetadata(docId, metadata) {
+    const res = await fetch(`${API_BASE}/documents/${docId}/metadata/`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(metadata),
+    });
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  async linkDocumentVersion(docId, previousVersionId) {
+    const res = await fetch(`${API_BASE}/documents/${docId}/link-version/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ previous_version_id: previousVersionId }),
+    });
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  async getDocumentVersionHistory(docId) {
+    const res = await fetch(`${API_BASE}/documents/${docId}/versions/`);
+    return { ok: res.ok, data: await res.json() };
+  },
+
   // Quick Upload - auto-creates thread named after PDF
   async quickUpload(file, category = 'other') {
     const formData = new FormData();
