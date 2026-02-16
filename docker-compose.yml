@@ -1,0 +1,51 @@
+services:
+  # Django backend (uses host Ollama)
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: ragocr-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - backend_data:/app/data
+      - backend_pdfs:/app/pdfs
+      - backend_chroma:/app/local_chroma_db
+      - backend_media:/app/media
+    environment:
+      - OLLAMA_API_BASE=http://host.docker.internal:11434
+      - DJANGO_SETTINGS_MODULE=ragocr.settings
+      - DEBUG=True
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - ragocr-network
+    restart: unless-stopped
+
+  # React frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ragocr-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - ragocr-network
+    restart: unless-stopped
+
+volumes:
+  backend_data:
+    driver: local
+  backend_pdfs:
+    driver: local
+  backend_chroma:
+    driver: local
+  backend_media:
+    driver: local
+
+networks:
+  ragocr-network:
+    driver: bridge

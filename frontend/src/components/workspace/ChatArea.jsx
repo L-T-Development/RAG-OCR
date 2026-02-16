@@ -205,6 +205,31 @@ function Message({ message, isUser }) {
           <SourcesPanel sources={message.sources} chunks={message.chunks} />
         )}
 
+        {/* Suggested Questions - NotebookLM style */}
+        {!isUser && message.suggested_questions && message.suggested_questions.length > 0 && (
+          <div className="message__suggested-questions">
+            <div className="suggested-questions__header">
+              <Sparkles size={14} />
+              <span>Suggested questions</span>
+            </div>
+            <div className="suggested-questions__list">
+              {message.suggested_questions.map((question, idx) => (
+                <button
+                  key={idx}
+                  className="suggested-question__item"
+                  onClick={() => {
+                    setInputValue(question);
+                    textareaRef.current?.focus();
+                  }}
+                  title="Click to ask this question"
+                >
+                  {question}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="message__meta">
           <span>{message.timestamp || 'Just now'}</span>
         </div>
@@ -319,14 +344,12 @@ export function ChatArea({
 
   // Select file from @ picker
   const handleSelectFile = (doc) => {
-    // Add to selected files if not already selected
-    if (!selectedFiles.find((f) => f.id === doc.id)) {
-      setSelectedFiles((prev) => [...prev, doc]);
-    }
-
-    // Remove @ and filter text from input
+    // Insert @filename directly into the input text
     const lastAtPos = inputValue.lastIndexOf('@');
-    const newValue = inputValue.slice(0, lastAtPos).trimEnd();
+    const beforeAt = inputValue.slice(0, lastAtPos);
+    const afterAt = inputValue.slice(lastAtPos + 1 + fileFilterText.length);
+    const newValue = `${beforeAt}@${doc.name} ${afterAt}`;
+    
     setInputValue(newValue);
     setShowFilePicker(false);
     setFileFilterText('');
@@ -342,13 +365,8 @@ export function ChatArea({
     e?.preventDefault();
     if (!inputValue.trim() || isLoading || disabled) return;
 
-    // Build query with @filename tags for selected files
-    // Backend expects @filename.pdf in the query text itself
-    let query = inputValue.trim();
-    if (selectedFiles.length > 0) {
-      const fileTags = selectedFiles.map((f) => `@${f.name}`).join(' ');
-      query = `${fileTags} ${query}`;
-    }
+    // Send query as-is (already contains @filename tags in the text)
+    const query = inputValue.trim();
 
     onSendMessage(query);
     setInputValue('');
@@ -484,24 +502,8 @@ export function ChatArea({
       </div>
 
       <div className="chat-area__input-container">
-        {/* Selected Files Indicator */}
-        {selectedFiles.length > 0 && (
-          <div className="chat-area__selected-files">
-            {selectedFiles.map((file) => (
-              <span key={file.id} className="chat-area__selected-file">
-                <FileText size={12} />
-                {file.name}
-                <button
-                  className="chat-area__selected-file-remove"
-                  onClick={() => handleRemoveFile(file.id)}
-                >
-                  <X size={12} />
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
-
+        {/* Selected Files Indicator - Now files appear directly in input text */}
+        
         {/* @ File Picker */}
         {showFilePicker && documents.length > 0 && (
           <div className="chat-area__file-picker">

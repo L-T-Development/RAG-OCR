@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Sidebar, ChatArea, DocumentPanel, DropZone } from '../components/workspace';
 import { CategorySelector } from '../components/workspace/CategorySelector';
@@ -9,6 +9,7 @@ import './Workspace.css';
 
 export function Workspace() {
   const navigate = useNavigate();
+  const hasAttemptedRestore = useRef(false);
   
   // Thread state
   const [threads, setThreads] = useState([]);
@@ -55,23 +56,27 @@ export function Workspace() {
 
   // Auto-select last used thread on mount (works for any nesting level)
   useEffect(() => {
+    if (hasAttemptedRestore.current) return;
+    
     const lastThreadId = localStorage.getItem('lastThreadId');
     const lastThreadName = localStorage.getItem('lastThreadName');
     
-    if (lastThreadId && threads.length > 0 && !currentThreadId) {
+    if (lastThreadId && threads.length > 0) {
       const thread = findThreadById(threads, lastThreadId);
       if (thread) {
         // Thread exists at any level - restore it
         console.log('[Workspace] Restoring thread:', thread.name, 'ID:', thread.id);
         handleSelectThread(thread.id, thread.name || lastThreadName);
+        hasAttemptedRestore.current = true;
       } else {
         console.log('[Workspace] Saved thread not found, clearing localStorage');
         localStorage.removeItem('lastThreadId');
         localStorage.removeItem('lastThreadName');
+        hasAttemptedRestore.current = true;
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threads.length]); // Only trigger when threads are first loaded
+  }, [threads]); // Only trigger when threads are loaded
 
   const fetchThreads = async () => {
     try {

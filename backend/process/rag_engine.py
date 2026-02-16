@@ -31,8 +31,10 @@ from .eval_utils import (
 # --- CONFIGURATION ---
 CHROMA_PATH = "./local_chroma_db"
 TABLES_DB_PATH = "./tables.db"
-OLLAMA_API = "http://localhost:11434/api/generate"
-OLLAMA_EMBED_API = "http://localhost:11434/api/embeddings"
+# Read Ollama URL from environment variable or use default
+OLLAMA_BASE_URL = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
+OLLAMA_API = f"{OLLAMA_BASE_URL}/api/generate"
+OLLAMA_EMBED_API = f"{OLLAMA_BASE_URL}/api/embeddings"
 DEFAULT_LLM_MODEL = "llama3.1:8b"
 DEFAULT_EMBEDDING_PROVIDER = "ollama"  # "sentence-transformers" or "ollama"
 DEFAULT_EMBEDDING_MODEL = "models/all-MiniLM-L6-v2"  # sentence-transformers path
@@ -105,10 +107,13 @@ def get_llm_models_list():
     models.sort(key=lambda x: tier_order.get(x["tier"], 99))
     return models
 
-# Retrieval tuning (SAFE DEFAULTS)
-CANDIDATE_K = 10
+# Retrieval tuning - Adaptive context based on query complexity
+CANDIDATE_K = 50  # Retrieve many candidates for comprehensive search (increased for large files)
 SIMILARITY_THRESHOLD = 0.55
-MAX_FINAL_CHUNKS = 5
+MAX_FINAL_CHUNKS = 30  # Use many chunks for full context understanding (increased from 20)
+
+# For complex queries or comparisons, we can retrieve even more
+MAX_CHUNKS_LARGE_QUERY = 50  # For multi-file comparisons or comprehensive queries
 
 # ChromaDB batch size limit (default is 5461)
 CHROMA_BATCH_SIZE = 5000
@@ -864,7 +869,7 @@ def is_table_continuation(previous_table, current_table):
 
 def _store_merged_table(merged_table, doc_id, thread_id, parent_id, filename):
     """
-    Store a merged multi-page table to the database and optionally embed in ChromaDB.
+    Store a merged multi-page table to the database and embed in ChromaDB for semantic search.
     """
     # Generate table_id based on the starting page
     page_num = merged_table['page_num']
@@ -893,13 +898,38 @@ def _store_merged_table(merged_table, doc_id, thread_id, parent_id, filename):
         table_data=merged_table['data']
     )
     
-    # For single-instance tables, embed in ChromaDB
+    # Classify table and embed in ChromaDB for semantic search
     rows = merged_table['data'][1:] if len(merged_table['data']) > 1 else merged_table['data']
     table_type = classify_table_type(merged_table['headers'], rows, merged_table['row_count'], merged_table['column_count'])
     
-    if table_type in ['key_value', 'single_row', 'single_cell']:
-        # This will be handled by the embedding logic in process_pdf if needed
-        pass
+    # Generate text representation for embedding
+    text_repr = f"Table {merged_table['index'] + 1} (Pages {page_range}):\n"
+    if merged_table['headers']:
+        text_repr += "Columns: " + " | ".join(str(h) for h in merged_table['headers'] if h) + "\n"
+    
+    # Add sample rows for semantic search context
+    sample_rows = rows[:5]  # First 5 rows for embedding
+    for row in sample_rows:
+        text_repr += " | ".join(str(cell) for cell in row if cell) + "\n"
+    
+    if len(rows) > 5:
+        text_repr += f"... and {len(rows) - 5} more rows\n"
+    
+    # Return the text representation to be added to ChromaDB
+    return {
+        'text': text_repr.strip(),
+        'metadata': {
+            'thread_id': str(thread_id),
+            'parent_id': str(parent_id) if parent_id else "none",
+            'source': filename,
+            'page': merged_table['start_page'],
+            'type': 'table',
+            'table_type': table_type,
+            'row_count': merged_table['row_count'],
+            'column_count': merged_table['column_count']
+        },
+        'id': table_id
+    }
 
 
 # ---------------- PDF INGESTION ----------------
@@ -922,6 +952,7 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
     text_chunks = []
     metadatas = []
     ids = []
+    table_embeddings = []  # Store table data for embedding
     table_count = 0
     chunk_count = 0
     total_pages = len(doc)
@@ -973,9 +1004,10 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
                 else:
                     # Store any accumulated previous table
                     if previous_table:
-                        _store_merged_table(
+                        table_data = _store_merged_table(
                             previous_table, doc_id, thread_id, parent_id, filename
                         )
+                        table_embeddings.append(table_data)
                         table_count += 1
                     
                     # Start tracking new table
@@ -996,15 +1028,24 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
 
     # Store any remaining accumulated table
     if previous_table:
-        _store_merged_table(
+        table_data = _store_merged_table(
             previous_table, doc_id, thread_id, parent_id, filename
         )
+        table_embeddings.append(table_data)
         table_count += 1
 
     doc.close()
 
     if merged_table_count > 0:
         print(f"[RAG] ✓ Merged {merged_table_count} table continuations across pages")
+
+    # Add table content to chunks for embedding in ChromaDB
+    if table_embeddings:
+        print(f"[RAG] Adding {len(table_embeddings)} tables to ChromaDB for semantic search")
+        for table_data in table_embeddings:
+            text_chunks.append(table_data['text'])
+            metadatas.append(table_data['metadata'])
+            ids.append(table_data['id'])
 
     if not text_chunks:
         print("[RAG] No valid text chunks found.")
@@ -1047,7 +1088,8 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
     db_time = time.time() - db_start
     end_time = time.time()
 
-    print(f"[RAG] ✓ Completed in {end_time - start_time:.1f}s | {len(text_chunks)} chunks + {table_count} tables stored")
+    text_only_chunks = len(text_chunks) - len(table_embeddings)
+    print(f"[RAG] ✓ Completed in {end_time - start_time:.1f}s | {text_only_chunks} text chunks + {table_count} tables embedded in ChromaDB")
     return {"text_chunks": len(text_chunks), "table_chunks": table_count}
 
 
@@ -1421,76 +1463,79 @@ def detect_table_query_intent(query_text):
     """
     Detect if query is asking for table/spec/numeric data.
     Returns True if table lookup should be prioritized.
+    
+    STRICT MODE: Only triggers on explicit part/drawing numbers or specific table keywords
     """
     query_lower = query_text.lower()
 
-    # Keywords that strongly indicate table lookup
+    # STRICT: Only explicit part/drawing number keywords
+    explicit_part_keywords = [
+        'drawing number', 'part number', 'drg number', 'item number',
+        'part no', 'drg no', 'drawing no', 'item no',
+        'p/n:', 'drg:', 'part#', 'drawing#'
+    ]
+    
+    # Keywords for structured data (keep these for table queries)
     table_keywords = [
-        'table', 'specification', 'spec', 'parameter', 'value', 'property',
-        'attribute', 'dimension', 'measurement', 'characteristic', 'feature',
-        'configuration', 'setting', 'rating', 'capacity', 'range', 'limit',
-        'requirement', 'criteria', 'threshold', 'tolerance', 'standard',
-        'available', 'availability', 'stock', 'part', 'nsn', 'model', 'code',
-        'number', 'serial', 'item', 'component', 'product',
-        'drg', 'dwg', 'drawing', 'nomenclature', 'ref', 'reference',
+        'table', 'specification', 'spec',
+        'available', 'availability', 'stock',
         'plate', 'sr. no', 'sr.no', 'srno', 'sl. no', 'sl.no', 'slno'
     ]
 
-    # Question patterns for data lookup
-    data_patterns = [
-        r'what\s+(is|are)\s+the\s+\w+',
-        r'how\s+much',
-        r'how\s+many',
-        r'show(\s+me)?(\s+all)?',
-        r'list(\s+all)?(\s+the)?',
-        r'find(\s+all)?(\s+the)?',
-        r'get(\s+all)?(\s+the)?',
-        r'display(\s+all)?(\s+the)?',
-        r'give(\s+me)?(\s+all)?',
-        r'is\s+it\s+available',
-        r'is\s+there',
-        r'do\s+you\s+have'
+    # STRICT patterns: Only match actual part number queries
+    explicit_patterns = [
+        r'\b(find|search|look\s+for|get|show|what\s+is)\s+(the\s+)?(part|drawing|drg|item)\s+(number|no|#)',
+        r'\bpart\s+number\s*:',
+        r'\bdrawing\s+number\s*:',
     ]
 
-    # Part number / alphanumeric code patterns (e.g., 410A223100000, ABC-123-XYZ)
-    code_patterns = [
-        r'\b\d{5,}\b',  # Long numeric codes (5+ digits)
-        r'\b[A-Z0-9]{6,}\b',  # Alphanumeric codes (6+ chars)
-        r'\b\d+[A-Z]+\d+\b',  # Mixed digit-letter-digit
-        r'\b[A-Z]+\d+[A-Z]*\d*\b',  # Letter-digit combinations
-        r'\b\w+[-_]\w+[-_]\w+\b'  # Hyphen/underscore separated codes
+    # STRICT code patterns: Must have BOTH letters AND digits in specific formats
+    # Examples: ABC-123, 12A-456B, P123, 410A223100000
+    strict_code_patterns = [
+        r'\b\d{10,}\b',  # Very long numeric codes (10+ digits for specificity)
+        r'\b[A-Z]{1,4}[-/]?\d{2,}[A-Z]?\b',  # ABC-123 or P123 format
+        r'\b\d{2,}[-/][A-Z]{1,4}\b',  # 123-ABC format
+        r'\b[A-Z]\d{3,}[A-Z]\d+\b',  # Mixed like P123A456
     ]
 
+    has_explicit_keyword = any(keyword in query_lower for keyword in explicit_part_keywords)
     has_table_keyword = any(kw in query_lower for kw in table_keywords)
-    has_data_pattern = any(re.search(pattern, query_lower) for pattern in data_patterns)
-    has_code_pattern = any(re.search(pattern, query_text, re.IGNORECASE) for pattern in code_patterns)
+    has_explicit_pattern = any(re.search(pattern, query_lower) for pattern in explicit_patterns)
+    has_code_pattern = any(re.search(pattern, query_text, re.IGNORECASE) for pattern in strict_code_patterns)
 
-    is_table_query = has_table_keyword or has_data_pattern or has_code_pattern
+    is_table_query = has_explicit_keyword or has_table_keyword or has_explicit_pattern or has_code_pattern
 
     if has_code_pattern:
-        print(f"[RAG] Detected code/part number pattern in query - triggering table search")
+        print(f"[RAG] Detected specific part/code pattern in query - triggering table search")
+    if has_explicit_keyword or has_explicit_pattern:
+        print(f"[RAG] Detected explicit table search keywords - triggering table search")
 
     return is_table_query
 
 
 def extract_file_filter(query_text):
     """
-    Extract @filename from query if present.
+    Extract @filename mentions from query if present.
     Supports: .pdf, .xlsx, .xls, .docx
     Handles filenames with spaces (e.g., @test doc 1.pdf)
-    Returns (clean_query, filename or None)
+    Returns (clean_query, list of filenames or None)
     """
-    # Match any supported file type - handles filenames with spaces
+    # Match all @filename mentions in the query
     # Pattern: @ followed by anything until .ext (where ext is pdf/xlsx/xls/docx)
-    match = re.search(r'@(.+?\.(pdf|xlsx|xls|docx))(?:\s|$)', query_text, re.IGNORECASE)
+    matches = re.findall(r'@(.+?\.(pdf|xlsx|xls|docx))(?:\s|$)', query_text, re.IGNORECASE)
 
-    if not match:
+    if not matches:
         return query_text, None
 
-    filename = match.group(1).strip()
-    # Remove the @filename from query
-    cleaned_query = re.sub(r'@' + re.escape(filename), '', query_text, flags=re.IGNORECASE).strip()
-    return cleaned_query, filename
+    filenames = [match[0].strip() for match in matches]
+    # Remove all @filename mentions from query
+    cleaned_query = query_text
+    for filename in filenames:
+        cleaned_query = re.sub(r'@' + re.escape(filename), '', cleaned_query, flags=re.IGNORECASE)
+    cleaned_query = cleaned_query.strip()
+    
+    # Return list if multiple files, single string if one file (for backward compatibility)
+    return cleaned_query, filenames if len(filenames) > 1 else filenames[0]
 
 
 def extract_search_terms(query_text):
@@ -1773,8 +1818,74 @@ def get_all_ancestor_thread_ids(thread_id):
     return ancestor_ids
 
 
+def generate_suggested_questions(answer, context_text, query_text, sources):
+    """
+    Generate 3-4 suggested follow-up questions based on the answer and context.
+    NotebookLM-style intelligent question suggestions.
+    """
+    try:
+        current_llm = get_current_llm_model()
+        
+        # Build concise context for question generation
+        source_files = list(set([s.split(' (')[0] for s in sources]))
+        source_context = ', '.join(source_files[:3])  # First 3 files
+        
+        prompt = f"""Based on this Q&A interaction, suggest 3-4 relevant follow-up questions the user might want to ask.
+
+**Original Question:** {query_text}
+
+**Answer Provided:** {answer[:500]}...
+
+**Available Documents:** {source_context}
+
+**Instructions:**
+- Generate 3-4 concise, specific questions
+- Questions should dig deeper into the topic or explore related aspects
+- Keep questions natural and conversational
+- Each question should be answerable from the uploaded documents
+- Format: One question per line, no numbering
+- Maximum 15 words per question
+
+**Example good questions:**
+- What are the technical specifications mentioned?
+- How does this compare with the other document?
+- Are there any related procedures described?
+- What are the key differences between these items?"""
+
+        payload = {
+            "model": current_llm,
+            "prompt": prompt,
+            "stream": False,
+            "temperature": 0.7,  # Higher creativity for varied questions
+            "options": {
+                "num_predict": 200,  # Short responses only
+                "num_ctx": 4096,
+            },
+        }
+
+        response = requests.post(OLLAMA_API, json=payload, timeout=30).json()  # 30s for quick suggestions
+        suggestions_text = response.get("response", "")
+        
+        # Parse questions from response
+        lines = [line.strip() for line in suggestions_text.split('\n') if line.strip()]
+        questions = []
+        
+        for line in lines[:4]:  # Max 4 questions
+            # Remove numbering, bullets, or markers
+            cleaned = re.sub(r'^[\d\.\-\*\•]\s*', '', line)
+            if len(cleaned) > 10 and len(cleaned) < 150 and '?' in cleaned or cleaned.endswith('?'):
+                questions.append(cleaned)
+        
+        print(f"[RAG] Generated {len(questions)} suggested questions")
+        return questions[:4]  # Return max 4
+        
+    except Exception as e:
+        print(f"[RAG] Error generating suggested questions: {e}")
+        return []
+
+
 # ---------------- QUERY RAG ----------------
-def query_rag(query_text, current_thread_id, parent_thread_id=None):
+def query_rag(query_text, current_thread_id, parent_thread_id=None, conversation_history=""):
     # Ensure model is loaded
     if not model_manager.is_ready():
         model_manager.load_model()
@@ -1795,13 +1906,17 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
     print("\n>>> query_rag CALLED")
     print(">>> current_thread_id:", current_thread_id)
     print(">>> parent_thread_id:", parent_thread_id)
+    print(">>> conversation_history:", "YES" if conversation_history else "NO")
 
     # --- FILE SCOPE FILTER (@filename) ---
     query_text, file_filter = extract_file_filter(query_text)
     conditions = []
 
     if file_filter:
-        print(f"[RAG] File scoped query detected: {file_filter}")
+        if isinstance(file_filter, list):
+            print(f"[RAG] Multi-file scoped query detected: {file_filter}")
+        else:
+            print(f"[RAG] File scoped query detected: {file_filter}")
 
     # --- QUERY INTENT DETECTION ---
     is_table_query = detect_table_query_intent(query_text)
@@ -1818,13 +1933,26 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
         base_filter = {"$or": thread_filters}
     else:
         base_filter = {"thread_id": {"$eq": str(current_thread_id)}}
+    
+    # Handle multiple file filters (for comparisons)
     if file_filter:
-        where_filter = {
-        "$and": [
-            base_filter,
-            {"source": {"$eq": file_filter}}
-        ]
-    }
+        if isinstance(file_filter, list):
+            # Multiple files: retrieve from ALL mentioned files
+            file_conditions = [{"source": {"$eq": fname}} for fname in file_filter]
+            where_filter = {
+                "$and": [
+                    base_filter,
+                    {"$or": file_conditions}
+                ]
+            }
+        else:
+            # Single file: filter to that file only
+            where_filter = {
+                "$and": [
+                    base_filter,
+                    {"source": {"$eq": file_filter}}
+                ]
+            }
     else:
         where_filter = base_filter
     print("[RAG] Filter:", where_filter)
@@ -1875,8 +2003,20 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
     filtered_chunks = []
     if dists:
         best_distance = dists[0]  # Chroma returns sorted distances
-        RELATIVE_MARGIN = 0.35 if file_filter else 0.25
-        MAX_ABSOLUTE_CAP = 2.2 if file_filter else 1.2
+        # More lenient filtering for multi-file comparisons (70% margin)
+        # Standard: 60% for single file, 50% for general queries
+        is_multi_file = isinstance(file_filter, list) and len(file_filter) > 1
+        if is_multi_file:
+            RELATIVE_MARGIN = 0.70
+            MAX_ABSOLUTE_CAP = 1200.0
+        elif file_filter:
+            RELATIVE_MARGIN = 0.60
+            MAX_ABSOLUTE_CAP = 1000.0
+        else:
+            RELATIVE_MARGIN = 0.50
+            MAX_ABSOLUTE_CAP = 800.0
+        
+        print(f"[DEBUG-RETRIEVAL] Multi-file comparison: {is_multi_file}")
         print(f"[DEBUG-RETRIEVAL] Best Distance: {best_distance:.4f}")
         print(f"[DEBUG-RETRIEVAL] Relative Margin: {RELATIVE_MARGIN}")
         print(f"[DEBUG-RETRIEVAL] Absolute Cap: {MAX_ABSOLUTE_CAP}")
@@ -1891,20 +2031,66 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
             if passed:
                 filtered_chunks.append((doc, meta, dist))
 
-# Fallback: always ensure at least 1 chunk if any results exist
+# Fallback: ensure good context even if filter is too strict (use top 5 chunks minimum)
     if not filtered_chunks and docs:
-        print(f"[DEBUG-RETRIEVAL] No chunks passed filter, using fallback (1 chunk)")
-        filtered_chunks = list(zip(docs, metas, dists))[:1]  # At least 1 chunk
+        print(f"[DEBUG-RETRIEVAL] No chunks passed filter, using fallback (top 5 chunks)")
+        filtered_chunks = list(zip(docs, metas, dists))[:5]  # Use top 5 for better context
+
+    # --- MULTI-FILE COMPARISON: Ensure balanced retrieval from all files ---
+    is_multi_file = isinstance(file_filter, list) and len(file_filter) > 1
+    if is_multi_file:
+        print(f"\n[DEBUG-MULTI-FILE] Ensuring balanced retrieval from {len(file_filter)} files")
+        chunks_by_file = {}
+        for doc, meta, dist in filtered_chunks:
+            source = meta.get('source', 'unknown')
+            if source not in chunks_by_file:
+                chunks_by_file[source] = []
+            chunks_by_file[source].append((doc, meta, dist))
+        
+        print(f"[DEBUG-MULTI-FILE] Chunks per file: {[(k, len(v)) for k, v in chunks_by_file.items()]}")
+        
+        # Ensure minimum chunks from each mentioned file
+        MIN_CHUNKS_PER_FILE = 3
+        balanced_chunks = []
+        
+        for filename in file_filter:
+            if filename in chunks_by_file:
+                file_chunks = sorted(chunks_by_file[filename], key=lambda x: x[2])[:MIN_CHUNKS_PER_FILE]
+                balanced_chunks.extend(file_chunks)
+                print(f"[DEBUG-MULTI-FILE] Added {len(file_chunks)} chunks from {filename}")
+            else:
+                print(f"[DEBUG-MULTI-FILE] WARNING: No chunks found for {filename}")
+        
+        # Add remaining best chunks to reach MAX_FINAL_CHUNKS
+        remaining_slots = MAX_FINAL_CHUNKS - len(balanced_chunks)
+        if remaining_slots > 0:
+            # Get chunks not already in balanced_chunks
+            balanced_chunk_ids = set((m.get('id') for _, m, _ in balanced_chunks if 'id' in m))
+            extra_chunks = [c for c in filtered_chunks if c[1].get('id') not in balanced_chunk_ids][:remaining_slots]
+            balanced_chunks.extend(extra_chunks)
+            print(f"[DEBUG-MULTI-FILE] Added {len(extra_chunks)} extra chunks for total context")
+        
+        filtered_chunks = balanced_chunks
+        print(f"[DEBUG-MULTI-FILE] Final balanced chunks: {len(filtered_chunks)}")
+
+    # Adaptive chunk limit based on query complexity
+    is_complex_query = is_multi_file or len(query_text.split()) > 20 or '?' in query_text
+    chunk_limit = MAX_CHUNKS_LARGE_QUERY if is_complex_query else MAX_FINAL_CHUNKS
+    
+    print(f"[RAG] Query complexity: {'Complex' if is_complex_query else 'Standard'} | Chunk limit: {chunk_limit}")
 
     filtered_chunks.sort(key=lambda x: x[2])
-    final_chunks = filtered_chunks[:MAX_FINAL_CHUNKS]
+    final_chunks = filtered_chunks[:chunk_limit]
 
-    # Ensure at least 1 chunk if any documents were retrieved
-    if not final_chunks and docs:
+    # Ensure at least 5 chunks if any documents were retrieved (for comprehensive answers)
+    if len(final_chunks) < 5 and len(docs) >= 5:
+        print(f"[DEBUG-RETRIEVAL] Only {len(final_chunks)} chunks in final set, expanding to 5 for better context")
+        final_chunks = list(zip(docs, metas, dists))[:5]
+    elif not final_chunks and docs:
         print(f"[DEBUG-RETRIEVAL] Empty final_chunks, using fallback (1 chunk)")
         final_chunks = list(zip(docs, metas, dists))[:1]
 
-    print(f"[RAG] Final chunks after filtering: {len(final_chunks)}")
+    print(f"[RAG] Final chunks after filtering: {len(final_chunks)} (used {len(final_chunks) * 100 / max(len(docs), 1):.1f}% of candidates)")
     print(f"[DEBUG-RETRIEVAL] Final Chunk IDs: {[meta.get('source', 'N/A') + ':' + str(meta.get('page', 'N/A')) for _, meta, _ in final_chunks]}")
 
     # --- GUARDRAIL ---
@@ -1924,22 +2110,55 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
     used_docs = []
     chunks_with_metadata = []
 
-    for doc, meta, sim in final_chunks:
-        source_str = f"{meta['source']} (Page {meta['page']})"
-        context_text += f"--- Source: {source_str} ---\n{doc}\n\n"
-        sources.append(source_str)
-        used_docs.append(doc)
+    # For multi-file comparisons, organize chunks by source file (NotebookLM style)
+    if is_multi_file:
+        print(f"[DEBUG-CONTEXT] Organizing context by source file for comparison")
+        chunks_by_source = {}
+        for doc, meta, sim in final_chunks:
+            source = meta['source']
+            if source not in chunks_by_source:
+                chunks_by_source[source] = []
+            chunks_by_source[source].append((doc, meta, sim))
+        
+        # Build context organized by file
+        for source_file in file_filter:
+            if source_file in chunks_by_source:
+                context_text += f"\n{'='*60}\n📄 DOCUMENT: {source_file}\n{'='*60}\n\n"
+                for doc, meta, sim in chunks_by_source[source_file]:
+                    page = meta.get('page', 'N/A')
+                    context_text += f"[Page {page}]\n{doc}\n\n"
+                    source_str = f"{meta['source']} (Page {page})"
+                    sources.append(source_str)
+                    used_docs.append(doc)
+                    
+                    chunk_info = {
+                        "text": doc,
+                        "source": meta['source'],
+                        "page": page,
+                        "similarity_score": round(float(1 - sim), 3),
+                        "type": "text"
+                    }
+                    chunks_with_metadata.append(chunk_info)
+        
+        print(f"[DEBUG-CONTEXT] Organized {len(final_chunks)} chunks across {len(chunks_by_source)} files")
+    else:
+        # Standard context assembly for single-file or non-comparison queries
+        for doc, meta, sim in final_chunks:
+            source_str = f"{meta['source']} (Page {meta['page']})"
+            context_text += f"--- Source: {source_str} ---\n{doc}\n\n"
+            sources.append(source_str)
+            used_docs.append(doc)
 
-        # Store chunk with metadata for frontend
-        chunk_info = {
-            "text": doc,
-            "source": meta['source'],
-            "page": meta['page'],
-            "similarity_score": round(float(1 - sim), 3),
-            "type": "text"
-        }
+            # Store chunk with metadata for frontend
+            chunk_info = {
+                "text": doc,
+                "source": meta['source'],
+                "page": meta['page'],
+                "similarity_score": round(float(1 - sim), 3),
+                "type": "text"
+            }
 
-        chunks_with_metadata.append(chunk_info)
+            chunks_with_metadata.append(chunk_info)
 
     # --- DUAL RETRIEVAL STRATEGY ---
 
@@ -2267,27 +2486,55 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
                         for row in table.get('data', [])[:5]:
                             table_context += f"Row: {' | '.join(str(cell) for cell in row)}\n"
 
-            # Build intelligent prompt - OPTIMIZED FOR SMALLER LLMs
-            system_prompt = """You are a precise document assistant. Answer questions using ONLY the provided data.
+            # Build intelligent prompt - OPTIMIZED FOR BETTER ACCURACY WITH CONVERSATION SUPPORT
+            system_prompt = """You are a precise data analyst helping users extract information from tables in their documents (PDFs, Excel files, etc.).
 
-CRITICAL RULES:
-1. Use ONLY data from "EXACT MATCHES" section when available
-2. If user asks about "SUPPORT ROLLER", find the row where the name is EXACTLY "SUPPORT ROLLER", NOT "SUPPORT ROLLER FIXING" or similar
-3. NEVER confuse similar names - "SUPPORT ROLLER" and "SUPPORT ROLLER FIXING BRACKET" are DIFFERENT items
-4. Read the data carefully - each row has headers and values
-5. If no exact match exists, say "No exact match found for [term]"
-6. Be concise and direct"""
+CRITICAL RULES FOR ACCURACY:
+1. **Exact Match Priority**: When user asks about "X", find the row where the name/designation is EXACTLY "X"
+2. **Distinguish Similar Names**: "SUPPORT ROLLER" ≠ "SUPPORT ROLLER FIXING" ≠ "SUPPORT ROLLER BRACKET"
+   - These are DIFFERENT items even if names are similar
+3. **Use EXACT MATCHES FIRST**: Data marked "EXACT MATCH" takes precedence over "PARTIAL MATCH"
+4. **Read Headers Carefully**: Each row has specific columns - read headers to know what each value represents
+5. **Be Precise with Numbers**: Drawing numbers, part numbers, NSN codes - report them exactly as shown
+6. **Source Attribution**: Always mention which document/page the information comes from
+7. **Follow-up Questions**: If user refers to "it", "that", "same item" etc., use conversation history to identify what they're asking about
 
-            user_prompt = f"""QUESTION: {query_text}
+RESPONSE FORMAT:
+- Start with direct answer to the question
+- Include all relevant details from the matched row(s)
+- Format data clearly (e.g., "Drawing No: XXX | Part No: YYY | NSN: ZZZ")
+- If no exact match: Clearly state "No exact match found for '[term]'" - don't force a match
+- For follow-ups: Build on previous context naturally
 
-SEARCH TERMS:
-- Part Numbers: {search_terms['codes'] if search_terms['codes'] else 'None'}
-- Part Names: {search_terms['names'] if search_terms['names'] else 'None'}
+WHAT NOT TO DO:
+✗ Don't mix up similar names - verify EXACT match
+✗ Don't assume values - only use data from the matched row
+✗ Don't provide partial matches when user asks for specific item
+✗ Don't invent data not present in the tables"""
 
+            # Add conversation history if available
+            conversation_prefix = ""
+            if conversation_history:
+                conversation_prefix = f"""**Previous Conversation:**
+{conversation_history}
+
+---
+
+"""
+
+            user_prompt = f"""{conversation_prefix}**User's Current Question:**
+{query_text}
+
+**Search Terms Identified:**
+- Part Numbers/Codes: {search_terms['codes'] if search_terms['codes'] else 'None'}
+- Part Names/Designations: {search_terms['names'] if search_terms['names'] else 'None'}
+- Keywords: {search_terms['keywords'] if search_terms['keywords'] else 'None'}
+
+**Table Data ({len(sql_tables)} table(s) found):**
 {table_context}
 
-Answer the question using ONLY the EXACT MATCH data above.
-If the user asks about "X", use ONLY the row where the item name is EXACTLY "X"."""
+**Your Task:**
+Answer the user's question using the table data above. If searching for a specific item, use ONLY the row that EXACTLY matches the search term. Provide all relevant details from that row."""
 
             current_llm = get_current_llm_model()
             print(f"[RAG] Using LLM model: {current_llm}")
@@ -2301,7 +2548,8 @@ If the user asks about "X", use ONLY the row where the item name is EXACTLY "X".
                 "temperature": 0,
                 "options": {
                     "num_thread": 8,
-                    "num_ctx": 4096,
+                    "num_ctx": 16384,  # Maximum context for table data
+                    "num_predict": 2048,  # Allow comprehensive answers
                 },
                 "keep_alive": "5m",
             }
@@ -2321,6 +2569,9 @@ If the user asks about "X", use ONLY the row where the item name is EXACTLY "X".
                 print(f"[RAG] Intelligent answer generated in {total_time:.2f}s (LLM: {llm_time:.2f}s)")
                 print(f"[RAG] Memory: {start_memory:.1f}MB -> {end_memory:.1f}MB")
 
+                # Generate suggested follow-up questions
+                suggested_questions = generate_suggested_questions(answer, table_context, query_text,sources + table_locations)
+
                 return {
                     "answer": answer,
                     "sources": list(set(sources + table_locations)),
@@ -2328,7 +2579,8 @@ If the user asks about "X", use ONLY the row where the item name is EXACTLY "X".
                     "confidence": 95.0,
                     "confidence_label": "HIGH",
                     "retrieval_type": "sql_intelligent",
-                    "table_count": len(sql_tables)
+                    "table_count": len(sql_tables),
+                    "suggested_questions": suggested_questions
                 }
 
             except Exception as e:
@@ -2357,29 +2609,110 @@ If the user asks about "X", use ONLY the row where the item name is EXACTLY "X".
 
     # --- LLM CALL (for ChromaDB text results only) ---
     print(f"\n[RAG] Processing ChromaDB results with LLM evaluation...")
-    system_prompt = """You are a precise and helpful document assistant.
+    system_prompt = """You are an expert document analysis assistant helping users understand their uploaded files (PDFs, Excel, Word, and other documents).
 
-INSTRUCTIONS:
-- Answer questions ONLY using the provided context
--If the answer is not found in the context, say "I don't know based on the provided documents" dont suggest anything not in the context
-- Be concise but thorough in your responses
-- Never make up information or hallucinate facts
-- Quote relevant parts when appropriate
-- Structure longer answers with bullet points for clarity
-"""
+CORE RESPONSIBILITIES:
+1. Answer questions accurately using ONLY the provided context from user's documents
+2. Provide clear, detailed, and well-structured responses
+3. Help users find and understand information across multiple file types
+4. Reference specific pages and sources when providing answers
+5. MAINTAIN CONVERSATION CONTINUITY - remember previous questions and answers in this conversation
+
+HANDLING FOLLOW-UP QUESTIONS:
+✓ When user asks "what about X?" after discussing Y, understand X in context of the conversation
+✓ For pronouns (it, that, this, them), refer to what was previously discussed
+✓ For ambiguous questions, use conversation history to infer the topic
+✓ Build on previous answers - don't repeat information unless asked
+✓ If clarifying previous points, reference what was said before
+
+RESPONSE GUIDELINES:
+✓ Use ONLY information from the provided context - never make assumptions
+✓ If information is not in the context, clearly state: "I don't have information about [topic] in the uploaded documents"
+✓ Structure answers clearly with headings, bullet points, or numbered lists when appropriate
+✓ Quote relevant passages when they directly answer the question
+✓ Reference specific pages/sources: "According to [filename] page X..."
+✓ For technical content: Explain concepts clearly and include relevant details
+✓ For tables/data: Present information in an organized format
+✓ Be thorough but concise - provide complete answers without unnecessary filler
+
+COMPARISON QUERIES:
+When user asks to compare multiple documents:
+✓ Analyze content from ALL mentioned documents
+✓ Identify similarities, differences, and unique elements in each
+✓ Organize comparison clearly: "In [file1]... vs In [file2]..."
+✓ If documents have different content/topics, explain what each contains
+✓ If no direct overlap exists, still summarize what's in each document
+✓ Don't say "no information to compare" - always describe both documents
+
+WHAT NOT TO DO:
+✗ Never invent information not in the context
+✗ Don't suggest external resources or general knowledge
+✗ Don't say "based on my knowledge" - only use document content
+✗ Don't be vague - always provide specific details from the documents
+✗ Don't ignore parts of multi-part questions
+✗ Don't lose track of conversation context
+✗ For comparisons: Don't focus on only one document when multiple are mentioned
+
+Remember: You are analyzing the user's specific documents. Focus on extracting and presenting the information they've uploaded while maintaining natural conversation flow."""
 
     current_llm = get_current_llm_model()
     print(f"[RAG] Using LLM model: {current_llm}")
+    
+    # Build enhanced prompt with conversation history
+    conversation_prefix = ""
+    if conversation_history:
+        conversation_prefix = f"""**Conversation History:**
+{conversation_history}
+
+---
+
+"""
+    
+    # Detect if this is a comparison query across multiple files
+    is_multi_file_comparison = isinstance(file_filter, list) and len(file_filter) > 1
+    comparison_instruction = ""
+    if is_multi_file_comparison:
+        comparison_instruction = f"""
+
+**📋 COMPARISON MODE ACTIVATED**
+You are comparing {len(file_filter)} documents:
+{chr(10).join([f'  • {fname}' for fname in file_filter])}
+
+**How to structure your comparison:**
+1. **Introduction**: Briefly state what each document is about
+2. **Similarities**: What content, topics, or data points appear in both/all documents?
+3. **Differences**: What is unique to each document?
+4. **Key Findings**: Summarize the main comparison insights
+
+**Important:**
+- Analyze ALL documents mentioned, not just one
+- If documents cover completely different topics, that's valuable information - explain what each contains
+- Reference specific document names when discussing content: "In {file_filter[0]}..." vs "In {file_filter[1]}..."
+- Use clear headings to organize your comparison
+"""
+    
+    user_prompt = f"""{conversation_prefix}**User's Current Question:**
+{query_text}{comparison_instruction}
+
+**Relevant Information from Documents:**
+{context_text}
+
+**Instructions:**
+Provide a comprehensive answer to the user's current question using ONLY the information above. If this is a follow-up question, consider the conversation history to understand context. Structure your response clearly and reference specific sources/pages when possible."""
+
+    # Slightly higher temperature for comparison queries to allow more natural synthesis
+    temperature = 0.2 if is_multi_file_comparison else 0.1
 
     payload = {
         "model": current_llm,
-        "prompt": f"Context:\n{context_text}\nUser Query: {query_text}",
+        "prompt": user_prompt,
         "system": system_prompt,
         "stream": False,
-        "temperature": 0,
+        "temperature": temperature,
         "options": {
             "num_thread": 8,
-            "num_ctx": 4096,
+            "num_ctx": 16384,  # Maximum context window for full document understanding (16K tokens)
+            "num_predict": 2048,  # Allow longer responses
         },
         "keep_alive": "5m",
     }
@@ -2432,13 +2765,17 @@ INSTRUCTIONS:
         print(f"CPU Usage        : {process.cpu_percent(interval=0.1):.1f}%")
         print("==================================\n")
 
+        # Generate suggested follow-up questions (NotebookLM-style)
+        suggested_questions = generate_suggested_questions(answer, context_text, query_text, sources)
+
         return {
             "answer": answer,
             "sources": list(set(sources)),
             "chunks": chunks_with_metadata,
             "confidence": round(confidence, 1),
             "confidence_label": label,
-            "retrieval_type": "vector_semantic"
+            "retrieval_type": "vector_semantic",
+            "suggested_questions": suggested_questions
         }
 
     except Exception as e:
@@ -2537,14 +2874,14 @@ def summarize_document(doc_id=None, thread_id=None):
             word_limit = "150-250"
             detail_level = "concise"
             max_input_chunks = docs
-            timeout_seconds = 60
+            timeout_seconds = 300  # 5 minutes - no rush for accuracy
         elif total_chunks < 1500:
             # Medium Document (~100-500 pages)
             scale = "Medium"
             chunk_limit = 30  # Reduced from 50 for better performance
             word_limit = "300-500"
             detail_level = "detailed"
-            timeout_seconds = 120  # Increased timeout
+            timeout_seconds = 600  # 10 minutes - let it process thoroughly
             # Sample uniformly to get coverage
             step = max(1, total_chunks // chunk_limit)
             max_input_chunks = docs[::step][:chunk_limit]
@@ -2554,13 +2891,14 @@ def summarize_document(doc_id=None, thread_id=None):
             chunk_limit = 40  # Reduced from 80 for better performance
             word_limit = "600-1000"
             detail_level = "comprehensive and extensive"
-            timeout_seconds = 180  # Extended timeout for large docs
+            timeout_seconds = 900  # 15 minutes - large files need time
             # Sample uniformly
             step = max(1, total_chunks // chunk_limit)
             max_input_chunks = docs[::step][:chunk_limit]
 
         print(f"[SUMMARY] Document Scale: {scale} (Pages: {max_page}, Chunks: {total_chunks})")
         print(f"[SUMMARY] Generating {detail_level} summary ({word_limit} words) using {len(max_input_chunks)} chunks")
+        print(f"[SUMMARY] ⏱️  Estimated time: {timeout_seconds//60} minutes - processing will complete, please wait...")
 
         # Combine selected input chunks with safety checks
         valid_chunks = [chunk for chunk in max_input_chunks if chunk and chunk.strip()]
@@ -2580,7 +2918,7 @@ def summarize_document(doc_id=None, thread_id=None):
         if len(combined_text) > max_chars:
             combined_text = combined_text[:max_chars] + "\n... (truncated for processing)"
 
-        print(f"[SUMMARY] Processing {len(combined_text)} characters of content with {timeout_seconds}s timeout")
+        print(f"[SUMMARY] Processing {len(combined_text)} characters of content...")
 
         # Generate summary via LLM with dynamic prompt
         system_prompt = f"""You are a document summarization expert.

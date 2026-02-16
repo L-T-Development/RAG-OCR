@@ -323,10 +323,12 @@ def quick_upload(request):
 def chat_thread(request, thread_id):
     if request.method == 'POST':
         start_time = time.perf_counter()
+        print(f"[DEBUG-ENTRY] chat_thread POST received, thread_id={thread_id}")
 
         try:
             data = json.loads(request.body)
             query = data.get('query')
+            print(f"[DEBUG-ENTRY] Query received: {query[:100] if query else 'NONE'}")
 
             if not query:
                 return JsonResponse({'error': 'Query is required'}, status=400)
@@ -350,11 +352,13 @@ def chat_thread(request, thread_id):
                 conversation_context += f"User (current): {query}\n"
 
             # Save user message
-            ChatMessage.objects.create(
+            user_msg = ChatMessage.objects.create(
                 thread=thread,
                 role='user',
                 content=query
             )
+            print(f"[CHAT] Saved user message ID: {user_msg.id}, thread: {thread.id}")
+            print(f"[CHAT] Total messages in thread: {ChatMessage.objects.filter(thread=thread).count()}")
 
             # Check if query is asking to search in tables
             table_search_result = None
@@ -423,19 +427,51 @@ def chat_thread(request, thread_id):
                 if comparison_result:
                     table_search_result = comparison_result
             else:
-                # Detect table search intent
-                is_table_search = any(keyword in query_lower for keyword in [
-                    'match', 'find', 'search', 'look for', 'drawing number', 'part number',
-                    'drg', 'p/n', 'item number'
-                ])
+                # Detect table search intent - STRICT: only for explicit part/drawing number queries
+                is_table_search = False
                 
-                # Also detect if query looks like a code (part/drawing number) even without keywords
-                # Pattern: alphanumeric codes with at least 5 chars and contains digits
-                import re
-                code_pattern = r'\b([A-Z0-9\-/\.]{5,})\b'
-                potential_codes = re.findall(code_pattern, query, re.IGNORECASE)
-                if potential_codes and any(any(c.isdigit() for c in code) for code in potential_codes):
+                # Method 1: Explicit keywords for part/drawing numbers
+                explicit_keywords = [
+                    'drawing number', 'part number', 'drg number', 'item number',
+                    'part no', 'drg no', 'drawing no', 'item no',
+                    'p/n:', 'drg:', 'part#', 'drawing#'
+                ]
+                
+                if any(keyword in query_lower for keyword in explicit_keywords):
+                    print(f"[QUERY_ROUTING] Detected table search via explicit keyword")
                     is_table_search = True
+                
+                # Method 2: Explicit patterns like "find part number X" 
+                if not is_table_search:
+                    import re
+                    table_specific_patterns = [
+                        r'\b(find|search|look\s+for|get|show|what\s+is)\s+(the\s+)?(part|drawing|drg|item)\s+(number|no|#)',
+                        r'\bpart\s+number\s*:',
+                        r'\bdrawing\s+number\s*:',
+                    ]
+                    
+                    for pattern in table_specific_patterns:
+                        if re.search(pattern, query_lower):
+                            print(f"[QUERY_ROUTING] Detected table search via pattern: {pattern}")
+                            is_table_search = True
+                            break
+                
+                # Method 3: Query looks like a code (VERY specific)
+                # Only match if: has both letters and digits, follows typical part number format
+                # Examples: ABC-123, 12A-456B, P/N-12345
+                if not is_table_search:
+                    code_pattern = r'\b([A-Z]{1,4}[-/]?\d{2,}[A-Z]?|[A-Z]?\d{2,}[-/][A-Z]{1,4})\b'
+                    import re
+                    potential_codes = re.findall(code_pattern, query, re.IGNORECASE)
+                    if potential_codes:
+                        print(f"[QUERY_ROUTING] Detected table search via code pattern: {potential_codes}")
+                        is_table_search = True
+                
+                # Log the routing decision
+                if is_table_search:
+                    print(f"[QUERY_ROUTING] → TABLE SEARCH selected for query: {query[:100]}")
+                else:
+                    print(f"[QUERY_ROUTING] → RAG SEARCH selected for query: {query[:100]}")
                 
                 if is_table_search:
                     # Extract search term and type
@@ -466,17 +502,24 @@ def chat_thread(request, thread_id):
             
             # If table search found results, use that; otherwise use RAG
             if table_search_result and table_search_result.get('found'):
+                print(f"[QUERY_ROUTING] Using TABLE SEARCH results")
                 answer = _format_table_search_response(table_search_result)
                 sources = [{'page': p} for p in table_search_result.get('pages_with_matches', [])]
                 chunks = []
                 confidence = 0.95
                 confidence_label = 'High'
             else:
-                # Run standard RAG query
+                # Run standard RAG query (default for all general questions)
+                if table_search_result:
+                    print(f"[QUERY_ROUTING] Table search found nothing, falling back to RAG")
+                else:
+                    print(f"[QUERY_ROUTING] Using RAG for semantic search")
+                
                 result = query_rag(
                     query,
                     current_thread_id=thread.id,
-                    parent_thread_id=parent_id
+                    parent_thread_id=parent_id,
+                    conversation_history=conversation_context
                 )
                 
                 answer = result.get('answer') or result.get('response') or ""
@@ -484,12 +527,13 @@ def chat_thread(request, thread_id):
                 chunks = result.get('chunks', [])
                 confidence = result.get('confidence', 0)
                 confidence_label = result.get('confidence_label', '')
+                suggested_questions = result.get('suggested_questions', [])
             
             processing_time = round(time.perf_counter() - start_time, 3)
             print(f"[API] Chat processing time: {processing_time}s")
 
-            # Save AI message with metadata
-            ChatMessage.objects.create(
+            # Save AI message with metadata (including suggested questions)
+            ai_msg = ChatMessage.objects.create(
                 thread=thread,
                 role='ai',
                 content=answer,
@@ -498,6 +542,8 @@ def chat_thread(request, thread_id):
                 confidence=confidence,
                 confidence_label=confidence_label
             )
+            print(f"[CHAT] Saved AI message ID: {ai_msg.id}")
+            print(f"[CHAT] Total messages in DB: {ChatMessage.objects.count()}")
 
             # Ensure all data is JSON serializable
             response_data = {
@@ -506,7 +552,8 @@ def chat_thread(request, thread_id):
                 "chunks": chunks,
                 "confidence": confidence,
                 "confidence_label": confidence_label,
-                "processing_time_seconds": processing_time
+                "processing_time_seconds": processing_time,
+                "suggested_questions": suggested_questions  # NotebookLM-style follow-ups
             }
 
             return JsonResponse(response_data)

@@ -3,13 +3,23 @@
 
 RAG-OCR is a compact, production-minded reference for a Retrieval-Augmented Generation (RAG) pipeline built around OCR'd documents. It supports ingestion, embedding, retrieval, document comparison, and LLM-backed generation.
 
+## 🐳 Docker Deployment
+
+**Quick Start with Docker:**
+```bash
+docker-compose up --build
+```
+See [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md) for complete Docker setup instructions, including production configurations.
+
 ## Key Capabilities
 
 - Ingest and process PDFs and other document types.
 - Store and query embeddings in a local ChromaDB (`backend/local_chroma_db`).
-- Use a local sentence-transformer for embeddings (`backend/models/all-MiniLM-L6-v2`).
-- LLM generation via a local API (e.g., Ollama) or remote LLMs.
+- Use **Ollama** for embeddings (nomic-embed-text, 768 dimensions) - **Default**
+- ~~Use a local sentence-transformer~~ - **No longer required**
+- LLM generation via Ollama API (e.g., llama3.2:1b).
 - Document comparison and difference summarization.
+- Document metadata: tags, notes, version tracking.
 
 ## Requirements
 
