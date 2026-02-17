@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  ollama:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ollama_service
+    restart: unless-stopped
+    ports:
+      - "11434:11434"  # Ollama API port
+    volumes:
+      # Persist Ollama models and data
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    # GPU Support - uncomment if NVIDIA GPU is available
+    # Requires nvidia-docker or Docker with NVIDIA Container Toolkit
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  ollama_data:
+    driver: local
+
+# For CPU-only deployment on systems without NVIDIA GPU:
+# Comment out or remove the entire 'deploy' section above
+# The container will automatically fall back to CPU mode
+
+# Prerequisites for GPU support:
+# 1. NVIDIA GPU installed on host
+# 2. NVIDIA drivers installed
+# 3. NVIDIA Container Toolkit installed:
+#    - Windows: Docker Desktop with WSL2 and NVIDIA Container Toolkit
+#    - Linux: nvidia-docker2 package
+# 4. Docker configured to use nvidia runtime
+
+# To use CPU-only mode, create docker-compose.cpu.yml:
+# Or use: docker-compose up -d --compatibility

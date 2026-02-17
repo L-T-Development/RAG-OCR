@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  ollama:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ollama_service
+    restart: unless-stopped
+    ports:
+      - "11434:11434"  # Ollama API port
+    volumes:
+      # Persist Ollama models and data
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    # CPU-only mode - no GPU configuration
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  ollama_data:
+    driver: local
+
+# This is the CPU-only version
+# Use this on systems without NVIDIA GPU or when GPU support is not needed
+# Start with: docker-compose -f docker-compose.cpu.yml up -d
