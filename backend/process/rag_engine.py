@@ -9,11 +9,21 @@ import psutil
 import threading
 import re
 import sqlite3
+import tempfile
+import glob
 from PIL import Image
 
 # Excel and Word document support
 import openpyxl
 from docx import Document as DocxDocument
+
+# Optional OpenDataLoader PDF parser (better table/layout extraction)
+try:
+    import opendataloader_pdf
+    OPENDATALOADER_AVAILABLE = True
+except ImportError:
+    opendataloader_pdf = None
+    OPENDATALOADER_AVAILABLE = False
 
 # Optional CUDA support
 try:
@@ -36,7 +46,7 @@ OLLAMA_EMBED_API = "http://localhost:11434/api/embeddings"
 DEFAULT_LLM_MODEL = "llama3.1:8b"
 DEFAULT_EMBEDDING_PROVIDER = "ollama"  # "sentence-transformers" or "ollama"
 DEFAULT_EMBEDDING_MODEL = "models/all-MiniLM-L6-v2"  # sentence-transformers path
-DEFAULT_OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"  # Ollama model name
+DEFAULT_OLLAMA_EMBEDDING_MODEL = "nomic-embed-text.v1.5:latest"  # Ollama model name
 
 # Available LLM models configuration
 AVAILABLE_LLM_MODELS = {
@@ -122,7 +132,7 @@ os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
 # ---------------- OLLAMA EMBEDDING PROVIDER ----------------
 class OllamaEmbeddingProvider:
-    """Embedding provider using Ollama API for nomic-embed-text and other models."""
+    """Embedding provider using Ollama API for nomic-embed-text.v1.5:latest and other models."""
     
     def __init__(self, model_name="nomic-embed-text", api_url=OLLAMA_EMBED_API):
         self.model_name = model_name
@@ -207,7 +217,37 @@ class OllamaEmbeddingProvider:
 
 # Initialize ChromaDB (always available)
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
-collection = chroma_client.get_or_create_collection(name="rag_knowledge_base")
+DEFAULT_COLLECTION_NAME = "rag_knowledge_base"
+_collection_cache = {}
+
+
+def _safe_collection_suffix(value):
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", str(value).lower())
+
+
+def get_collection_name(provider, dimension):
+    """Build a deterministic collection name by provider and embedding dimension."""
+    provider = _safe_collection_suffix(provider or DEFAULT_EMBEDDING_PROVIDER)
+
+    # Keep backward compatibility with existing sentence-transformers collection.
+    if provider == "sentence-transformers" and int(dimension or 384) == 384:
+        return DEFAULT_COLLECTION_NAME
+
+    return f"{DEFAULT_COLLECTION_NAME}_{provider}_{int(dimension or 384)}"
+
+
+def get_collection():
+    """Get the active Chroma collection matching the current embedding space."""
+    status = model_manager.get_status() if 'model_manager' in globals() else {}
+    provider = status.get("provider") or DEFAULT_EMBEDDING_PROVIDER
+    dimension = model_manager.get_embedding_dimension() if 'model_manager' in globals() else 384
+    name = get_collection_name(provider, dimension)
+
+    if name not in _collection_cache:
+        _collection_cache[name] = chroma_client.get_or_create_collection(name=name)
+        print(f"[RAG] Using Chroma collection: {name}")
+
+    return _collection_cache[name]
 
 
 # ---------------- TABLE DATABASE MANAGEMENT ----------------
@@ -673,6 +713,20 @@ class EmbeddingModelManager:
         else:
             return model.encode(texts, show_progress_bar=False)
 
+    def get_embedding_dimension(self):
+        """Get current embedding vector dimension for active provider/model."""
+        model = self.get_model()
+        if model is None:
+            return 384
+
+        if self._provider_type == 'ollama' and hasattr(model, 'get_dimension'):
+            return int(model.get_dimension())
+
+        if hasattr(model, 'get_sentence_embedding_dimension'):
+            return int(model.get_sentence_embedding_dimension())
+
+        return 384
+
 
 # Global singleton instance
 model_manager = EmbeddingModelManager()
@@ -902,6 +956,236 @@ def _store_merged_table(merged_table, doc_id, thread_id, parent_id, filename):
         pass
 
 
+def _as_table_matrix(table_payload):
+    """Normalize table payload from OpenDataLoader JSON into list[list[str]]."""
+    if isinstance(table_payload, list):
+        if table_payload and isinstance(table_payload[0], (list, tuple)):
+            return [[str(cell) if cell is not None else "" for cell in row] for row in table_payload]
+        return []
+
+    if isinstance(table_payload, dict):
+        rows = table_payload.get("rows")
+        headers = table_payload.get("headers")
+        if isinstance(rows, list) and rows and isinstance(rows[0], (list, tuple)):
+            matrix = [[str(cell) if cell is not None else "" for cell in row] for row in rows]
+            if isinstance(headers, list) and headers:
+                header_row = [str(h) if h is not None else "" for h in headers]
+                return [header_row] + matrix
+            return matrix
+
+    return []
+
+
+def _collect_odl_outputs_from_dir(output_dir):
+    """Read OpenDataLoader output files from a directory."""
+    text_blocks = []
+    tables = []
+
+    # Prefer JSON because it includes page/type metadata.
+    json_files = glob.glob(os.path.join(output_dir, "**", "*.json"), recursive=True)
+    for json_file in json_files:
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            continue
+
+        elements = []
+        if isinstance(payload, list):
+            elements = payload
+        elif isinstance(payload, dict):
+            # Handle known/unknown schema variants.
+            for key in ["elements", "data", "content", "blocks", "items"]:
+                if isinstance(payload.get(key), list):
+                    elements = payload.get(key)
+                    break
+
+        for el in elements:
+            if not isinstance(el, dict):
+                continue
+
+            el_type = str(el.get("type", "")).lower().strip()
+            page = el.get("page") or el.get("page_number") or el.get("page number") or 1
+            try:
+                page = int(page)
+            except Exception:
+                page = 1
+
+            content = el.get("content")
+            if isinstance(content, str) and content.strip():
+                text_blocks.append({"page": page, "text": content.strip(), "type": el_type or "text"})
+
+            if el_type == "table":
+                matrix = _as_table_matrix(content)
+                if matrix:
+                    tables.append({"page": page, "matrix": matrix})
+
+    # Fallback to markdown when JSON has no usable text.
+    if not text_blocks:
+        md_files = glob.glob(os.path.join(output_dir, "**", "*.md"), recursive=True)
+        for md_file in md_files:
+            try:
+                with open(md_file, "r", encoding="utf-8") as f:
+                    md_text = f.read().strip()
+            except Exception:
+                continue
+
+            if md_text:
+                text_blocks.append({"page": 1, "text": md_text, "type": "markdown"})
+
+    return text_blocks, tables
+
+
+def _extract_opendataloader_outputs(file_path):
+    """Run OpenDataLoader and return extracted text blocks + structured tables."""
+    text_blocks = []
+    tables = []
+
+    # Set JVM memory opts for the OpenDataLoader Java process unless already provided.
+    if not os.getenv("JAVA_TOOL_OPTIONS"):
+        os.environ["JAVA_TOOL_OPTIONS"] = os.getenv("ODL_JAVA_OPTS", "-Xms512m -Xmx6g -XX:+UseG1GC")
+
+    # Process large PDFs in batches to avoid JVM crashes on huge documents.
+    batch_size = max(1, int(os.getenv("ODL_PAGE_BATCH_SIZE", "120")))
+
+    with fitz.open(file_path) as doc:
+        total_pages = len(doc)
+
+    page_ranges = []
+    for start in range(1, total_pages + 1, batch_size):
+        end = min(start + batch_size - 1, total_pages)
+        page_ranges.append((start, end))
+
+    print(f"[RAG] OpenDataLoader page batching: {len(page_ranges)} batch(es) for {total_pages} pages")
+
+    for start, end in page_ranges:
+        pages_arg = f"{start}-{end}"
+        with tempfile.TemporaryDirectory(prefix="odl_pdf_") as output_dir:
+            opendataloader_pdf.convert(
+                input_path=[file_path],
+                output_dir=output_dir,
+                format="markdown,json",
+                pages=pages_arg,
+                quiet=True,
+                table_method="cluster",
+                reading_order="xycut"
+            )
+
+            batch_text, batch_tables = _collect_odl_outputs_from_dir(output_dir)
+
+            # Some parsers return batch-relative pages (1..N). Shift to absolute pages.
+            batch_span = end - start + 1
+            text_pages = [b.get("page", 1) for b in batch_text if isinstance(b.get("page", 1), int)]
+            table_pages = [t.get("page", 1) for t in batch_tables if isinstance(t.get("page", 1), int)]
+            observed_max = max(text_pages + table_pages) if (text_pages or table_pages) else 0
+            needs_shift = start > 1 and observed_max <= batch_span
+
+            if needs_shift:
+                offset = start - 1
+                for item in batch_text:
+                    item["page"] = int(item.get("page", 1)) + offset
+                for item in batch_tables:
+                    item["page"] = int(item.get("page", 1)) + offset
+
+            text_blocks.extend(batch_text)
+            tables.extend(batch_tables)
+
+    return text_blocks, tables
+
+
+def _process_pdf_with_opendataloader(file_path, doc_id, thread_id, parent_id, filename):
+    """PDF processing path powered by OpenDataLoader extraction."""
+    start_time = time.time()
+
+    text_chunks = []
+    metadatas = []
+    ids = []
+    table_count = 0
+    active_collection = get_collection()
+
+    text_blocks, tables = _extract_opendataloader_outputs(file_path)
+
+    # Group extracted text by page for better chunk metadata.
+    page_text = {}
+    for block in text_blocks:
+        page = block.get("page", 1)
+        block_text = block.get("text", "")
+        if not block_text:
+            continue
+        page_text.setdefault(page, []).append(block_text)
+
+    for page in sorted(page_text.keys()):
+        merged_text = "\n".join(page_text[page]).strip()
+        chunks = smart_chunk_text(merged_text)
+        for idx, chunk in enumerate(chunks):
+            chunk_id = f"{doc_id}_{page - 1}_{idx}"
+            text_chunks.append(chunk)
+            ids.append(chunk_id)
+            metadatas.append({
+                "doc_id": str(doc_id),
+                "thread_id": str(thread_id),
+                "parent_id": str(parent_id) if parent_id else "none",
+                "source": filename,
+                "page": page,
+                "type": "text"
+            })
+
+    # Store extracted tables in the same normalized table store used elsewhere.
+    for idx, table in enumerate(tables):
+        matrix = table.get("matrix", [])
+        if len(matrix) < 2:
+            continue
+
+        headers = matrix[0]
+        rows = matrix[1:]
+        page = table.get("page", 1)
+        table_id = f"{doc_id}_{page - 1}_table_odl_{idx}"
+
+        store_table(
+            table_id=table_id,
+            doc_id=doc_id,
+            thread_id=thread_id,
+            parent_id=parent_id,
+            source=filename,
+            page=page,
+            table_index=idx,
+            headers=headers,
+            row_count=len(rows),
+            column_count=len(headers) if headers else len(rows[0]) if rows else 0,
+            table_data=matrix
+        )
+        table_count += 1
+
+    if not text_chunks:
+        print("[RAG] OpenDataLoader returned no text chunks.")
+        return {"text_chunks": 0, "table_chunks": table_count}
+
+    print(f"[RAG] Embedding {len(text_chunks)} chunks...")
+    embeddings = model_manager.encode(text_chunks).tolist()
+
+    total_chunks = len(text_chunks)
+    if total_chunks <= CHROMA_BATCH_SIZE:
+        active_collection.add(
+            documents=text_chunks,
+            embeddings=embeddings,
+            metadatas=metadatas,
+            ids=ids
+        )
+    else:
+        for i in range(0, total_chunks, CHROMA_BATCH_SIZE):
+            end_idx = min(i + CHROMA_BATCH_SIZE, total_chunks)
+            active_collection.add(
+                documents=text_chunks[i:end_idx],
+                embeddings=embeddings[i:end_idx],
+                metadatas=metadatas[i:end_idx],
+                ids=ids[i:end_idx]
+            )
+
+    end_time = time.time()
+    print(f"[RAG] ✓ OpenDataLoader completed in {end_time - start_time:.1f}s | {len(text_chunks)} chunks + {table_count} tables stored")
+    return {"text_chunks": len(text_chunks), "table_chunks": table_count}
+
+
 # ---------------- PDF INGESTION ----------------
 def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
     # Ensure model is loaded
@@ -910,6 +1194,14 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
 
     if not model_manager.is_ready():
         raise RuntimeError("Embedding model not configured. Please set model path in Settings.")
+
+    parser_mode = os.getenv("RAG_PDF_PARSER", "opendataloader").strip().lower()
+    if parser_mode in ["opendataloader", "odl", "auto"] and OPENDATALOADER_AVAILABLE:
+        try:
+            print(f"\n[RAG] Processing PDF with OpenDataLoader: {filename} (Doc ID: {doc_id})")
+            return _process_pdf_with_opendataloader(file_path, doc_id, thread_id, parent_id, filename)
+        except Exception as e:
+            print(f"[RAG] OpenDataLoader failed, falling back to PyMuPDF: {e}")
 
     start_time = time.time()
     process = psutil.Process()
@@ -924,6 +1216,7 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
     ids = []
     table_count = 0
     chunk_count = 0
+    active_collection = get_collection()
     total_pages = len(doc)
 
     # Multi-page table tracking
@@ -1022,7 +1315,7 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
 
     if total_chunks <= CHROMA_BATCH_SIZE:
         # Single batch insert
-        collection.add(
+        active_collection.add(
             documents=text_chunks,
             embeddings=embeddings,
             metadatas=metadatas,
@@ -1037,7 +1330,7 @@ def process_pdf(file_path, doc_id, thread_id, parent_id, filename):
             batch_metas = metadatas[i:end_idx]
             batch_ids = ids[i:end_idx]
 
-            collection.add(
+            active_collection.add(
                 documents=batch_docs,
                 embeddings=batch_embeds,
                 metadatas=batch_metas,
@@ -1078,6 +1371,7 @@ def process_excel(file_path, doc_id, thread_id, parent_id, filename):
     ids = []
     table_count = 0
     chunk_count = 0
+    active_collection = get_collection()
 
     for sheet_idx, sheet_name in enumerate(workbook.sheetnames):
         sheet = workbook[sheet_name]
@@ -1158,7 +1452,7 @@ def process_excel(file_path, doc_id, thread_id, parent_id, filename):
     # Batch insert
     total_chunks = len(text_chunks)
     if total_chunks <= CHROMA_BATCH_SIZE:
-        collection.add(
+        active_collection.add(
             documents=text_chunks,
             embeddings=embeddings,
             metadatas=metadatas,
@@ -1167,7 +1461,7 @@ def process_excel(file_path, doc_id, thread_id, parent_id, filename):
     else:
         for i in range(0, total_chunks, CHROMA_BATCH_SIZE):
             end_idx = min(i + CHROMA_BATCH_SIZE, total_chunks)
-            collection.add(
+            active_collection.add(
                 documents=text_chunks[i:end_idx],
                 embeddings=embeddings[i:end_idx],
                 metadatas=metadatas[i:end_idx],
@@ -1206,6 +1500,7 @@ def process_word(file_path, doc_id, thread_id, parent_id, filename):
     ids = []
     table_count = 0
     chunk_count = 0
+    active_collection = get_collection()
 
     # Extract text from paragraphs
     paragraphs_text = []
@@ -1296,7 +1591,7 @@ def process_word(file_path, doc_id, thread_id, parent_id, filename):
     # Batch insert
     total_chunks = len(text_chunks)
     if total_chunks <= CHROMA_BATCH_SIZE:
-        collection.add(
+        active_collection.add(
             documents=text_chunks,
             embeddings=embeddings,
             metadatas=metadatas,
@@ -1305,7 +1600,7 @@ def process_word(file_path, doc_id, thread_id, parent_id, filename):
     else:
         for i in range(0, total_chunks, CHROMA_BATCH_SIZE):
             end_idx = min(i + CHROMA_BATCH_SIZE, total_chunks)
-            collection.add(
+            active_collection.add(
                 documents=text_chunks[i:end_idx],
                 embeddings=embeddings[i:end_idx],
                 metadatas=metadatas[i:end_idx],
@@ -1327,7 +1622,7 @@ def process_image(file_path, doc_id, thread_id, parent_id, filename):
     start_time = time.time()
     print(f"\n[RAG] === Processing Image: {filename} ===")
     
-    collection = get_collection()
+    active_collection = get_collection()
     text_chunks = []
     metadatas = []
     ids = []
@@ -1377,7 +1672,7 @@ This is an image file uploaded to the system. You can reference this image when 
             print(f"[RAG] Embedding {len(text_chunks)} image metadata chunks...")
             embeddings = model_manager.encode(text_chunks).tolist()
             
-            collection.add(
+            active_collection.add(
                 documents=text_chunks,
                 embeddings=embeddings,
                 metadatas=metadatas,
@@ -1839,7 +2134,8 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None):
     print(f"[DEBUG-RETRIEVAL] Filter: {where_filter}")
     print(f"[DEBUG-RETRIEVAL] Candidate K: {CANDIDATE_K}")
 
-    results = collection.query(
+    active_collection = get_collection()
+    results = active_collection.query(
         query_embeddings=query_vec,
         n_results=CANDIDATE_K,
         where=where_filter
@@ -2469,7 +2765,8 @@ def delete_from_chroma(doc_id=None, thread_id=None):
 
     try:
         # Delete from ChromaDB
-        collection.delete(where=where_filter)
+        active_collection = get_collection()
+        active_collection.delete(where=where_filter)
 
         # Delete from tables.db
         delete_tables(doc_id=doc_id, thread_id=thread_id)
@@ -2506,7 +2803,8 @@ def summarize_document(doc_id=None, thread_id=None):
 
     try:
         # Get all chunks for the document/thread
-        results = collection.get(
+        active_collection = get_collection()
+        results = active_collection.get(
             where=where_filter,
             include=["documents", "metadatas"]
         )
@@ -2672,7 +2970,8 @@ def get_thread_documents_summary(thread_id):
     Returns document list with metadata.
     """
     try:
-        results = collection.get(
+        active_collection = get_collection()
+        results = active_collection.get(
             where={"thread_id": str(thread_id)},
             include=["metadatas"]
         )

@@ -26,7 +26,7 @@ export function Settings() {
 
   // Embedding model state
   const [embeddingProvider, setEmbeddingProvider] = useState('sentence-transformers');
-  const [ollamaModel, setOllamaModel] = useState('nomic-embed-text');
+  const [ollamaModel, setOllamaModel] = useState('nomic-embed-text.v1.5:latest');
   const [modelPath, setModelPath] = useState('');
   const [modelStatus, setModelStatus] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -53,7 +53,12 @@ export function Settings() {
         
         // Set model path or name based on provider
         if (provider === 'ollama') {
-          setOllamaModel(result.data.ollama_model || 'nomic-embed-text');
+          const configuredModel = result.data.ollama_model || 'nomic-embed-text.v1.5:latest';
+          setOllamaModel(
+            configuredModel === 'nomic-embed-text'
+              ? 'nomic-embed-text.v1.5:latest'
+              : configuredModel
+          );
         } else {
           if (result.data.saved_path) {
             setModelPath(result.data.saved_path);
@@ -217,7 +222,7 @@ export function Settings() {
                 <div className="status-card__text">{getStatusText()}</div>
                 {modelStatus?.provider && (
                   <div className="status-card__text" style={{fontSize: '0.75rem', opacity: 0.7, marginTop: '4px'}}>
-                    Provider: {modelStatus.provider === 'ollama' ? 'Ollama (nomic-embed-text: 768 dims, 8K context)' : 'SentenceTransformers (384 dims, 256 tokens)'}
+                    Provider: {modelStatus.provider === 'ollama' ? 'Ollama (nomic-embed-text.v1.5:latest, 768 dims, 8K context)' : 'SentenceTransformers (384 dims, 256 tokens)'}
                   </div>
                 )}
               </div>
@@ -242,7 +247,7 @@ export function Settings() {
                   disabled={isSaving}
                 >
                   <Sparkles size={16} />
-                  <span>Ollama (nomic-embed-text)</span>
+                  <span>Ollama (nomic-embed-text.v1.5:latest)</span>
                   <span className="provider-badge">Better Quality</span>
                 </button>
               </div>
@@ -288,7 +293,7 @@ export function Settings() {
                   <input
                     type="text"
                     className="settings-form__input"
-                    placeholder="nomic-embed-text"
+                    placeholder="nomic-embed-text.v1.5:latest"
                     value={ollamaModel}
                     onChange={(e) => setOllamaModel(e.target.value)}
                   />
@@ -306,7 +311,7 @@ export function Settings() {
                   </button>
                 </div>
                 <p className="settings-form__hint">
-                  Ollama model name (e.g., nomic-embed-text). Run 'ollama pull nomic-embed-text' first.
+                  Ollama model name (e.g., nomic-embed-text.v1.5:latest). Run 'ollama pull nomic-embed-text.v1.5:latest' first.
                 </p>
               </div>
             )}
