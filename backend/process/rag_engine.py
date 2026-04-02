@@ -2841,13 +2841,23 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None, conversation
         
         # List indicators - extract and show actual data from specific columns
         list_patterns = [
-            'list all', 'show all', 'get all', 'list the', 'show the', 'get the',
-            'display all', 'display the', 'give me all', 'give me the'
+            'list all', 'list me all', 'list the',
+            'show all', 'show me all', 'show the',
+            'get all', 'get me all', 'get the',
+            'display all', 'display the',
+            'give all', 'give me all', 'give me the'
         ]
 
         is_question = any(query_lower.startswith(p) or p in query_lower for p in question_patterns)
         is_find_only = any(query_lower.startswith(p) for p in find_patterns)
         is_list_query = any(query_lower.startswith(p) for p in list_patterns)
+
+        # Handle polite/natural phrasing: "please list me all...", "can you show all..."
+        if not is_list_query:
+            is_list_query = bool(re.search(
+                r'^(please\s+)?(can\s+you\s+|could\s+you\s+|kindly\s+)?(list|show|get|display|give)(\s+me)?\s+(all|the)\b',
+                query_lower
+            ))
 
         # If it ends with '?' it's likely a question
         if query_text.strip().endswith('?'):

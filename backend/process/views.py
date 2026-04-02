@@ -44,8 +44,11 @@ from process.reports_engine import (
 )
 
 # Table Search Engine imports
-from process.table_search_engine import search_in_pdf, get_pdf_table_info
+from process.table_search_engine import search_in_pdf, get_pdf_table_info, compare_structured_sources
 import re
+
+# Keep source files by default because table comparison/search uses pdfplumber on disk paths.
+RETAIN_UPLOADED_FILES = os.getenv('RETAIN_UPLOADED_FILES', 'true').lower() == 'true'
 
 def home(request):
     return render(request, 'home.html')
@@ -132,13 +135,14 @@ def upload_file(request, thread_id):
                 filename=doc.filename
             )
 
-            # Delete physical file after successful vectorization
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                    print(f"[STORAGE] Deleted file after processing: {file_path}")
-            except Exception as delete_error:
-                print(f"[STORAGE] Warning: Could not delete file {file_path}: {delete_error}")
+            # Keep source files for table-search/compare features unless explicitly disabled.
+            if not RETAIN_UPLOADED_FILES:
+                try:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                        print(f"[STORAGE] Deleted file after processing: {file_path}")
+                except Exception as delete_error:
+                    print(f"[STORAGE] Warning: Could not delete file {file_path}: {delete_error}")
 
             return JsonResponse({
                 'message': 'File uploaded and vectorized successfully',
@@ -284,13 +288,14 @@ def quick_upload(request):
         doc.is_processed = True
         doc.save()
 
-        # Delete physical file after successful vectorization
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                print(f"[STORAGE] Deleted file after processing: {file_path}")
-        except Exception as delete_error:
-            print(f"[STORAGE] Warning: Could not delete file {file_path}: {delete_error}")
+        # Keep source files for table-search/compare features unless explicitly disabled.
+        if not RETAIN_UPLOADED_FILES:
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    print(f"[STORAGE] Deleted file after processing: {file_path}")
+            except Exception as delete_error:
+                print(f"[STORAGE] Warning: Could not delete file {file_path}: {delete_error}")
 
         # Clean up temp file
         os.unlink(tmp_path)
@@ -362,6 +367,7 @@ def chat_thread(request, thread_id):
 
             # Check if query is asking to search in tables
             table_search_result = None
+            suggested_questions = []
             query_lower = query.lower()
             
             # Resolve conversation references (this, that, compare, etc.)
@@ -417,15 +423,65 @@ def chat_thread(request, thread_id):
             # Detect comparison query
             is_comparison = any(keyword in query_lower for keyword in [
                 'compare', 'comparison', 'difference', 'differences', 'common',
-                'not in', 'missing', 'match between', 'vs', 'versus'
+                'not in', 'missing', 'match between', 'vs', 'versus',
+                'found or not found', 'present or not', 'present/not', 'between', 'presence of'
             ])
+
+            # Strict assessment mode: if user explicitly asks DRG/part presence between two PDFs,
+            # force deterministic comparison flow instead of narrative RAG fallback.
+            import re
+            pdf_mentions = re.findall(r'([\w\-. ]+\.pdf)', query, re.IGNORECASE)
+            strict_assessment_query = (
+                len(set(m.strip().lower() for m in pdf_mentions)) >= 2
+                and any(t in query_lower for t in ['drg', 'drawing', 'dwg', 'part', 'nsn'])
+                and any(t in query_lower for t in ['compare', 'between', 'present', 'found', 'assessment', 'confirm', 'whether'])
+            )
+
+            if strict_assessment_query:
+                is_comparison = True
+
+            # Assessment-style intent: "confirm whether X is in there or not" across 2 PDFs
+            if not is_comparison:
+                assessment_terms = [
+                    'assessment', 'assess', 'confirm', 'whether', 'in there or not',
+                    'found or not', 'present or not', 'exists or not'
+                ]
+                domain_terms = ['drg', 'drawing', 'dwg', 'part', 'nsn', 'nomenclature']
+                if any(t in query_lower for t in assessment_terms) and any(t in query_lower for t in domain_terms):
+                    ancestor_ids = get_ancestor_thread_ids(thread)
+                    if ancestor_ids:
+                        pdf_count = Document.objects.filter(
+                            Q(thread=thread) | Q(thread_id__in=ancestor_ids),
+                            filename__iendswith='.pdf'
+                        ).count()
+                    else:
+                        pdf_count = Document.objects.filter(thread=thread, filename__iendswith='.pdf').count()
+                    if pdf_count >= 2:
+                        is_comparison = True
             
             if is_comparison and not table_search_result:
                 # Extract comparison details
                 comparison_result = _extract_comparison_info(query, thread)
+
+                # Retry once with explicit intent to help natural-language queries route correctly
+                if not comparison_result and strict_assessment_query:
+                    forced_query = f"Compare DRG present or not between {query}"
+                    comparison_result = _extract_comparison_info(forced_query, thread)
                 
                 if comparison_result:
                     table_search_result = comparison_result
+                elif strict_assessment_query:
+                    # Do not silently fall back to narrative answer for strict assessment requests
+                    table_search_result = {
+                        'found': True,
+                        'formatted_answer': (
+                            "## ❌ Assessment Could Not Be Completed\n\n"
+                            "A strict table comparison was requested, but the comparison engine could not resolve both PDFs or DRG columns.\n\n"
+                            "### Try this exact format:\n"
+                            "`Compare DRG No present or not between @file1.pdf and @file2.pdf`\n\n"
+                            "If this still fails, open Sources and verify both PDFs are uploaded in the same thread."
+                        )
+                    }
             else:
                 # Detect table search intent - STRICT: only for explicit part/drawing number queries
                 is_table_search = False
@@ -605,6 +661,30 @@ def _resolve_conversation_references(query: str, recent_messages, thread) -> str
     prev_query = last_user_msg.content.lower()
     extracted_data_type = None
     source_file = None
+
+    # Parse previous comparison context (column + files) for follow-up shorthand
+    previous_column = None
+    previous_files = []
+
+    prev_files_at = re.findall(r'@([\w\-. ]+\.pdf)', prev_query, re.IGNORECASE)
+    prev_files_plain = re.findall(r'([\w\-. ]+\.pdf)', prev_query, re.IGNORECASE)
+    for f in prev_files_at + prev_files_plain:
+        f_clean = f.strip()
+        if f_clean and f_clean not in previous_files:
+            previous_files.append(f_clean)
+
+    col_patterns = [
+        r'compare\s+column\s+([a-z0-9\s\./#_-]{2,80}?)\s+(?:between|in|for|with)\b',
+        r'compare\s+([a-z0-9\s\./#_-]{2,80}?)\s+(?:between|in|for|with)\b',
+    ]
+    for p in col_patterns:
+        m = re.search(p, prev_query)
+        if m:
+            candidate = m.group(1).strip(" .:-_")
+            candidate = re.sub(r'\s+', ' ', candidate)
+            if candidate and candidate not in {'this', 'that', 'these', 'those', 'contents'}:
+                previous_column = candidate
+                break
     
     # Extract what was listed/searched in previous query
     if 'list' in prev_query or 'show' in prev_query or 'get' in prev_query:
@@ -619,7 +699,6 @@ def _resolve_conversation_references(query: str, recent_messages, thread) -> str
             extracted_data_type = 'nomenclatures'
         
         # Extract source file using @filename pattern
-        import re
         file_match = re.search(r'@([\w\-\.]+\.pdf)', prev_query)
         if file_match:
             source_file = file_match.group(1)
@@ -627,11 +706,40 @@ def _resolve_conversation_references(query: str, recent_messages, thread) -> str
     # Build context-aware query
     resolved_query = query
     
+    # Pattern 0: "compare this column ..." -> reuse previous compared column/files
+    if 'compare' in query_lower and 'column' in query_lower and any(ref in query_lower for ref in ['this', 'that']):
+        target_file_match = re.search(r'@([\w\-. ]+\.pdf)', query, re.IGNORECASE)
+        target_file = target_file_match.group(1).strip() if target_file_match else None
+
+        source_ctx = previous_files[0] if previous_files else None
+        if not target_file and len(previous_files) >= 2:
+            target_file = previous_files[1]
+
+        # If target not explicit, try to infer another uploaded PDF
+        if source_ctx and not target_file:
+            ancestor_ids = get_ancestor_thread_ids(thread)
+            if ancestor_ids:
+                docs_qs = Document.objects.filter(
+                    Q(thread=thread) | Q(thread_id__in=ancestor_ids),
+                    filename__iendswith='.pdf'
+                )
+            else:
+                docs_qs = Document.objects.filter(thread=thread, filename__iendswith='.pdf')
+            alt = docs_qs.exclude(filename__icontains=source_ctx.replace('.pdf', '')).first()
+            if alt:
+                target_file = alt.filename
+
+        if previous_column and source_ctx and target_file:
+            if any(p in query_lower for p in ['any column', 'with contents', 'against contents', 'contents']):
+                resolved_query = f"Compare {previous_column} between @{source_ctx} and @{target_file} with contents"
+            else:
+                resolved_query = f"Compare {previous_column} between @{source_ctx} and @{target_file}"
+            return resolved_query
+
     # Pattern 1: "now compare this to @file.pdf" or "compare this to"
     if 'compare' in query_lower and any(ref in query_lower for ref in ['this', 'that', 'these', 'those']):
         if extracted_data_type and source_file:
             # Find the target file in current query
-            import re
             target_file_match = re.search(r'@([\w\-\.]+\.pdf)', query)
             
             if target_file_match:
@@ -646,7 +754,6 @@ def _resolve_conversation_references(query: str, recent_messages, thread) -> str
     
     # Pattern 2: "@file.pdf now compare this to" (target first, then reference)
     elif 'compare' in query_lower:
-        import re
         file_match = re.search(r'@([\w\-\.]+\.pdf)', query)
         if file_match and extracted_data_type and source_file:
             target_file = file_match.group(1)
@@ -711,7 +818,13 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
     query_lower = query.lower()
     
     # Determine comparison type
-    if any(kw in query_lower for kw in ['difference', 'not in', 'missing', 'only in']):
+    if any(kw in query_lower for kw in [
+        'present or not', 'present/not', 'found or not found', 'found or not',
+        'similar', 'similarity', 'same', 'assessment', 'assess', 'confirm',
+        'whether', 'in there or not', 'exists or not'
+    ]):
+        comparison_type = 'all'
+    elif any(kw in query_lower for kw in ['difference', 'not in', 'missing', 'only in']):
         comparison_type = 'difference'
     elif any(kw in query_lower for kw in ['common', 'both', 'shared', 'in both']):
         comparison_type = 'common'
@@ -720,12 +833,14 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
     elif 'all' in query_lower or 'complete' in query_lower:
         comparison_type = 'all'
     else:
-        comparison_type = 'difference'  # Default
+        # For generic "compare X between A and B" queries, users typically expect
+        # full two-way assessment: common + missing on both sides.
+        comparison_type = 'all'
     
     # Extract column name
     column_keywords = {
         'part': ['part number', 'part no', 'p/n', 'part'],
-        'drawing': ['drawing number', 'drg', 'drawing no', 'dwg'],
+        'drg': ['drawing number', 'drg', 'drg no', 'drg. no', 'drawing no', 'dwg'],
         'nomenclature': ['nomenclature', 'name', 'description'],
         'nsn': ['nsn', 'national stock']
     }
@@ -735,12 +850,57 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
         if any(kw in query_lower for kw in keywords):
             column_name = col_type
             break
+
+    # Generic column parsing for queries like:
+    # "compare firm part no between ..." or "compare column unit price ..."
+    if not column_name:
+        generic_patterns = [
+            r'compare\s+column\s+([a-z0-9\s\./#_-]{2,80}?)\s+(?:between|in|for)\b',
+            r'compare\s+([a-z0-9\s\./#_-]{2,80}?)\s+(?:between|in|for)\b',
+            r'(?:check|assess|confirm)\s+([a-z0-9\s\./#_-]{2,80}?)\s+(?:present|found|between)\b',
+        ]
+        for pattern in generic_patterns:
+            m = re.search(pattern, query_lower)
+            if not m:
+                continue
+            candidate = m.group(1).strip(" .:-_")
+            candidate = re.sub(r'\b(present|found|or|not|whether|exists|existence)\b', ' ', candidate)
+            candidate = re.sub(r'\s+', ' ', candidate).strip()
+            if len(candidate) >= 2 and candidate not in {'the', 'all', 'values', 'value', 'items', 'item'}:
+                column_name = candidate
+                break
     
     if not column_name:
-        column_name = 'part'  # Default to part number
+        column_name = 'part'  # Backward-compatible default
+
+    # Optional cross-column mapping (file1 column -> file2 column)
+    # Example: MRLS "manufacturer part no" vs ISPL "drg no"
+    column_name_pdf1 = column_name
+    column_name_pdf2 = None
+
+    if 'manufacturer part no' in query_lower and any(k in query_lower for k in ['drg', 'drawing', 'dwg']):
+        column_name_pdf1 = 'manufacturer part no'
+        column_name_pdf2 = 'drg'
+
+    # Natural language mode: compare source column against ANY target column in second file.
+    # Examples: "compare this column with contents", "match to any column of other pdf"
+    match_any_column_in_pdf2 = any(
+        phrase in query_lower
+        for phrase in [
+            'any column', 'to any column', 'with contents', 'against contents',
+            'match in any column', 'compare this column'
+        ]
+    )
     
-    # Get PDFs from thread
-    docs = Document.objects.filter(thread=thread, filename__iendswith='.pdf')
+    # Get PDFs from thread (including inherited/ancestor docs)
+    ancestor_ids = get_ancestor_thread_ids(thread)
+    if ancestor_ids:
+        docs = Document.objects.filter(
+            Q(thread=thread) | Q(thread_id__in=ancestor_ids),
+            filename__iendswith='.pdf'
+        )
+    else:
+        docs = Document.objects.filter(thread=thread, filename__iendswith='.pdf')
     
     if docs.count() < 2:
         return None
@@ -749,6 +909,27 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
     # Priority 1: Use categories if they match query keywords
     pdf1_doc = None
     pdf2_doc = None
+
+    # Priority 0: Explicit @filename.pdf references in query
+    mentioned_files = re.findall(r'@([\w\-. ]+\.pdf)', query, re.IGNORECASE)
+    if len(mentioned_files) < 2:
+        # Also support plain filenames without @, e.g. "between ISPL_Vol-I.pdf and ISPL_Vol-II.pdf"
+        plain_files = re.findall(r'([\w\-. ]+\.pdf)', query, re.IGNORECASE)
+        for pf in plain_files:
+            if pf not in mentioned_files:
+                mentioned_files.append(pf)
+    if len(mentioned_files) >= 2:
+        resolved_docs = []
+        for mentioned in mentioned_files:
+            mentioned_lower = mentioned.strip().lower()
+            matched = next((d for d in docs if d.filename.lower() == mentioned_lower), None)
+            if not matched:
+                matched = next((d for d in docs if mentioned_lower in d.filename.lower()), None)
+            if matched and matched not in resolved_docs:
+                resolved_docs.append(matched)
+
+        if len(resolved_docs) >= 2:
+            pdf1_doc, pdf2_doc = resolved_docs[0], resolved_docs[1]
     
     # Check for category-based matching first
     category_patterns = {
@@ -765,10 +946,13 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
         if any(p in query_lower for p in patterns):
             matching_docs = [d for d in docs if d.category == category]
             if matching_docs:
-                if not pdf1_doc:
-                    pdf1_doc = matching_docs[0]
-                elif not pdf2_doc and matching_docs[0] != pdf1_doc:
-                    pdf2_doc = matching_docs[0]
+                for doc in matching_docs:
+                    if not pdf1_doc:
+                        pdf1_doc = doc
+                    elif not pdf2_doc and doc != pdf1_doc:
+                        pdf2_doc = doc
+                    if pdf1_doc and pdf2_doc:
+                        break
     
     # Priority 2: Match by filename patterns
     if not pdf1_doc or not pdf2_doc:
@@ -791,9 +975,59 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
     
     if not pdf1_doc or not pdf2_doc:
         return None
-    
+
     try:
-        result = compare_pdfs(pdf1_doc.file.path, pdf2_doc.file.path, column_name, comparison_type)
+        # Preferred path: compare using persisted structured tables in DB.
+        # This is robust even if source files were deleted after vectorization.
+        thread_ids = [str(thread.id)] + [str(tid) for tid in get_ancestor_thread_ids(thread)]
+        # If categories indicate MRLS/ISPL with mapped columns, align direction explicitly.
+        if column_name_pdf2 and pdf1_doc.category == 'ispl' and pdf2_doc.category == 'mrls':
+            left_doc, right_doc = pdf2_doc, pdf1_doc
+            left_col, right_col = column_name_pdf1, column_name_pdf2
+        else:
+            left_doc, right_doc = pdf1_doc, pdf2_doc
+            left_col, right_col = column_name_pdf1, column_name_pdf2
+
+        result = compare_structured_sources(
+            left_doc.filename,
+            right_doc.filename,
+            left_col,
+            column_name_pdf2=right_col,
+            match_any_column_in_pdf2=match_any_column_in_pdf2,
+            comparison_type=comparison_type,
+            doc1_id=str(left_doc.id),
+            doc2_id=str(right_doc.id),
+            thread_ids=thread_ids,
+        )
+
+        # Fallback: if structured tables are unavailable, use file-based comparison.
+        if not result.get('found'):
+            if os.path.exists(left_doc.file.path) and os.path.exists(right_doc.file.path):
+                result = compare_pdfs(
+                    left_doc.file.path,
+                    right_doc.file.path,
+                    left_col,
+                    column_name_pdf2=right_col,
+                    match_any_column_in_pdf2=match_any_column_in_pdf2,
+                    comparison_type=comparison_type,
+                )
+            else:
+                missing_files = []
+                if not os.path.exists(left_doc.file.path):
+                    missing_files.append(left_doc.filename)
+                if not os.path.exists(right_doc.file.path):
+                    missing_files.append(right_doc.filename)
+                missing_text = ', '.join(missing_files)
+                return {
+                    'found': True,
+                    'formatted_answer': (
+                        "## ❌ Assessment Could Not Be Completed\n\n"
+                        "Structured tables are not available and source PDF file(s) are missing:\n"
+                        f"- {missing_text}\n\n"
+                        "Please re-upload and reprocess these files, then run:\n"
+                        "`Compare DRG No present or not between @file1.pdf and @file2.pdf`"
+                    )
+                }
         
         if result.get('found'):
             # Format the result
@@ -808,6 +1042,23 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
             result['report_job_id'] = job_id
             
             return result
+
+        # Structured comparison could not locate requested column(s)
+        error_text = result.get('error') if isinstance(result, dict) else None
+        if error_text:
+            cols1 = ', '.join(result.get('available_columns_pdf1', [])[:20])
+            cols2 = ', '.join(result.get('available_columns_pdf2', [])[:20])
+            return {
+                'found': True,
+                'formatted_answer': (
+                    "## ❌ Column Not Found for Comparison\n\n"
+                    f"Requested column: **{column_name}**\n\n"
+                    f"{error_text}\n\n"
+                    f"**{pdf1_doc.filename} columns:** {cols1 or 'N/A'}\n\n"
+                    f"**{pdf2_doc.filename} columns:** {cols2 or 'N/A'}\n\n"
+                    "Try using one of the exact header names above in your query."
+                )
+            }
     except Exception as e:
         print(f"[COMPARISON] Error: {e}")
         import traceback
@@ -826,9 +1077,27 @@ def _format_comparison_response(comparison_result: dict) -> str:
     pdf2_total = comparison_result.get('pdf2_total', 0)
     
     results_data = comparison_result.get('results', {})
+
+    missing_count = results_data.get('in_pdf1_only', {}).get('count', 0)
+    common_count = results_data.get('common', {}).get('count', 0)
+    verdict = "PASS" if missing_count == 0 else "FAIL"
     
     # Start with clear natural language answer
     response = f"## 📊 QA Comparison: {pdf1} vs {pdf2}\n\n"
+
+    # Assessment verdict (explicit yes/no style)
+    response += "### ✅ Assessment Verdict\n\n" if verdict == "PASS" else "### ❌ Assessment Verdict\n\n"
+    if verdict == "PASS":
+        response += f"**{verdict}:** All {column} values from {pdf1} are present in {pdf2}.\n\n"
+    else:
+        response += (
+            f"**{verdict}:** {missing_count} {column} value(s) from {pdf1} are NOT present in {pdf2}.\n\n"
+        )
+
+    if common_count:
+        response += f"**Matched in both files:** {common_count}\n\n"
+
+    response += "---\n\n"
     
     # Executive Summary
     response += f"**Column Compared:** {column}\n\n"
@@ -853,7 +1122,7 @@ def _format_comparison_response(comparison_result: dict) -> str:
     if 'in_pdf2_only' in results_data:
         extra_count = results_data['in_pdf2_only']['count']
         if extra_count > 0:
-            response += f"ℹ️ **{extra_count} additional items** exist only in {pdf2}\n\n"
+            response += f"❌ **{extra_count} items** from {pdf2} are **NOT found** in {pdf1}\n\n"
     
     response += "---\n\n"
     
@@ -905,17 +1174,35 @@ def _format_comparison_response(comparison_result: dict) -> str:
         
         response += "\n---\n\n"
     
-    # Additional Items in PDF2
+    # Items missing from PDF1 (found only in PDF2)
     if 'in_pdf2_only' in results_data and results_data['in_pdf2_only']['count'] > 0:
-        response += f"### ℹ️ Additional in {pdf2} (not in {pdf1})\n\n"
-        response += f"**Total Additional:** {results_data['in_pdf2_only']['count']}\n\n"
-        
-        values = results_data['in_pdf2_only'].get('values', [])[:10]
-        for v in values:
-            response += f"- `{v}`\n"
-        
+        response += f"### ❌ Missing from {pdf1} (found in {pdf2} only)\n\n"
+        response += f"**Total Missing:** {results_data['in_pdf2_only']['count']}\n\n"
+
+        rows = results_data['in_pdf2_only'].get('rows', [])[:10]
+        if rows:
+            for i, row in enumerate(rows, 1):
+                value = row.get('_matched_value', 'N/A')
+                page = row.get('_page', 'Unknown')
+                response += f"**{i}. `{value}`** _(from page {page})_\n"
+
+                fields = []
+                for key, val in row.items():
+                    if not key.startswith('_') and val and str(val).strip():
+                        key_lower = key.lower()
+                        if any(kw in key_lower for kw in ['nomenclature', 'designation', 'description', 'name']):
+                            fields.append(f"**{key}:** {val}")
+
+                if fields:
+                    response += "   " + " | ".join(fields[:2]) + "\n"
+                response += "\n"
+        else:
+            values = results_data['in_pdf2_only'].get('values', [])[:10]
+            for v in values:
+                response += f"- `{v}`\n"
+
         if results_data['in_pdf2_only']['count'] > 10:
-            response += f"\n_... and {results_data['in_pdf2_only']['count'] - 10} more items_\n"
+            response += f"\n_... and {results_data['in_pdf2_only']['count'] - 10} more missing items_\n"
         
         response += "\n---\n\n"
     
@@ -2231,7 +2518,7 @@ def generate_comparison_excel(comparison_result: dict) -> bytes:
     
     if 'in_pdf2_only' in results_data:
         count = results_data['in_pdf2_only']['count']
-        summary_sheet[f'A{row}'] = 'Additional in File 2:'
+        summary_sheet[f'A{row}'] = 'Missing from File 1:'
         summary_sheet[f'A{row}'].font = Font(bold=True, color='0000FF')
         summary_sheet[f'B{row}'] = count
     
@@ -2256,6 +2543,38 @@ def generate_comparison_excel(comparison_result: dict) -> bytes:
             for row_idx, row_data in enumerate(rows, 4):
                 for col_idx, header in enumerate(headers, 1):
                     missing_sheet.cell(row=row_idx, column=col_idx, value=row_data.get(header, ''))
+        else:
+            values = results_data['in_pdf1_only'].get('values', [])
+            missing_sheet['A3'] = comparison_result.get('column', 'Value')
+            missing_sheet['A3'].font = Font(bold=True)
+            for row_idx, value in enumerate(values, 4):
+                missing_sheet[f'A{row_idx}'] = value
+
+    # Sheet 2B: Missing from File 1 (items only in File 2)
+    if 'in_pdf2_only' in results_data and results_data['in_pdf2_only']['count'] > 0:
+        missing_sheet_2 = wb.create_sheet("Missing from File 1")
+        missing_sheet_2['A1'] = f"Items in {comparison_result.get('pdf2')} NOT found in {comparison_result.get('pdf1')}"
+        missing_sheet_2['A1'].font = Font(size=14, bold=True)
+        missing_sheet_2['A1'].fill = PatternFill(start_color='CCE5FF', end_color='CCE5FF', fill_type='solid')
+
+        rows = results_data['in_pdf2_only'].get('rows', [])
+        if rows:
+            headers = [k for k in rows[0].keys() if not k.startswith('_')]
+            for col_idx, header in enumerate(headers, 1):
+                cell = missing_sheet_2.cell(row=3, column=col_idx)
+                cell.value = header
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
+
+            for row_idx, row_data in enumerate(rows, 4):
+                for col_idx, header in enumerate(headers, 1):
+                    missing_sheet_2.cell(row=row_idx, column=col_idx, value=row_data.get(header, ''))
+        else:
+            values = results_data['in_pdf2_only'].get('values', [])
+            missing_sheet_2['A3'] = comparison_result.get('column', 'Value')
+            missing_sheet_2['A3'].font = Font(bold=True)
+            for row_idx, value in enumerate(values, 4):
+                missing_sheet_2[f'A{row_idx}'] = value
     
     # Sheet 3: Common Items
     if 'common' in results_data and results_data['common']['count'] > 0:

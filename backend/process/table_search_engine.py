@@ -10,6 +10,8 @@ from typing import Dict, List, Any, Optional
 import re
 from collections import defaultdict
 
+from .models import ExtractedTable
+
 
 class TableSearchEngine:
     """
@@ -341,6 +343,8 @@ class TableSearchEngine:
     
     def compare_tables(self, pdf1_name: str, pdf2_name: str, 
                       column_name: str,
+                      column_name_pdf2: Optional[str] = None,
+                      match_any_column_in_pdf2: bool = False,
                       comparison_type: str = 'difference') -> Dict[str, Any]:
         """
         Compare a specific column between two PDFs.
@@ -363,13 +367,35 @@ class TableSearchEngine:
         if pdf2_name not in self.extracted_tables:
             return {'error': f'No tables extracted from {pdf2_name}'}
         
+        # Resolve comparison column aliases (e.g., drg -> drg/drawing/dwg)
+        column_aliases = {
+            'drg': ['drg', 'drawing', 'dwg'],
+            'drawing': ['drg', 'drawing', 'dwg'],
+            'part': ['part', 'item', 'p/n'],
+            'nomenclature': ['nomenclature', 'designation', 'description', 'name'],
+            'nsn': ['nsn', 'stock']
+        }
+        target1 = column_name.lower().strip()
+        target2 = (column_name_pdf2 or column_name).lower().strip()
+        aliases1 = column_aliases.get(target1, [target1])
+        aliases2 = column_aliases.get(target2, [target2])
+
+        available_cols_pdf1 = sorted(list({
+            str(col) for df in self.extracted_tables[pdf1_name] for col in df.columns if not str(col).startswith('_')
+        }))
+        available_cols_pdf2 = sorted(list({
+            str(col) for df in self.extracted_tables[pdf2_name] for col in df.columns if not str(col).startswith('_')
+        }))
+
         # Find the column in both PDFs
         pdf1_values = set()
         pdf1_rows = []  # Store full row data
         
         for df in self.extracted_tables[pdf1_name]:
-            matching_cols = [col for col in df.columns 
-                           if not col.startswith('_') and column_name.lower() in col.lower()]
+            matching_cols = [
+                col for col in df.columns
+                if not col.startswith('_') and any(alias in col.lower() for alias in aliases1)
+            ]
             
             for col in matching_cols:
                 for _, row in df.iterrows():
@@ -390,8 +416,13 @@ class TableSearchEngine:
         pdf2_rows = []
         
         for df in self.extracted_tables[pdf2_name]:
-            matching_cols = [col for col in df.columns 
-                           if not col.startswith('_') and column_name.lower() in col.lower()]
+            if match_any_column_in_pdf2:
+                matching_cols = [col for col in df.columns if not col.startswith('_')]
+            else:
+                matching_cols = [
+                    col for col in df.columns
+                    if not col.startswith('_') and any(alias in col.lower() for alias in aliases2)
+                ]
             
             for col in matching_cols:
                 for _, row in df.iterrows():
@@ -407,6 +438,21 @@ class TableSearchEngine:
                             row_dict['_page'] = int(row['_source_page'])
                         pdf2_rows.append(row_dict)
         
+        # If no values extracted on one or both sides, requested column likely missing.
+        if not pdf1_values or not pdf2_values:
+            return {
+                'found': False,
+                'error': (
+                    f"Could not find comparable values for columns '{column_name}' and "
+                    f"'{column_name_pdf2 or column_name}' in one or both files."
+                ),
+                'column': column_name if not column_name_pdf2 else f"{column_name} -> {column_name_pdf2}",
+                'pdf1': pdf1_name,
+                'pdf2': pdf2_name,
+                'available_columns_pdf1': available_cols_pdf1,
+                'available_columns_pdf2': available_cols_pdf2,
+            }
+
         # Perform comparisons
         in_pdf1_only = pdf1_values - pdf2_values
         in_pdf2_only = pdf2_values - pdf1_values
@@ -414,7 +460,7 @@ class TableSearchEngine:
         
         # Prepare results
         result = {
-            'column': column_name,
+            'column': column_name if not column_name_pdf2 else f"{column_name} -> {column_name_pdf2}",
             'pdf1': pdf1_name,
             'pdf2': pdf2_name,
             'pdf1_total': len(pdf1_values),
@@ -427,28 +473,28 @@ class TableSearchEngine:
             # Items in PDF1 but not in PDF2
             result['results']['in_pdf1_only'] = {
                 'count': len(in_pdf1_only),
-                'values': sorted(list(in_pdf1_only))[:100],  # Limit to 100
-                'rows': [r for r in pdf1_rows if r['_matched_value'].upper() in in_pdf1_only][:50]
+                'values': sorted(list(in_pdf1_only)),
+                'rows': [r for r in pdf1_rows if r['_matched_value'].upper() in in_pdf1_only]
             }
         
         if comparison_type in ['common', 'all']:
             # Items in both PDFs
             result['results']['common'] = {
                 'count': len(common_values),
-                'values': sorted(list(common_values))[:100],
-                'rows': [r for r in pdf1_rows if r['_matched_value'].upper() in common_values][:50]
+                'values': sorted(list(common_values)),
+                'rows': [r for r in pdf1_rows if r['_matched_value'].upper() in common_values]
             }
         
         if comparison_type in ['unique_both', 'all']:
             result['results']['in_pdf1_only'] = {
                 'count': len(in_pdf1_only),
-                'values': sorted(list(in_pdf1_only))[:100],
-                'rows': [r for r in pdf1_rows if r['_matched_value'].upper() in in_pdf1_only][:50]
+                'values': sorted(list(in_pdf1_only)),
+                'rows': [r for r in pdf1_rows if r['_matched_value'].upper() in in_pdf1_only]
             }
             result['results']['in_pdf2_only'] = {
                 'count': len(in_pdf2_only),
-                'values': sorted(list(in_pdf2_only))[:100],
-                'rows': [r for r in pdf2_rows if r['_matched_value'].upper() in in_pdf2_only][:50]
+                'values': sorted(list(in_pdf2_only)),
+                'rows': [r for r in pdf2_rows if r['_matched_value'].upper() in in_pdf2_only]
             }
         
         # Generate summary
@@ -456,6 +502,78 @@ class TableSearchEngine:
         result['found'] = True
         
         return result
+
+    def load_structured_tables(self, source_name: str, doc_id: Optional[str] = None,
+                               thread_ids: Optional[List[str]] = None) -> List[pd.DataFrame]:
+        """Load table data from persisted ExtractedTable records instead of reopening PDFs."""
+        query = ExtractedTable.objects.filter(source__iexact=source_name).prefetch_related('rows__cells')
+
+        if doc_id:
+            query = query.filter(doc_id=doc_id)
+        if thread_ids:
+            query = query.filter(thread_id__in=thread_ids)
+
+        all_tables = []
+
+        for table in query:
+            table_dict = table.to_dict()
+            headers = table_dict.get('headers', []) or []
+            table_data = table_dict.get('data', []) or []
+
+            if headers and len(table_data) > 1:
+                data_rows = table_data[1:]
+            elif headers:
+                data_rows = []
+            else:
+                data_rows = table_data
+
+            if not data_rows:
+                continue
+
+            if headers and any(str(h).strip() for h in headers):
+                clean_headers = []
+                seen_names = {}
+                for i, h in enumerate(headers):
+                    col_name = str(h).strip() if str(h).strip() else f'Column_{i+1}'
+                    if col_name in seen_names:
+                        seen_names[col_name] += 1
+                        col_name = f"{col_name}_{seen_names[col_name]}"
+                    else:
+                        seen_names[col_name] = 0
+                    clean_headers.append(col_name)
+
+                target_cols = len(clean_headers)
+                normalized_rows = []
+                for row in data_rows:
+                    row_vals = list(row)
+                    if len(row_vals) < target_cols:
+                        row_vals += [''] * (target_cols - len(row_vals))
+                    elif len(row_vals) > target_cols:
+                        row_vals = row_vals[:target_cols]
+                    normalized_rows.append(row_vals)
+
+                df = pd.DataFrame(normalized_rows, columns=clean_headers)
+            else:
+                target_cols = max((len(r) for r in data_rows), default=0)
+                if target_cols == 0:
+                    continue
+                normalized_rows = []
+                for row in data_rows:
+                    row_vals = list(row)
+                    if len(row_vals) < target_cols:
+                        row_vals += [''] * (target_cols - len(row_vals))
+                    elif len(row_vals) > target_cols:
+                        row_vals = row_vals[:target_cols]
+                    normalized_rows.append(row_vals)
+                generated_headers = [f'Column_{i+1}' for i in range(target_cols)]
+                df = pd.DataFrame(normalized_rows, columns=generated_headers)
+
+            if not df.empty:
+                df = df.fillna('')
+                df['_source_page'] = table.page
+                all_tables.append(df)
+
+        return self._merge_similar_tables(all_tables)
     
     def _generate_comparison_summary(self, result: Dict) -> str:
         """Generate human-readable comparison summary."""
@@ -558,6 +676,8 @@ def get_pdf_table_info(pdf_path: str) -> Dict[str, Any]:
 
 
 def compare_pdfs(pdf1_path: str, pdf2_path: str, column_name: str,
+                column_name_pdf2: Optional[str] = None,
+                match_any_column_in_pdf2: bool = False,
                 comparison_type: str = 'difference') -> Dict[str, Any]:
     """
     Compare a specific column between two PDFs.
@@ -581,7 +701,44 @@ def compare_pdfs(pdf1_path: str, pdf2_path: str, column_name: str,
     if pdf2_name not in _search_engine.extracted_tables:
         extract_and_index_pdf(pdf2_path)
     
-    return _search_engine.compare_tables(pdf1_name, pdf2_name, column_name, comparison_type)
+    return _search_engine.compare_tables(
+        pdf1_name,
+        pdf2_name,
+        column_name,
+        column_name_pdf2,
+        match_any_column_in_pdf2,
+        comparison_type,
+    )
+
+
+def compare_structured_sources(source1_name: str, source2_name: str, column_name: str,
+                               column_name_pdf2: Optional[str] = None,
+                               match_any_column_in_pdf2: bool = False,
+                               comparison_type: str = 'difference',
+                               doc1_id: Optional[str] = None,
+                               doc2_id: Optional[str] = None,
+                               thread_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    """
+    Compare values by reading persisted structured tables from DB.
+    This avoids file-path dependency and works even when uploaded PDFs are no longer on disk.
+    """
+    source1_tables = _search_engine.load_structured_tables(source1_name, doc_id=doc1_id, thread_ids=thread_ids)
+    source2_tables = _search_engine.load_structured_tables(source2_name, doc_id=doc2_id, thread_ids=thread_ids)
+
+    if not source1_tables or not source2_tables:
+        return {'found': False, 'error': 'Structured tables not available for one or both sources'}
+
+    _search_engine.extracted_tables[source1_name] = source1_tables
+    _search_engine.extracted_tables[source2_name] = source2_tables
+
+    return _search_engine.compare_tables(
+        source1_name,
+        source2_name,
+        column_name,
+        column_name_pdf2,
+        match_any_column_in_pdf2,
+        comparison_type,
+    )
 
 
 def detect_conflicts(pdf1_path: str, pdf2_path: str = None) -> Dict[str, Any]:
