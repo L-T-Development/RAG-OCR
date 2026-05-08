@@ -8,7 +8,7 @@
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(59, 130, 246, 0.1);
+  background: rgba(67, 88, 246, 0.08);
   backdrop-filter: blur(4px);
   z-index: var(--z-overlay);
   display: flex;

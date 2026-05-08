@@ -52,3 +52,4 @@ docker-offline-package/ragocr-docker-20260217_093013/backend-image.tar
 docker-offline-package/ragocr-docker-20260217_093013/frontend-image.tar
 docker-offline-package/ragocr-docker-20260217_093013/nginx-base.tar
 backend/db.sqlite3
+backend/db.sqlite3

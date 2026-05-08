@@ -2,62 +2,27 @@
    Reports Page - Multi-PDF Comparator
    ============================================= */
 
-/* CSS Variables for Reports Page (Light/Dark Theme Support) */
+/* CSS Variables for Reports Page */
 .reports-page {
-  --bg-primary: var(--color-bg-primary, #ffffff);
-  --bg-secondary: var(--color-bg-secondary, #f8fafc);
-  --bg-tertiary: var(--color-bg-tertiary, #f1f5f9);
-  --text-primary: var(--color-text-primary, #0f172a);
-  --text-secondary: var(--color-text-secondary, #475569);
-  --border-color: var(--color-border, #e2e8f0);
-  --accent-primary: #6366f1;
-  --accent-secondary: #ec4899;
-}
-
-/* Dark theme overrides */
-[data-theme="dark"] .reports-page {
-  --bg-primary: #0f172a;
-  --bg-secondary: #1e293b;
-  --bg-tertiary: #334155;
-  --text-primary: #f1f5f9;
-  --text-secondary: #cbd5e1;
-  --border-color: #334155;
+  --bg-primary:    var(--color-bg-primary);
+  --bg-secondary:  var(--color-bg-secondary);
+  --bg-tertiary:   var(--color-bg-tertiary);
+  --text-primary:  var(--color-text-primary);
+  --text-secondary:var(--color-text-secondary);
+  --border-color:  var(--color-border);
+  --accent-primary:   var(--color-brand-primary);
+  --accent-secondary: var(--color-brand-secondary);
 }
 
 .reports-page {
   min-height: 100vh;
-  position: relative;
+  background: var(--color-bg-page);
   overflow-x: hidden;
-  background: var(--bg-primary);
 }
 
-/* Background Effects - Subtle */
-.reports-bg-gradient {
-  position: fixed;
-  inset: 0;
-  background: 
-    radial-gradient(ellipse at 20% 20%, rgba(99, 102, 241, 0.08) 0%, transparent 50%),
-    radial-gradient(ellipse at 80% 80%, rgba(236, 72, 153, 0.05) 0%, transparent 50%);
-  pointer-events: none;
-  z-index: 0;
-}
-
-[data-theme="dark"] .reports-bg-gradient {
-  background: 
-    radial-gradient(ellipse at 20% 20%, rgba(99, 102, 241, 0.15) 0%, transparent 50%),
-    radial-gradient(ellipse at 80% 80%, rgba(236, 72, 153, 0.1) 0%, transparent 50%);
-}
-
-.reports-bg-grid {
-  position: fixed;
-  inset: 0;
-  background-image: 
-    linear-gradient(rgba(99, 102, 241, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(99, 102, 241, 0.03) 1px, transparent 1px);
-  background-size: 50px 50px;
-  pointer-events: none;
-  z-index: 0;
-}
+/* Background effects hidden — clean light theme */
+.reports-bg-gradient,
+.reports-bg-grid { display: none; }
 
 /* Content Container */
 .reports-content {
@@ -65,7 +30,7 @@
   z-index: 1;
   max-width: 1600px;
   margin: 0 auto;
-  padding: 6rem 2rem 2rem;
+  padding: 40px 32px 40px;
 }
 
 /* Header */
@@ -90,11 +55,9 @@
 
 .reports-title {
   font-size: 2.5rem;
-  font-weight: 700;
-  background: linear-gradient(135deg, var(--text-primary) 0%, var(--accent-primary) 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  font-weight: 800;
+  color: var(--color-text-primary);
+  letter-spacing: -0.03em;
   margin-bottom: 0.75rem;
 }
 
@@ -163,19 +126,21 @@
   gap: 0.5rem;
   width: 100%;
   padding: 0.875rem 1rem;
-  background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+  background: var(--color-brand-gradient);
   border: none;
-  border-radius: 10px;
-  color: white;
-  font-weight: 600;
-  font-size: 0.95rem;
+  border-radius: var(--radius-lg);
+  color: #fff;
+  font-weight: var(--font-weight-semibold);
+  font-size: var(--text-sm);
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: all var(--transition-fast);
+  box-shadow: var(--shadow-brand);
+  font-family: var(--font-sans);
 }
 
 .upload-btn:hover:not(:disabled) {
   transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(99, 102, 241, 0.35);
+  box-shadow: 0 6px 20px rgba(67, 88, 246, 0.40);
 }
 
 .upload-btn:disabled {

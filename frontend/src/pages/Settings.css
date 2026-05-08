@@ -4,7 +4,8 @@
 
 .settings-page {
   min-height: 100vh;
-  background: var(--color-bg-secondary);
+  background: var(--color-bg-page);
+  overflow-y: auto;
 }
 
 .settings-page__header {
@@ -51,9 +52,10 @@
 .settings-section {
   background: var(--color-bg-primary);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
   margin-bottom: var(--spacing-lg);
   overflow: hidden;
+  box-shadow: var(--shadow-card);
 }
 
 .settings-section__header {
@@ -201,12 +203,14 @@
 }
 
 .settings-btn--primary {
-  background: var(--color-brand-primary);
-  color: white;
+  background: var(--color-brand-gradient);
+  color: #fff;
+  box-shadow: var(--shadow-brand);
 }
 
 .settings-btn--primary:hover:not(:disabled) {
-  background: var(--color-brand-primary-hover);
+  box-shadow: 0 6px 20px rgba(67, 88, 246, 0.40);
+  transform: translateY(-1px);
 }
 
 .settings-btn--secondary {

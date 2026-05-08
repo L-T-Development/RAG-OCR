@@ -2504,6 +2504,42 @@ def generate_suggested_questions(answer, context_text, query_text, sources):
 
 
 # ---------------- QUERY RAG ----------------
+def _background_eval(embed_model, query_text, answer, used_docs, final_chunks,
+                     embed_time, search_time, llm_time, start_time, start_memory):
+    """Run RAG evaluation metrics without blocking the API response."""
+    try:
+        proc = psutil.Process()
+        eval_start = time.time()
+        rel_score = float(answer_relevance(embed_model, query_text, answer)[0])
+        ctx_precision = float(context_precision(embed_model, query_text, used_docs))
+        faithfulness_score = float(faithfulness(answer, used_docs, embed_model))
+        eval_time = time.time() - eval_start
+
+        confidence = (rel_score * 0.4 + faithfulness_score * 0.4 + ctx_precision * 0.2) * 100
+        label = "HIGH" if confidence >= 75 else "MEDIUM" if confidence >= 50 else "LOW"
+        total_time = time.time() - start_time
+        end_memory = proc.memory_info().rss / 1024 / 1024
+
+        print("\n========== RAG EVALUATION (async) ==========")
+        print(f"Answer Relevance : {round(rel_score, 3)}")
+        print(f"Context Precision: {round(ctx_precision, 3)}")
+        print(f"Faithfulness     : {round(faithfulness_score, 3)}")
+        print(f"Retrieved Chunks : {len(final_chunks)}")
+        print("----------------------------------")
+        print(f"Confidence       : {int(confidence)}% ({label})")
+        print("=========== PERFORMANCE ============")
+        print(f"Total Time incl. eval : {total_time:.2f}s")
+        print(f"  ├─ Embedding        : {embed_time:.3f}s")
+        print(f"  ├─ Search           : {search_time:.3f}s")
+        print(f"  ├─ LLM Call         : {llm_time:.2f}s")
+        print(f"  └─ Evaluation       : {eval_time:.3f}s")
+        print(f"Memory               : {start_memory:.1f}MB -> {end_memory:.1f}MB (Diff {end_memory - start_memory:+.1f}MB)")
+        print(f"CPU Usage            : {proc.cpu_percent(interval=0.1):.1f}%")
+        print("==========================================\n")
+    except Exception as exc:
+        print(f"[EVAL] Background evaluation error: {exc}")
+
+
 def query_rag(query_text, current_thread_id, parent_thread_id=None, conversation_history=""):
     # Ensure model is loaded
     if not model_manager.is_ready():
@@ -3240,51 +3276,27 @@ Answer the user's question using the table data above. If searching for a specif
 
     # --- LLM CALL (for ChromaDB text results only) ---
     print(f"\n[RAG] Processing ChromaDB results with LLM evaluation...")
-    system_prompt = """You are an expert document analysis assistant helping users understand their uploaded files (PDFs, Excel, Word, and other documents).
+    system_prompt = """You are a senior document analysis assistant. Your job is to answer the user using ONLY the provided context from their uploaded documents (PDFs, Excel, Word, images).
 
-CORE RESPONSIBILITIES:
-1. Answer questions accurately using ONLY the provided context from user's documents
-2. Provide clear, detailed, and well-structured responses
-3. Help users find and understand information across multiple file types
-4. Reference specific pages and sources when providing answers
-5. MAINTAIN CONVERSATION CONTINUITY - remember previous questions and answers in this conversation
+STRICT RULES:
+1. Use ONLY the context provided. If the answer isn't in the context, say: "I don't have that information in the uploaded documents."
+2. Never invent facts, numbers, or citations.
+3. Prefer direct, evidence-based statements. Quote short snippets only when they directly support the answer.
+4. Always mention the source and page when possible (e.g., "According to <filename> page X...").
+5. Keep answers structured and easy to scan: headings + bullets where appropriate.
+6. Be concise but complete. Don't add filler or generic explanations.
 
-HANDLING FOLLOW-UP QUESTIONS:
-✓ When user asks "what about X?" after discussing Y, understand X in context of the conversation
-✓ For pronouns (it, that, this, them), refer to what was previously discussed
-✓ For ambiguous questions, use conversation history to infer the topic
-✓ Build on previous answers - don't repeat information unless asked
-✓ If clarifying previous points, reference what was said before
+FOLLOW-UP CONTEXT:
+- If the user asks a follow-up ("what about this?", "compare them"), interpret it using the provided conversation history.
+- Resolve pronouns based on the prior conversation.
 
-RESPONSE GUIDELINES:
-✓ Use ONLY information from the provided context - never make assumptions
-✓ If information is not in the context, clearly state: "I don't have information about [topic] in the uploaded documents"
-✓ Structure answers clearly with headings, bullet points, or numbered lists when appropriate
-✓ Quote relevant passages when they directly answer the question
-✓ Reference specific pages/sources: "According to [filename] page X..."
-✓ For technical content: Explain concepts clearly and include relevant details
-✓ For tables/data: Present information in an organized format
-✓ Be thorough but concise - provide complete answers without unnecessary filler
+OUTPUT FORMAT:
+- Prefer bullets and short paragraphs.
+- Keep each bullet under 2–3 lines.
+- If data is tabular, render a compact table.
+- End with a "Sources" line listing filenames and pages used.
 
-COMPARISON QUERIES:
-When user asks to compare multiple documents:
-✓ Analyze content from ALL mentioned documents
-✓ Identify similarities, differences, and unique elements in each
-✓ Organize comparison clearly: "In [file1]... vs In [file2]..."
-✓ If documents have different content/topics, explain what each contains
-✓ If no direct overlap exists, still summarize what's in each document
-✓ Don't say "no information to compare" - always describe both documents
-
-WHAT NOT TO DO:
-✗ Never invent information not in the context
-✗ Don't suggest external resources or general knowledge
-✗ Don't say "based on my knowledge" - only use document content
-✗ Don't be vague - always provide specific details from the documents
-✗ Don't ignore parts of multi-part questions
-✗ Don't lose track of conversation context
-✗ For comparisons: Don't focus on only one document when multiple are mentioned
-
-Remember: You are analyzing the user's specific documents. Focus on extracting and presenting the information they've uploaded while maintaining natural conversation flow."""
+If the context is empty or irrelevant, clearly say so and stop."""
 
     current_llm = get_current_llm_model()
     print(f"[RAG] Using LLM model: {current_llm}")
@@ -3329,7 +3341,7 @@ You are comparing {len(file_filter)} documents:
 {context_text}
 
 **Instructions:**
-Provide a comprehensive answer to the user's current question using ONLY the information above. If this is a follow-up question, consider the conversation history to understand context. Structure your response clearly and reference specific sources/pages when possible."""
+Answer using ONLY the context above. If this is a follow-up, use the conversation history to resolve context and pronouns. Use bullets and short paragraphs. End your response with a "Sources:" line listing each filename and page number referenced."""
 
     # Slightly higher temperature for comparison queries to allow more natural synthesis
     temperature = 0.2 if is_multi_file_comparison else 0.1
@@ -3356,47 +3368,40 @@ Provide a comprehensive answer to the user's current question using ONLY the inf
             raise RuntimeError(response["error"])
         answer = response.get("response", "Error: No response from LLM.")
 
-        # --- EVALUATION ---
-        embed_model = model_manager.get_model()
-        eval_start = time.time()
-        rel_score, _ = answer_relevance(embed_model, query_text, answer)
-        ctx_precision = context_precision(embed_model, query_text, used_docs)
-        faithfulness_score = faithfulness(answer, used_docs, embed_model)
-        eval_time = time.time() - eval_start
-
-        # Convert numpy floats to Python floats for JSON serialization
-        rel_score = float(rel_score)
-        ctx_precision = float(ctx_precision)
-        faithfulness_score = float(faithfulness_score)
-
-        confidence = (
-            (rel_score * 0.4) +
-            (faithfulness_score * 0.4) +
-            (ctx_precision * 0.2)
-        ) * 100
-
+        # --- FAST CONFIDENCE (derived from retrieval similarity scores, no I/O) ---
+        text_chunks = [c for c in chunks_with_metadata if c.get("type") == "text"]
+        if text_chunks:
+            avg_sim = sum(c.get("similarity_score", 0.0) for c in text_chunks[:10]) / min(len(text_chunks), 10)
+            confidence = min(float(avg_sim) * 110.0, 98.0)
+        else:
+            confidence = 50.0
         label = "HIGH" if confidence >= 75 else "MEDIUM" if confidence >= 50 else "LOW"
 
         end_time = time.time()
         total_time = end_time - start_time
         end_memory = process.memory_info().rss / 1024 / 1024  # MB
 
-        print("\n========== RAG EVALUATION ==========")
-        print(f"Answer Relevance : {round(rel_score, 3)}")
-        print(f"Context Precision: {round(ctx_precision, 3)}")
-        print(f"Faithfulness     : {round(faithfulness_score, 3)}")
+        print("\n========== RAG RESPONSE ==========")
+        print(f"Confidence (fast): {int(confidence)}% ({label})")
         print(f"Retrieved Chunks : {len(final_chunks)}")
-        print("----------------------------------")
-        print(f"Confidence       : {int(confidence)}% ({label})")
         print("=========== PERFORMANCE ============")
         print(f"Total Time       : {total_time:.2f}s")
         print(f"  ├─ Embedding   : {embed_time:.3f}s")
         print(f"  ├─ Search      : {search_time:.3f}s")
-        print(f"  ├─ LLM Call    : {llm_time:.2f}s")
-        print(f"  └─ Evaluation  : {eval_time:.3f}s")
+        print(f"  └─ LLM Call    : {llm_time:.2f}s")
+        print(f"  └─ Evaluation  : running in background")
         print(f"Memory Usage     : {start_memory:.1f}MB -> {end_memory:.1f}MB (Diff {end_memory - start_memory:+.1f}MB)")
         print(f"CPU Usage        : {process.cpu_percent(interval=0.1):.1f}%")
         print("==================================\n")
+
+        # --- BACKGROUND EVALUATION (non-blocking, logs full metrics to console) ---
+        embed_model = model_manager.get_model()
+        threading.Thread(
+            target=_background_eval,
+            args=(embed_model, query_text, answer, used_docs, final_chunks,
+                  embed_time, search_time, llm_time, start_time, start_memory),
+            daemon=True
+        ).start()
 
         # Generate suggested follow-up questions (NotebookLM-style)
         suggested_questions = generate_suggested_questions(answer, context_text, query_text, sources)

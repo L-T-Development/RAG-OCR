@@ -43,20 +43,20 @@ export function Navigation({ compact = false }) {
             <MessageSquare size={16} />
             Chat
           </Link>
-          <Link 
+          {/* <Link 
             to="/compare" 
             className={`nav__link ${isActive('/compare') ? 'nav__link--active' : ''}`}
           >
             <GitCompare size={16} />
             Compare
-          </Link>
-          <Link 
+          </Link> */}
+          {/* <Link 
             to="/reports" 
             className={`nav__link ${isActive('/reports') ? 'nav__link--active' : ''}`}
           >
             <FileBarChart size={16} />
             Reports
-          </Link>
+          </Link> */}
         </div>
       </div>
 

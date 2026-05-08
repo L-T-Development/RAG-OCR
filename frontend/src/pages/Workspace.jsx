@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Sidebar, ChatArea, DocumentPanel, DropZone } from '../components/workspace';
 import { CategorySelector } from '../components/workspace/CategorySelector';
-import { Navigation } from '../components/shared/Navigation';
 import { api } from '../services/api';
 import { X, MessageSquare, FolderPlus } from 'lucide-react';
 import './Workspace.css';
@@ -426,7 +425,6 @@ export function Workspace() {
 
   return (
     <div className="workspace">
-      <Navigation />
       <div className="workspace__content">
         <Sidebar
           threads={threads}
@@ -436,6 +434,7 @@ export function Workspace() {
           onCreateSubThread={handleCreateSubThread}
           onDeleteThread={handleDeleteThread}
           onOpenSettings={() => navigate('/settings')}
+          onUploadDocument={() => document.querySelector('.document-panel__upload-btn')?.click()}
         />
         
         <main className="workspace__main">
