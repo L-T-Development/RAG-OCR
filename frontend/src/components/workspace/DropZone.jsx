@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
 import { FileUp, FileWarning, FileText, FileSpreadsheet, File, FileImage } from 'lucide-react';
-import './DropZone.css';
 
 // Supported file extensions
 const SUPPORTED_EXTENSIONS = ['.pdf', '.xlsx', '.xls', '.docx', '.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'];
@@ -19,8 +18,7 @@ export function DropZone({ onDrop, disabled = false }) {
     e.preventDefault();
     e.stopPropagation();
     if (disabled) return;
-    
-    // Check if dragged item is a file
+
     if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
       setIsDragging(true);
       setIsError(false);
@@ -30,8 +28,7 @@ export function DropZone({ onDrop, disabled = false }) {
   const handleDragLeave = useCallback((e) => {
     e.preventDefault();
     e.stopPropagation();
-    
-    // Only close if leaving the window
+
     if (e.relatedTarget === null || !document.body.contains(e.relatedTarget)) {
       setIsDragging(false);
       setIsError(false);
@@ -47,15 +44,14 @@ export function DropZone({ onDrop, disabled = false }) {
     e.preventDefault();
     e.stopPropagation();
     setIsDragging(false);
-    
+
     if (disabled) return;
 
     const files = e.dataTransfer.files;
     if (files.length === 0) return;
 
     const file = files[0];
-    
-    // Check if file is supported
+
     if (!isValidFile(file)) {
       setIsError(true);
       setErrorMessage(`Only ${SUPPORTED_EXTENSIONS.join(', ')} files are supported`);
@@ -72,7 +68,6 @@ export function DropZone({ onDrop, disabled = false }) {
   }, [disabled, onDrop]);
 
   useEffect(() => {
-    // Add global listeners
     window.addEventListener('dragenter', handleDragEnter);
     window.addEventListener('dragleave', handleDragLeave);
     window.addEventListener('dragover', handleDragOver);
@@ -89,22 +84,34 @@ export function DropZone({ onDrop, disabled = false }) {
   if (!isDragging && !isError) return null;
 
   return (
-    <div className={`drop-zone-overlay ${isError ? 'drop-zone-overlay--error' : ''}`}>
-      <div className="drop-zone-overlay__content">
-        <div className="drop-zone-overlay__icon">
+    <div
+      className={`fixed inset-0 z-50 flex items-center justify-center
+        ${isError
+          ? 'bg-red-500/10 border-4 border-dashed border-red-500'
+          : 'bg-white/90 border-4 border-dashed border-primary'
+        }`}
+    >
+      <div className="flex flex-col items-center gap-4 text-center px-8 py-10 rounded-2xl bg-white/80 shadow-[var(--shadow-lg)] max-w-sm w-full mx-4">
+        <div
+          className={`flex items-center justify-center w-16 h-16 rounded-full
+            ${isError ? 'bg-red-100 text-red-500' : 'bg-primary-light text-primary'}`}
+        >
           {isError ? <FileWarning size={36} /> : <FileUp size={36} />}
         </div>
-        <h2 className="drop-zone-overlay__title">
+
+        <h2 className={`text-xl font-bold m-0 ${isError ? 'text-red-600' : 'text-[var(--color-text-primary)]'}`}>
           {isError ? 'Invalid File Type' : 'Drop Document Here'}
         </h2>
-        <p className="drop-zone-overlay__text">
-          {isError 
+
+        <p className={`text-sm m-0 leading-relaxed ${isError ? 'text-red-500' : 'text-[var(--color-text-muted)]'}`}>
+          {isError
             ? errorMessage || 'Only PDF, Excel, and Word files are supported'
             : 'Release to upload your document for AI analysis'
           }
         </p>
+
         {!isError && (
-          <div className="drop-zone-overlay__badge">
+          <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] text-sm text-[var(--color-text-secondary)]">
             <FileText size={14} />
             <FileSpreadsheet size={14} />
             <File size={14} />

@@ -5,7 +5,6 @@ import { CategorySelector } from '../components/workspace/CategorySelector';
 import { Navigation } from '../components/shared/Navigation';
 import { api } from '../services/api';
 import { X, MessageSquare, FolderPlus } from 'lucide-react';
-import './Workspace.css';
 
 export function Workspace() {
   const navigate = useNavigate();
@@ -420,9 +419,9 @@ export function Workspace() {
   };
 
   return (
-    <div className="workspace">
+    <div className="flex flex-col h-screen bg-[var(--color-bg-secondary)]">
       <Navigation />
-      <div className="workspace__content">
+      <div className="flex flex-1 overflow-hidden">
         <Sidebar
           threads={threads}
           currentThreadId={currentThreadId}
@@ -432,22 +431,22 @@ export function Workspace() {
           onDeleteThread={handleDeleteThread}
           onOpenSettings={() => navigate('/settings')}
         />
-        
-        <main className="workspace__main">
+
+        <main className="flex flex-1 overflow-hidden">
           <ChatArea
             threadId={currentThreadId}
             threadName={currentThreadName}
             messages={messages}
             documents={documents}
             onSendMessage={handleSendMessage}
-            onUploadClick={() => document.querySelector('.document-panel__upload-btn')?.click()}
+            onUploadClick={() => document.querySelector('[data-upload-btn]')?.click()}
             onSummarizeThread={handleSummarizeThread}
             onSummarizeDocument={handleSummarizeDocument}
             isLoading={isLoading}
             isSummarizing={isSummarizing}
             disabled={!currentThreadId}
           />
-          
+
           <DocumentPanel
             documents={documents}
             onUpload={handleUpload}
@@ -463,7 +462,6 @@ export function Workspace() {
 
       <DropZone onDrop={handleDrop} disabled={isUploading} />
 
-      {/* Category Selector Modal */}
       {showCategorySelector && pendingFile && (
         <CategorySelector
           fileName={pendingFile.name}
@@ -472,40 +470,39 @@ export function Workspace() {
         />
       )}
 
-      {/* Create Thread Dialog - Improved */}
+      {/* Create Thread Dialog */}
       {showCreateDialog && (
         <>
-          <div 
-            className="dialog-backdrop"
+          <div
+            className="fixed inset-0 bg-black/50 z-40"
             onClick={() => setShowCreateDialog(false)}
           />
-          <div className="dialog">
-            <button 
-              className="dialog__close"
+          <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-md bg-[var(--color-bg-primary)] rounded-xl shadow-xl p-6 flex flex-col gap-4">
+            <button
+              className="absolute top-4 right-4 p-1 rounded-lg text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] transition-colors"
               onClick={() => setShowCreateDialog(false)}
             >
               <X size={18} />
             </button>
-            
-            <div className="dialog__icon">
+
+            <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-primary-light text-primary">
               {createDialogParentId ? <FolderPlus size={24} /> : <MessageSquare size={24} />}
             </div>
-            
-            <h2 className="dialog__title">
+
+            <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">
               {createDialogParentId ? 'Create Sub-Thread' : 'Create New Thread'}
             </h2>
-            
-            <p className="dialog__description">
-              {createDialogParentId 
+
+            <p className="text-sm text-[var(--color-text-secondary)]">
+              {createDialogParentId
                 ? 'Sub-threads inherit documents from the parent thread.'
-                : 'Start a new conversation thread to organize your documents.'
-              }
+                : 'Start a new conversation thread to organize your documents.'}
             </p>
-            
-            <div className="dialog__field">
-              <label className="dialog__label">Thread Name</label>
+
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-[var(--color-text-primary)]">Thread Name</label>
               <input
-                className="dialog__input"
+                className="w-full px-3 py-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-[var(--color-text-primary)] text-sm focus:outline-none focus:ring-2 focus:ring-primary"
                 type="text"
                 placeholder="Enter a name for your thread..."
                 value={newThreadName}
@@ -514,16 +511,16 @@ export function Workspace() {
                 autoFocus
               />
             </div>
-            
-            <div className="dialog__actions">
+
+            <div className="flex gap-2 justify-end pt-1">
               <button
-                className="dialog__btn dialog__btn--secondary"
+                className="px-4 py-2 rounded-lg text-sm font-medium text-[var(--color-text-secondary)] bg-[var(--color-bg-tertiary)] hover:bg-[var(--color-bg-hover)] transition-colors"
                 onClick={() => setShowCreateDialog(false)}
               >
                 Cancel
               </button>
               <button
-                className="dialog__btn dialog__btn--primary"
+                className="px-4 py-2 rounded-lg text-sm font-medium text-white bg-primary hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 onClick={submitCreateThread}
                 disabled={!newThreadName.trim()}
               >

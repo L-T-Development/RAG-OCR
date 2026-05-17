@@ -8,7 +8,8 @@ from .rag_engine import (
     process_pdf, process_document, query_rag, delete_from_chroma, summarize_document,
     get_thread_documents_summary, get_model_status, configure_model_path,
     validate_model_path, extract_pdf_title, get_llm_models_list,
-    get_current_llm_model, set_llm_model
+    get_current_llm_model, set_llm_model,
+    get_reembed_status, reembed_collection, get_collection,
 )
 import json
 import os
@@ -16,8 +17,10 @@ import time
 import tempfile
 import uuid
 import io
+import threading
 from typing import Optional
 from datetime import datetime
+from django.db import connection
 from process.document_compare import (
     compare_pdfs,
     compare_docx,
@@ -94,6 +97,31 @@ def list_threads(request):
 # Supported file types for RAG chat
 SUPPORTED_EXTENSIONS = ['.pdf', '.xlsx', '.xls', '.docx', '.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']
 
+
+def _ingest_background(file_path, doc_id, thread_id, parent_id, filename):
+    """Run document ingestion in a background thread, updating progress in DB."""
+    try:
+        process_document(
+            file_path=file_path,
+            doc_id=doc_id,
+            thread_id=thread_id,
+            parent_id=parent_id,
+            filename=filename,
+        )
+        Document.objects.filter(id=doc_id).update(is_processed=True)
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception:
+            pass
+    except Exception as e:
+        Document.objects.filter(id=doc_id).update(
+            status='error',
+            error_message=str(e)[:1000],
+        )
+    finally:
+        connection.close()
+
 @csrf_exempt
 def upload_file(request, thread_id):
     if request.method == 'POST' and request.FILES.get('file'):
@@ -116,38 +144,28 @@ def upload_file(request, thread_id):
             category=category
         )
 
-        # 2. Process for Vector Database (ChromaDB)
-        try:
-            # We need the parent ID to tag the vector for access control
-            p_id = thread.parent.id if thread.parent else None
+        # 2. Kick off ingestion in a background thread
+        p_id = thread.parent.id if thread.parent else None
+        file_path = doc.file.path
 
-            # Store file path before processing
-            file_path = doc.file.path
+        doc.status = 'pending'
+        doc.progress = 0
+        doc.progress_detail = 'Queued for processing…'
+        doc.save(update_fields=['status', 'progress', 'progress_detail'])
 
-            chunk_count = process_document(
-                file_path=file_path,
-                doc_id=doc.id,
-                thread_id=thread.id,
-                parent_id=p_id,
-                filename=doc.filename
-            )
+        t = threading.Thread(
+            target=_ingest_background,
+            args=(file_path, doc.id, thread.id, p_id, doc.filename),
+            daemon=True,
+        )
+        t.start()
 
-            # Delete physical file after successful vectorization
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                    print(f"[STORAGE] Deleted file after processing: {file_path}")
-            except Exception as delete_error:
-                print(f"[STORAGE] Warning: Could not delete file {file_path}: {delete_error}")
-
-            return JsonResponse({
-                'message': 'File uploaded and vectorized successfully',
-                'filename': doc.filename,
-                'chunk_count': chunk_count
-            })
-        except Exception as e:
-            # If vectorization fails, you might want to delete the SQL doc or log the error
-            return JsonResponse({'error': f'Vectorization failed: {str(e)}'}, status=500)
+        return JsonResponse({
+            'message': 'File uploaded — processing in background',
+            'filename': doc.filename,
+            'doc_id': str(doc.id),
+            'status': 'pending',
+        })
 
     return JsonResponse({'error': 'No file sent'}, status=400)
 
@@ -271,29 +289,21 @@ def quick_upload(request):
         # Store file path before processing
         file_path = doc.file.path
 
-        # Process the document (vectorize it)
-        result = process_document(
-            file_path=file_path,
-            doc_id=str(doc.id),
-            thread_id=str(thread.id),
-            parent_id=None,
-            filename=doc.filename
-        )
+        doc.status = 'pending'
+        doc.progress = 0
+        doc.progress_detail = 'Queued for processing…'
+        doc.save(update_fields=['status', 'progress', 'progress_detail'])
 
-        # Mark as processed
-        doc.is_processed = True
-        doc.save()
-
-        # Delete physical file after successful vectorization
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                print(f"[STORAGE] Deleted file after processing: {file_path}")
-        except Exception as delete_error:
-            print(f"[STORAGE] Warning: Could not delete file {file_path}: {delete_error}")
-
-        # Clean up temp file
+        # Clean up temp file (title was already extracted)
         os.unlink(tmp_path)
+
+        # Kick off ingestion in background
+        t = threading.Thread(
+            target=_ingest_background,
+            args=(file_path, doc.id, thread.id, None, doc.filename),
+            daemon=True,
+        )
+        t.start()
 
         return JsonResponse({
             'thread': {
@@ -304,9 +314,10 @@ def quick_upload(request):
             'document': {
                 'id': str(doc.id),
                 'name': doc.filename,
-                'url': doc.file.url
+                'url': doc.file.url,
+                'status': 'pending',
             },
-            'chunks': result if isinstance(result, dict) else {'text_chunks': result, 'table_chunks': 0}
+            'status': 'pending',
         })
 
     except Exception as e:
@@ -1138,6 +1149,26 @@ def delete_document(request, doc_id):
 
 # ==================== DOCUMENT METADATA ENDPOINTS ====================
 
+@require_http_methods(["GET"])
+def document_progress(request, doc_id):
+    """
+    Poll the ingestion progress of a single document.
+    Returns: {doc_id, status, progress (0-100), progress_detail, error_message}
+    """
+    try:
+        doc = get_object_or_404(Document, id=doc_id)
+        return JsonResponse({
+            "doc_id":          str(doc.id),
+            "filename":        doc.filename,
+            "status":          doc.status,
+            "progress":        doc.progress,
+            "progress_detail": doc.progress_detail,
+            "error_message":   doc.error_message,
+        })
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
 @csrf_exempt
 @require_http_methods(["PATCH", "GET"])
 def document_metadata(request, doc_id):
@@ -1550,18 +1581,35 @@ def embedding_provider_configure(request):
         if not model:
             return JsonResponse({"error": "Model path or name is required"}, status=400)
 
-        # Import the new configuration function
         from .rag_engine import configure_embedding_provider
-        
-        # Configure the embedding provider
+
+        # Snapshot old collection before model switches (dimension may change)
+        old_collection = get_collection()
+        old_collection_name = old_collection.name
+
         result = configure_embedding_provider(provider_type, model)
 
         if result.get('success'):
+            reembed_started = False
+            if result.get('reembed_needed'):
+                new_collection = get_collection()
+                if new_collection.name != old_collection_name:
+                    old_model = result.get('old_dim', '?')
+                    new_model = model
+                    t = threading.Thread(
+                        target=reembed_collection,
+                        args=(old_collection, new_collection, str(old_model), new_model),
+                        daemon=True,
+                    )
+                    t.start()
+                    reembed_started = True
+
             return JsonResponse({
                 "message": f"Embedding provider configured successfully: {provider_type}",
                 "status": result.get('status', {}),
                 "provider": result.get('provider'),
-                "model": result.get('model')
+                "model": result.get('model'),
+                "reembed_started": reembed_started,
             })
         else:
             return JsonResponse({
@@ -1632,6 +1680,28 @@ def model_validate(request):
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+def reembed_status(request):
+    """Poll the progress of a background re-embed job triggered by a model switch."""
+    if request.method != "GET":
+        return JsonResponse({"error": "GET method required"}, status=405)
+    try:
+        state = get_reembed_status()
+        pct = 0
+        if state["total"] > 0:
+            pct = round(state["done"] / state["total"] * 100)
+        return JsonResponse({
+            "running":   state["running"],
+            "total":     state["total"],
+            "done":      state["done"],
+            "progress":  pct,
+            "error":     state["error"],
+            "old_model": state["old_model"],
+            "new_model": state["new_model"],
+        })
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
 

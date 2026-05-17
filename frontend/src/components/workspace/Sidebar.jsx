@@ -4,23 +4,20 @@ import {
   MessageSquare,
   ChevronRight,
   Trash2,
-  MoreHorizontal,
   FolderOpen,
   Settings,
   FileText,
-  Sparkles
 } from 'lucide-react';
-import './Sidebar.css';
 
-function ThreadItem({ 
-  thread, 
-  isActive, 
-  onSelect, 
-  onCreateSub, 
+function ThreadItem({
+  thread,
+  isActive,
+  onSelect,
+  onCreateSub,
   onDelete,
   expandedThreads,
   onToggleExpand,
-  level = 0,  // Track nesting level
+  level = 0,
   parentId = null
 }) {
   const hasChildren = thread.sub_threads && thread.sub_threads.length > 0;
@@ -29,14 +26,20 @@ function ThreadItem({
   const isCurrentActive = isActive === thread.id;
 
   return (
-    <div className="thread-item" style={{ '--nest-level': level }}>
-      <div 
-        className={`thread-item__header ${isCurrentActive ? 'thread-item__header--active' : ''} ${!isRootLevel ? 'thread-item__header--nested' : ''}`}
-        onClick={() => onSelect(thread.id, thread.name, parentId)}
+    <div>
+      <div
+        className={`group flex items-center gap-1.5 pr-2 py-1.5 rounded-md cursor-pointer transition-colors select-none
+          ${isCurrentActive
+            ? 'bg-[var(--color-sidebar-active)] text-[var(--color-sidebar-text)]'
+            : 'text-[var(--color-sidebar-text-muted)] hover:bg-[var(--color-sidebar-hover)] hover:text-[var(--color-sidebar-text)]'
+          }
+          ${!isRootLevel ? 'text-sm' : ''}`}
         style={{ paddingLeft: `${12 + level * 20}px` }}
+        onClick={() => onSelect(thread.id, thread.name, parentId)}
       >
-        <span 
-          className={`thread-item__expand ${hasChildren ? '' : 'thread-item__expand--hidden'} ${isExpanded ? 'thread-item__expand--rotated' : ''}`}
+        {/* Expand chevron */}
+        <span
+          className={`flex-shrink-0 transition-transform ${hasChildren ? 'opacity-100' : 'opacity-0 pointer-events-none'} ${isExpanded ? 'rotate-90' : ''}`}
           onClick={(e) => {
             e.stopPropagation();
             onToggleExpand(thread.id);
@@ -44,46 +47,50 @@ function ThreadItem({
         >
           <ChevronRight size={14} />
         </span>
-        
-        <div className="thread-item__icon">
+
+        {/* Icon */}
+        <span className="flex-shrink-0 opacity-70">
           {isRootLevel ? <MessageSquare size={16} /> : <FileText size={14} />}
+        </span>
+
+        {/* Content */}
+        <div className="flex-1 min-w-0">
+          <div className="truncate text-sm font-medium">{thread.name}</div>
+          {hasChildren && (
+            <div className="text-xs opacity-50">
+              {thread.sub_threads.length} sub-thread{thread.sub_threads.length > 1 ? 's' : ''}
+            </div>
+          )}
         </div>
-        
-        <div className="thread-item__content">
-          <div className="thread-item__name">{thread.name}</div>
-          <div className="thread-item__meta">
-            {hasChildren && (
-              <span>{thread.sub_threads.length} sub-thread{thread.sub_threads.length > 1 ? 's' : ''}</span>
-            )}
-          </div>
-        </div>
-        
-        <div className="thread-item__actions">
+
+        {/* Action buttons — visible on group hover */}
+        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
           <button
-            className="thread-item__action-btn"
+            className="flex items-center justify-center w-5 h-5 rounded hover:bg-[var(--color-sidebar-border)] transition-colors"
             onClick={(e) => {
               e.stopPropagation();
               onCreateSub(thread.id);
             }}
             title="Create sub-thread"
           >
-            <Plus size={14} />
+            <Plus size={12} />
           </button>
           <button
-            className="thread-item__action-btn thread-item__action-btn--danger"
+            className="flex items-center justify-center w-5 h-5 rounded hover:bg-red-500/20 hover:text-red-400 transition-colors"
             onClick={(e) => {
               e.stopPropagation();
               onDelete(thread.id);
             }}
             title="Delete thread"
           >
-            <Trash2 size={14} />
+            <Trash2 size={12} />
           </button>
         </div>
       </div>
-      
+
+      {/* Children */}
       {hasChildren && isExpanded && (
-        <div className="thread-item__children">
+        <div>
           {thread.sub_threads.map(sub => (
             <ThreadItem
               key={sub.id}
@@ -127,7 +134,6 @@ export function Sidebar({
     });
   };
 
-  // Recursively find thread and its parents
   const findThreadPath = (threads, targetId, path = []) => {
     for (const thread of threads) {
       if (thread.id === targetId) {
@@ -141,12 +147,11 @@ export function Sidebar({
     return null;
   };
 
-  // Auto-expand all parents of current thread (in useEffect to avoid render issues)
   useEffect(() => {
     if (currentThreadId && threads.length > 0) {
       const threadPath = findThreadPath(threads, currentThreadId);
       if (threadPath && threadPath.length > 1) {
-        const parentsToExpand = threadPath.slice(0, -1); // All except the current thread itself
+        const parentsToExpand = threadPath.slice(0, -1);
         setExpandedThreads(prev => {
           const next = new Set(prev);
           parentsToExpand.forEach(parentId => next.add(parentId));
@@ -156,36 +161,37 @@ export function Sidebar({
     }
   }, [currentThreadId, threads]);
 
-  // Helper to check if a thread is active (recursively)
-  const isThreadActive = (thread, currentId) => {
-    if (thread.id === currentId) return true;
-    if (thread.sub_threads) {
-      return thread.sub_threads.some(sub => isThreadActive(sub, currentId));
-    }
-    return false;
-  };
-
   return (
-    <aside className="sidebar">
-      <div className="sidebar__new-thread">
-        <button className="sidebar__new-thread-btn" onClick={onCreateThread}>
+    <aside
+      className="flex flex-col h-full bg-[var(--color-sidebar-bg)] border-r border-[var(--color-sidebar-border)]"
+      style={{ width: 'var(--sidebar-width, 280px)' }}
+    >
+      {/* New Thread button */}
+      <div className="p-3 border-b border-[var(--color-sidebar-border)]">
+        <button
+          className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md bg-primary hover:bg-primary-hover text-white text-sm font-medium transition-colors cursor-pointer border-0"
+          onClick={onCreateThread}
+        >
           <Plus size={16} />
           New Thread
         </button>
       </div>
 
-      <div className="sidebar__threads">
+      {/* Thread list */}
+      <div className="flex-1 overflow-y-auto p-2">
         {threads.length === 0 ? (
-          <div className="sidebar__empty">
-            <div className="sidebar__empty-icon">
+          <div className="flex flex-col items-center justify-center gap-2 py-12 text-center px-4">
+            <div className="text-[var(--color-sidebar-text-muted)] opacity-50">
               <FolderOpen size={24} />
             </div>
-            <div className="sidebar__empty-text">No threads yet</div>
-            <div className="sidebar__empty-hint">Create a thread to start chatting</div>
+            <div className="text-sm text-[var(--color-sidebar-text-muted)] font-medium">No threads yet</div>
+            <div className="text-xs text-[var(--color-sidebar-text-muted)] opacity-60">Create a thread to start chatting</div>
           </div>
         ) : (
           <>
-            <div className="sidebar__section-title">Your Threads</div>
+            <div className="px-2 py-1.5 text-xs font-semibold uppercase tracking-wider text-[var(--color-sidebar-text-muted)] opacity-60 mb-1">
+              Your Threads
+            </div>
             {threads.map(thread => (
               <ThreadItem
                 key={thread.id}
@@ -204,8 +210,12 @@ export function Sidebar({
         )}
       </div>
 
-      <div className="sidebar__footer">
-        <button className="sidebar__footer-btn" onClick={onOpenSettings}>
+      {/* Footer */}
+      <div className="p-3 border-t border-[var(--color-sidebar-border)]">
+        <button
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm text-[var(--color-sidebar-text-muted)] hover:bg-[var(--color-sidebar-hover)] hover:text-[var(--color-sidebar-text)] transition-colors cursor-pointer border-0 bg-transparent"
+          onClick={onOpenSettings}
+        >
           <Settings size={16} />
           Settings
         </button>
