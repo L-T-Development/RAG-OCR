@@ -24,7 +24,8 @@ urlpatterns = [
     path('api/delete-thread/<str:thread_id>/', views.delete_thread, name='delete_thread'),
     path('api/delete-document/<str:doc_id>/', views.delete_document, name='delete_document'),
     
-    # Document Metadata Endpoints
+    # Document Metadata & Progress Endpoints
+    path('api/documents/<str:doc_id>/progress/', views.document_progress, name='document_progress'),
     path('api/documents/<str:doc_id>/metadata/', views.document_metadata, name='document_metadata'),
     path('api/documents/<str:doc_id>/link-version/', views.link_document_version, name='link_version'),
     path('api/documents/<str:doc_id>/versions/', views.document_version_history, name='version_history'),
@@ -41,6 +42,7 @@ urlpatterns = [
     path('api/model/status/', views.model_status, name='model_status'),
     path('api/model/configure/', views.model_configure, name='model_configure'),
     path('api/model/validate/', views.model_validate, name='model_validate'),
+    path('api/model/reembed-status/', views.reembed_status, name='reembed_status'),
     path('api/embedding/configure/', views.embedding_provider_configure, name='embedding_provider_configure'),
     path('api/config/', views.get_app_config, name='app_config'),
 

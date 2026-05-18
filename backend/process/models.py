@@ -65,7 +65,19 @@ class Document(models.Model):
     filename = models.CharField(max_length=255, blank=True)
     category = models.CharField(max_length=50, choices=CATEGORY_CHOICES, default='other', blank=True)
     uploaded_at = models.DateTimeField(auto_now_add=True)
-    is_processed = models.BooleanField(default=False) # To track if vectorization is done
+    is_processed = models.BooleanField(default=False)
+
+    # Ingestion progress tracking
+    STATUS_CHOICES = [
+        ("pending",    "Pending"),
+        ("processing", "Processing"),
+        ("done",       "Done"),
+        ("error",      "Error"),
+    ]
+    status          = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending", db_index=True)
+    progress        = models.IntegerField(default=0)          # 0-100
+    progress_detail = models.CharField(max_length=255, blank=True, default="")
+    error_message   = models.TextField(blank=True, default="")
     
     # Document metadata and organization
     tags = models.JSONField(default=list, blank=True)  # List of custom tags: ["Revision A", "Q1-2026", "Approved"]
@@ -134,6 +146,7 @@ class ExtractedTable(models.Model):
     # Classification and search
     table_type = models.CharField(max_length=20, choices=TABLE_TYPE_CHOICES, db_index=True)
     searchable_text = models.TextField(db_index=True)
+    caption = models.CharField(max_length=500, blank=True, default="")  # section heading / sheet name
     
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
@@ -255,6 +268,7 @@ class ExtractedTable(models.Model):
             "source": self.source,
             "page": self.page,
             "table_index": self.table_index,
+            "caption": self.caption,
             "headers": headers,
             "row_count": self.row_count,
             "column_count": self.column_count,

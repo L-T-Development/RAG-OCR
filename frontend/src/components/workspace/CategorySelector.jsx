@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import { FileText, Package, BookOpen, FolderOpen, FileCode, Pencil, Files } from 'lucide-react';
-import './CategorySelector.css';
 
 const CATEGORIES = [
   {
@@ -55,49 +54,73 @@ export function CategorySelector({ fileName, onSelect, onCancel }) {
   };
 
   return (
-    <div className="category-selector-overlay">
-      <div className="category-selector-modal">
-        <div className="category-selector-header">
-          <h2>Choose Document Category</h2>
-          <p className="category-selector-filename">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+      <div className="w-full max-w-lg rounded-2xl bg-[var(--color-bg-primary)] border border-[var(--color-border)] shadow-[var(--shadow-lg)] flex flex-col max-h-[90vh]">
+        {/* Header */}
+        <div className="px-6 pt-6 pb-4 border-b border-[var(--color-border)]">
+          <h2 className="text-lg font-semibold text-[var(--color-text-primary)] m-0">
+            Choose Document Category
+          </h2>
+          <p className="flex items-center gap-1.5 mt-2 mb-0 text-sm text-[var(--color-text-muted)]">
             <FileText size={16} />
             {fileName}
           </p>
         </div>
 
-        <div className="category-selector-grid">
-          {CATEGORIES.map(category => {
-            const Icon = category.icon;
-            return (
-              <button
-                key={category.value}
-                className={`category-card ${selectedCategory === category.value ? 'category-card--selected' : ''}`}
-                onClick={() => setSelectedCategory(category.value)}
-              >
-                <div className="category-card-icon">
-                  <Icon size={24} />
-                </div>
-                <div className="category-card-content">
-                  <div className="category-card-label">{category.label}</div>
-                  <div className="category-card-description">{category.description}</div>
-                </div>
-                <div className="category-card-radio">
+        {/* Category grid */}
+        <div className="overflow-y-auto flex-1 p-4">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            {CATEGORIES.map(category => {
+              const Icon = category.icon;
+              const isSelected = selectedCategory === category.value;
+              return (
+                <button
+                  key={category.value}
+                  className={`flex flex-col items-start gap-2 p-3 rounded-xl border-2 text-left cursor-pointer transition-all
+                    ${isSelected
+                      ? 'border-primary bg-primary-light'
+                      : 'border-[var(--color-border)] bg-[var(--color-bg-secondary)] hover:border-[var(--color-border-focus)] hover:bg-[var(--color-bg-hover)]'
+                    }`}
+                  onClick={() => setSelectedCategory(category.value)}
+                >
+                  <div
+                    className={`flex items-center justify-center w-9 h-9 rounded-lg
+                      ${isSelected ? 'bg-primary text-white' : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]'}`}
+                  >
+                    <Icon size={24} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className={`text-sm font-semibold ${isSelected ? 'text-primary' : 'text-[var(--color-text-primary)]'}`}>
+                      {category.label}
+                    </div>
+                    <div className="text-xs text-[var(--color-text-muted)] leading-tight mt-0.5">
+                      {category.description}
+                    </div>
+                  </div>
                   <input
                     type="radio"
-                    checked={selectedCategory === category.value}
+                    className="sr-only"
+                    checked={isSelected}
                     onChange={() => setSelectedCategory(category.value)}
                   />
-                </div>
-              </button>
-            );
-          })}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
-        <div className="category-selector-footer">
-          <button className="btn-cancel" onClick={onCancel}>
+        {/* Footer */}
+        <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-[var(--color-border)]">
+          <button
+            className="px-4 py-2 rounded-lg text-sm font-medium text-[var(--color-text-secondary)] border border-[var(--color-border)] hover:bg-[var(--color-bg-hover)] transition-colors cursor-pointer bg-transparent"
+            onClick={onCancel}
+          >
             Cancel
           </button>
-          <button className="btn-confirm" onClick={handleSubmit}>
+          <button
+            className="px-4 py-2 rounded-lg text-sm font-medium bg-primary hover:bg-primary-hover text-white transition-colors cursor-pointer border-0"
+            onClick={handleSubmit}
+          >
             Upload Document
           </button>
         </div>

@@ -25,6 +25,7 @@ See [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md) for complete Docker setup instr
 
 - Python 3.10+
 - Node.js 18+ (frontend)
+- Java 11+ (required when using OpenDataLoader PDF parser)
 - See `requirements.txt` for full Python dependencies.
 
 Use a virtual environment (venv, virtualenv, or conda).
@@ -165,6 +166,9 @@ API endpoints: defined in `backend/process/views.py` and routed in `backend/urls
 - Re-ingest documents after changing embedding models or tokenization.
 - Tune `CHROMA_BATCH_SIZE` and `SIMILARITY_THRESHOLD` in `backend/process/rag_engine.py` for retrieval behavior.
 - Ensure the LLM service used for generation is reachable; update `OLLAMA_API` if necessary.
+- PDF parser mode is configurable with `RAG_PDF_PARSER`:
+	- `opendataloader` (default): better structure/table extraction
+	- `pymupdf`: use legacy extraction path only
 
 ## Troubleshooting
 
