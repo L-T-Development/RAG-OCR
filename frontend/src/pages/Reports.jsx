@@ -98,7 +98,7 @@ function Reports() {
     <div className="min-h-screen bg-[var(--color-bg-secondary)] text-[var(--color-text-primary)]">
       <Navigation />
 
-      <div className="max-w-6xl mx-auto px-4 py-6">
+      <div className="max-w-6xl mx-auto px-4 pt-20 pb-6">
         {/* Header */}
         <div className="text-center mb-6">
           <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-100 text-purple-700 text-sm font-medium mb-3">

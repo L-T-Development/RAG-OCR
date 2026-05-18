@@ -1504,14 +1504,23 @@ def summarize_single_document(request, doc_id):
     print(f"\n[API] Summarize single document: {doc_id}")
 
     try:
-        doc = get_object_or_404(Document, id=doc_id)
-        result = summarize_document(doc_id=doc.id)
+        result = summarize_document(doc_id=doc_id)
 
         if "error" in result:
             print(f"[API] Summarization error: {result['error']}")
             return JsonResponse(result, status=500)
 
-        result["filename"] = doc.filename
+        if not result.get("chunk_count"):
+            return JsonResponse({"error": "Document not found or not yet indexed."}, status=404)
+
+        # Attach filename — prefer Django DB, fall back to ChromaDB source metadata
+        try:
+            doc = Document.objects.get(id=doc_id)
+            result["filename"] = doc.filename
+        except (Document.DoesNotExist, Exception):
+            sources = result.get("sources", [])
+            result["filename"] = sources[0].split(" (Page")[0] if sources else "Unknown"
+
         return JsonResponse(result)
 
     except Exception as e:
