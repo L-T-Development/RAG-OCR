@@ -75,7 +75,7 @@ function Compare() {
     <div className="min-h-screen bg-[var(--color-bg-secondary)] text-[var(--color-text-primary)]">
       <Navigation />
 
-      <div className="max-w-5xl mx-auto px-4 py-8">
+      <div className="max-w-5xl mx-auto px-4 pt-20 pb-8">
         {/* Header */}
         <div className="text-center mb-8">
           <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary-light text-primary text-sm font-medium mb-3">

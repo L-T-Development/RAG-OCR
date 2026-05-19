@@ -4,7 +4,7 @@ import { useTheme } from '../context/ThemeContext';
 import { Navigation } from '../components/shared/Navigation';
 import { api } from '../services/api';
 import {
-  ArrowLeft, Cpu, Moon, Sun, Monitor,
+  ArrowLeft, Cpu, Moon, Sun,
   CheckCircle, XCircle, Loader2, Save, Zap, Scale, Sparkles,
 } from 'lucide-react';
 
@@ -12,9 +12,7 @@ export function Settings() {
   const navigate = useNavigate();
   const { theme, setTheme } = useTheme();
 
-  const [embeddingProvider, setEmbeddingProvider] = useState('sentence-transformers');
   const [ollamaModel, setOllamaModel] = useState('nomic-embed-text.v1.5:latest');
-  const [modelPath, setModelPath] = useState('');
   const [modelStatus, setModelStatus] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -32,14 +30,8 @@ export function Settings() {
       const result = await api.getModelStatus();
       if (result.ok) {
         setModelStatus(result.data);
-        const provider = result.data.provider || 'sentence-transformers';
-        setEmbeddingProvider(provider);
-        if (provider === 'ollama') {
-          const configuredModel = result.data.ollama_model || 'nomic-embed-text.v1.5:latest';
-          setOllamaModel(configuredModel === 'nomic-embed-text' ? 'nomic-embed-text.v1.5:latest' : configuredModel);
-        } else {
-          setModelPath(result.data.saved_path || result.data.path || 'models/all-MiniLM-L6-v2');
-        }
+        const configuredModel = result.data.ollama_model || 'nomic-embed-text.v1.5:latest';
+        setOllamaModel(configuredModel === 'nomic-embed-text' ? 'nomic-embed-text.v1.5:latest' : configuredModel);
       }
     } catch (error) {
       console.error('Failed to fetch model status:', error);
@@ -90,23 +82,22 @@ export function Settings() {
   };
 
   const handleSave = async () => {
-    const model = embeddingProvider === 'ollama' ? ollamaModel : modelPath;
-    if (!model.trim()) {
-      setSaveMessage({ type: 'error', text: embeddingProvider === 'ollama' ? 'Please enter an Ollama model name' : 'Please enter a model path' });
+    if (!ollamaModel.trim()) {
+      setSaveMessage({ type: 'error', text: 'Please enter an Ollama model name' });
       return;
     }
     setIsSaving(true);
     setSaveMessage(null);
     try {
-      const result = await api.configureEmbeddingProvider(embeddingProvider, model);
+      const result = await api.configureEmbeddingProvider('ollama', ollamaModel);
       if (result.ok && result.data.status?.loaded) {
-        setSaveMessage({ type: 'success', text: `${embeddingProvider === 'ollama' ? 'Ollama' : 'Embedding'} model configured successfully!` });
+        setSaveMessage({ type: 'success', text: 'Ollama model configured successfully!' });
         setModelStatus(result.data.status);
       } else {
         setSaveMessage({ type: 'error', text: result.data.error || result.data.status?.error || 'Failed to configure model' });
       }
     } catch {
-      setSaveMessage({ type: 'error', text: 'Network error. Is Ollama running?' + (embeddingProvider === 'ollama' ? ' (http://localhost:11434)' : '') });
+      setSaveMessage({ type: 'error', text: 'Network error. Is Ollama running? (http://localhost:11434)' });
     } finally {
       setIsSaving(false);
     }
@@ -150,7 +141,7 @@ export function Settings() {
     <div className="min-h-screen bg-[var(--color-bg-secondary)] text-[var(--color-text-primary)]">
       <Navigation />
 
-      <header className="bg-[var(--color-bg-primary)] border-b border-[var(--color-border)] px-6 py-4 flex items-center gap-4">
+      <header className="mt-14 bg-[var(--color-bg-primary)] border-b border-[var(--color-border)] px-6 py-4 flex items-center gap-4">
         <button
           className="w-10 h-10 flex items-center justify-center bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] transition-colors"
           onClick={() => navigate(-1)}
@@ -179,72 +170,29 @@ export function Settings() {
               <div className="flex-1">
                 <div className="text-sm font-medium text-[var(--color-text-primary)]">Model Status</div>
                 <div className="text-xs text-[var(--color-text-muted)]">{getStatusText()}</div>
-                {modelStatus?.provider && (
+                {modelStatus?.loaded && (
                   <div className="text-xs text-[var(--color-text-muted)] mt-1 opacity-70">
-                    Provider: {modelStatus.provider === 'ollama'
-                      ? 'Ollama (nomic-embed-text.v1.5:latest, 768 dims, 8K context)'
-                      : 'SentenceTransformers (384 dims, 256 tokens)'}
+                    Ollama · nomic-embed-text.v1.5:latest · 768 dims · 8K context
                   </div>
                 )}
               </div>
               {isLoading && <Loader2 size={18} className="animate-spin" />}
             </div>
 
-            {/* Provider selector */}
+            {/* Ollama model input */}
             <div className="mb-5">
-              <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-2">Embedding Provider</label>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
-                {[
-                  { id: 'sentence-transformers', icon: <Monitor size={16} />, label: 'Local (SentenceTransformers)', badge: 'Fast' },
-                  { id: 'ollama', icon: <Sparkles size={16} />, label: 'Ollama (nomic-embed-text.v1.5:latest)', badge: 'Better Quality' },
-                ].map(opt => {
-                  const active = embeddingProvider === opt.id;
-                  return (
-                    <button
-                      key={opt.id}
-                      className={`flex items-center gap-1.5 px-3 py-2 border-2 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-all ${active ? 'bg-primary-light border-primary text-primary' : 'bg-[var(--color-bg-secondary)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:border-primary hover:text-[var(--color-text-primary)]'}`}
-                      onClick={() => setEmbeddingProvider(opt.id)}
-                      disabled={isSaving}
-                    >
-                      {opt.icon}
-                      <span className="truncate">{opt.label}</span>
-                      <span className={`ml-auto shrink-0 px-2 py-0.5 rounded text-xs font-semibold ${active ? 'bg-primary text-white' : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]'}`}>{opt.badge}</span>
-                    </button>
-                  );
-                })}
+              <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-2">Ollama Model</label>
+              <div className="flex gap-2">
+                <input type="text" className={inputCls} placeholder="nomic-embed-text.v1.5:latest" value={ollamaModel} onChange={e => setOllamaModel(e.target.value)} />
+                <button className={saveBtnCls} onClick={handleSave} disabled={isSaving || !ollamaModel.trim()}>
+                  {isSaving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+                  Apply
+                </button>
               </div>
-              <p className="text-xs text-[var(--color-text-muted)]">
-                {embeddingProvider === 'ollama'
-                  ? '✨ Ollama provides 768-dim embeddings with 8K context - better for technical documents, part numbers, and long table rows. Requires Ollama running.'
-                  : '⚡ Local model is faster and works offline - good for general documents with shorter text.'}
+              <p className="text-xs text-[var(--color-text-muted)] mt-1">
+                Run <code className="bg-[var(--color-bg-tertiary)] px-1 rounded">ollama pull nomic-embed-text.v1.5:latest</code> first if not already downloaded.
               </p>
             </div>
-
-            {embeddingProvider === 'sentence-transformers' ? (
-              <div className="mb-5">
-                <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-2">Model Path</label>
-                <div className="flex gap-2">
-                  <input type="text" className={inputCls} placeholder="Enter path to embedding model folder..." value={modelPath} onChange={e => setModelPath(e.target.value)} />
-                  <button className={saveBtnCls} onClick={handleSave} disabled={isSaving || !modelPath.trim()}>
-                    {isSaving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
-                    Save
-                  </button>
-                </div>
-                <p className="text-xs text-[var(--color-text-muted)] mt-1">Relative path from project root (e.g., models/all-MiniLM-L6-v2) or absolute path.</p>
-              </div>
-            ) : (
-              <div className="mb-5">
-                <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-2">Ollama Model</label>
-                <div className="flex gap-2">
-                  <input type="text" className={inputCls} placeholder="nomic-embed-text.v1.5:latest" value={ollamaModel} onChange={e => setOllamaModel(e.target.value)} />
-                  <button className={saveBtnCls} onClick={handleSave} disabled={isSaving || !ollamaModel.trim()}>
-                    {isSaving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
-                    Apply
-                  </button>
-                </div>
-                <p className="text-xs text-[var(--color-text-muted)] mt-1">Ollama model name (e.g., nomic-embed-text.v1.5:latest). Run &apos;ollama pull nomic-embed-text.v1.5:latest&apos; first.</p>
-              </div>
-            )}
 
             {saveMessage && (
               <div className={alertCls(saveMessage.type)}>

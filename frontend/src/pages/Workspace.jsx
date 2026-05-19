@@ -426,7 +426,7 @@ export function Workspace() {
   return (
     <div className="flex flex-col h-screen bg-[var(--color-bg-secondary)]">
       <Navigation />
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden pt-14">
         <Sidebar
           threads={threads}
           currentThreadId={currentThreadId}

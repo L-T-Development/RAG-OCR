@@ -28,12 +28,12 @@
   --color-bg-hover:     #e2e8f0;
   --color-bg-active:    #dbeafe;
 
-  --color-sidebar-bg:          #111827;
-  --color-sidebar-hover:       #1f2937;
-  --color-sidebar-active:      #374151;
-  --color-sidebar-text:        #e5e7eb;
-  --color-sidebar-text-muted:  #9ca3af;
-  --color-sidebar-border:      #374151;
+  --color-sidebar-bg:          #f8fafc;
+  --color-sidebar-hover:       #f1f5f9;
+  --color-sidebar-active:      #e2e8f0;
+  --color-sidebar-text:        #0f172a;
+  --color-sidebar-text-muted:  #64748b;
+  --color-sidebar-border:      #e2e8f0;
 
   --color-text-primary:   #0f172a;
   --color-text-secondary: #475569;
