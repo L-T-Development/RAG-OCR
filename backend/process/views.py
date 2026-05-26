@@ -18,6 +18,15 @@ import tempfile
 import uuid
 import io
 import threading
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def _server_error(e, context="Internal server error"):
+    """Log the real exception server-side, return a generic message to the client."""
+    logger.error("%s: %s", context, e, exc_info=True)
+    return JsonResponse({"error": context}, status=500)
 from typing import Optional
 from datetime import datetime
 from django.db import connection
@@ -332,7 +341,7 @@ def quick_upload(request):
                 os.unlink(tmp_path)
             except:
                 pass
-        return JsonResponse({'error': str(e)}, status=500)
+        return _server_error(e)
 
 
 @csrf_exempt
@@ -629,7 +638,7 @@ def chat_thread(request, thread_id):
             print(f"[ERROR] Chat endpoint error: {type(e).__name__}: {str(e)}")
             import traceback
             traceback.print_exc()
-            return JsonResponse({'error': str(e)}, status=500)
+            return _server_error(e)
 
     return JsonResponse({'error': 'Method not allowed'}, status=405)
 
@@ -1445,7 +1454,7 @@ def delete_thread(request, thread_id):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return JsonResponse({'error': f'Delete failed: {str(e)}'}, status=500)
+        return _server_error(e, 'Delete failed')
 
 @csrf_exempt
 @require_http_methods(["DELETE"])
@@ -1478,7 +1487,7 @@ def delete_document(request, doc_id):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return JsonResponse({'error': f'Delete failed: {str(e)}'}, status=500)
+        return _server_error(e, 'Delete failed')
 
 
 # ==================== DOCUMENT METADATA ENDPOINTS ====================
@@ -1497,10 +1506,10 @@ def document_progress(request, doc_id):
             "status":          doc.status,
             "progress":        doc.progress,
             "progress_detail": doc.progress_detail,
-            "error_message":   doc.error_message,
+            "error_message":   "Processing failed" if doc.error_message else None,
         })
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 @csrf_exempt
@@ -1563,7 +1572,7 @@ def document_metadata(request, doc_id):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return JsonResponse({'error': f'Metadata update failed: {str(e)}'}, status=500)
+        return _server_error(e, 'Metadata update failed')
 
 
 @csrf_exempt
@@ -1596,7 +1605,7 @@ def link_document_version(request, doc_id):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return JsonResponse({'error': f'Version linking failed: {str(e)}'}, status=500)
+        return _server_error(e, 'Version linking failed')
 
 
 @csrf_exempt
@@ -1653,7 +1662,7 @@ def document_version_history(request, doc_id):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return JsonResponse({'error': f'Version history retrieval failed: {str(e)}'}, status=500)
+        return _server_error(e, 'Version history retrieval failed')
 
 
 #comparison
@@ -1731,7 +1740,7 @@ def compare_documents(request):
         print(f"[COMPARE] ERROR: {type(e).__name__}: {str(e)}")
         import traceback
         traceback.print_exc()
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 def compare_status(request, job_id):
@@ -1793,7 +1802,7 @@ def compare_page_detail(request, job_id, page_num):
         return JsonResponse(result)
         
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 # ---------------- DOCUMENT SUMMARY ENDPOINTS ----------------
@@ -1826,7 +1835,7 @@ def summarize_thread_documents(request, thread_id):
         return JsonResponse(result)
 
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 @csrf_exempt
@@ -1861,7 +1870,7 @@ def summarize_single_document(request, doc_id):
         print(f"[API] Exception in summarize_single_document: {e}")
         import traceback
         traceback.print_exc()
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 def get_thread_info(request, thread_id):
@@ -1880,7 +1889,7 @@ def get_thread_info(request, thread_id):
         return JsonResponse(result)
 
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 # ==================== MODEL CONFIGURATION ENDPOINTS ====================
@@ -1904,7 +1913,7 @@ def model_status(request):
         
         return JsonResponse(status)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 @csrf_exempt
@@ -1963,7 +1972,7 @@ def embedding_provider_configure(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 @csrf_exempt
@@ -1999,7 +2008,7 @@ def model_configure(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 @csrf_exempt
@@ -2024,7 +2033,7 @@ def model_validate(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 def reembed_status(request):
@@ -2046,7 +2055,7 @@ def reembed_status(request):
             "new_model": state["new_model"],
         })
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 @csrf_exempt
@@ -2060,7 +2069,7 @@ def get_app_config(request):
         config_dict = {c.key: c.value for c in configs}
         return JsonResponse({"config": config_dict})
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 # ==================== LLM MODEL SELECTION ENDPOINTS ====================
@@ -2079,7 +2088,7 @@ def llm_models_list(request):
             "current": current_model
         })
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 @csrf_exempt
@@ -2111,7 +2120,7 @@ def llm_model_select(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 # ==================== REPORTS / COMPARATOR ENDPOINTS ====================
@@ -2177,7 +2186,7 @@ def get_columns_from_file(request):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 # Temp file cache for preview requests
@@ -2227,7 +2236,7 @@ def get_column_preview_view(request):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 @csrf_exempt
@@ -2302,7 +2311,7 @@ def start_multi_pdf_comparison(request):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 def get_report_status(request, job_id):
@@ -2385,7 +2394,7 @@ def get_multi_pdf_columns_preview(request):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 @csrf_exempt
@@ -2462,7 +2471,7 @@ def quick_column_compare(request):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 @csrf_exempt
@@ -2531,7 +2540,7 @@ def start_single_pdf_comparison(request):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return JsonResponse({"error": str(e)}, status=500)
+        return _server_error(e)
 
 
 # In-memory storage for comparison reports

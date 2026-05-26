@@ -734,7 +734,7 @@ def _gen_compare(query_text, thread_id, file_a, file_b, column_hint):
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-def query_rag(query_text, current_thread_id, parent_thread_id=None):
+def query_rag(query_text, current_thread_id, parent_thread_id=None, conversation_history=None):
     if not model_manager.is_ready():
         model_manager.load_model()
     if not model_manager.is_ready():

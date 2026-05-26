@@ -10,8 +10,45 @@ import os
 import pickle
 import re
 import threading
+from collections import Counter, defaultdict
+from math import log
 
-from rank_bm25 import BM25Okapi
+try:
+    from rank_bm25 import BM25Okapi
+except ImportError:
+    class BM25Okapi:
+        def __init__(self, corpus: list[list[str]], k1: float = 1.5, b: float = 0.75):
+            self.corpus = corpus
+            self.k1 = k1
+            self.b = b
+            self.doc_len = [len(doc) for doc in corpus]
+            self.avgdl = sum(self.doc_len) / len(self.doc_len) if self.doc_len else 0.0
+            self.df = defaultdict(int)
+            for doc in corpus:
+                for token in set(doc):
+                    self.df[token] += 1
+            self.n_docs = len(corpus)
+
+        def get_scores(self, query_tokens: list[str]):
+            if not self.corpus or not query_tokens:
+                return []
+
+            scores = []
+            query_counts = Counter(query_tokens)
+            for doc_index, doc in enumerate(self.corpus):
+                score = 0.0
+                freq = Counter(doc)
+                doc_len = self.doc_len[doc_index] or 1
+                norm = self.k1 * (1 - self.b + self.b * doc_len / (self.avgdl or 1.0))
+                for token, qf in query_counts.items():
+                    tf = freq.get(token, 0)
+                    if not tf:
+                        continue
+                    df = self.df.get(token, 0)
+                    idf = log((self.n_docs - df + 0.5) / (df + 0.5) + 1.0)
+                    score += idf * (tf * (self.k1 + 1.0)) / (tf + norm) * qf
+                scores.append(score)
+            return scores
 
 from .config import BM25_INDEX_PATH
 

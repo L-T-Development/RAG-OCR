@@ -16,7 +16,7 @@ DEFAULT_OLLAMA_EMBEDDING_MODEL = "nomic-embed-text.v1.5:latest"
 CANDIDATE_K = 10
 MAX_FINAL_CHUNKS = 5
 CHROMA_BATCH_SIZE = 5000
-EMBEDDING_BATCH_SIZE = 128
+EMBEDDING_BATCH_SIZE = 32
 
 # ── Disable ChromaDB telemetry ────────────────────────────────────────────────
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
