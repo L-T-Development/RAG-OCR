@@ -1,5 +1,4 @@
 services:
-  # Django backend (uses host Ollama)
   backend:
     build:
       context: .
@@ -13,16 +12,23 @@ services:
       - backend_chroma:/app/local_chroma_db
       - backend_media:/app/media
     environment:
-      - OLLAMA_API_BASE=http://host.docker.internal:11434
       - DJANGO_SETTINGS_MODULE=ragocr.settings
-      - DEBUG=True
+      - DEBUG=False
+      - ALLOWED_HOSTS=localhost,127.0.0.1,backend,ragocr-backend
+      - CORS_ALLOWED_ORIGINS=http://localhost,http://localhost:80,http://127.0.0.1
+      - OLLAMA_API_BASE=http://host.docker.internal:11434
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
       - ragocr-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/model/status/"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
 
-  # React frontend
   frontend:
     build:
       context: ./frontend
@@ -31,7 +37,8 @@ services:
     ports:
       - "80:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     networks:
       - ragocr-network
     restart: unless-stopped

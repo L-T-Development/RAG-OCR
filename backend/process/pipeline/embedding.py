@@ -66,15 +66,36 @@ class OllamaEmbeddingProvider:
         self._batch_ok = False
         return 768 if "nomic" in self.model_name.lower() else 384
 
+    # nomic-embed-text context = 8192 tokens.
+    # Technical PDFs (numbers, codes, units) average ~2 chars/token → 8000 chars ≈ 4000 tokens, safely within limit.
+    _MAX_CHARS = 8_000
+
+    def _sanitize(self, texts):
+        """Replace empty strings and truncate texts that exceed the model context window."""
+        result = []
+        for t in texts:
+            if not t or not t.strip():
+                result.append(" ")
+            elif len(t) > self._MAX_CHARS:
+                result.append(t[:self._MAX_CHARS])
+            else:
+                result.append(t)
+        return result
+
     def _encode_batch(self, texts):
         """Single HTTP call for a list of texts via /api/embed."""
+        safe_texts = self._sanitize(texts)
         r = requests.post(
             self._batch_url,
-            json={"model": self.model_name, "input": texts},
+            json={"model": self.model_name, "input": safe_texts},
             timeout=max(30, len(texts) * 2),
         )
         if r.status_code != 200:
-            raise RuntimeError(f"HTTP {r.status_code}")
+            try:
+                detail = r.json()
+            except Exception:
+                detail = r.text[:200]
+            raise RuntimeError(f"HTTP {r.status_code}: {detail}")
         embs = r.json().get("embeddings", [])
         if len(embs) != len(texts):
             raise RuntimeError(f"Expected {len(texts)} embeddings, got {len(embs)}")
@@ -82,9 +103,10 @@ class OllamaEmbeddingProvider:
 
     def _encode_single(self, text):
         """Fallback: one HTTP call per text via /api/embeddings."""
+        safe = text[:self._MAX_CHARS] if text and len(text) > self._MAX_CHARS else (text or " ")
         r = requests.post(
             self._single_url,
-            json={"model": self.model_name, "prompt": text},
+            json={"model": self.model_name, "prompt": safe},
             timeout=30,
         )
         if r.status_code == 200:
@@ -105,7 +127,20 @@ class OllamaEmbeddingProvider:
                     all_embeddings.extend(self._encode_batch(chunk))
                     continue
                 except Exception as e:
-                    print(f"[EMBED] Batch endpoint failed ({e}), switching to single-call mode")
+                    err = str(e)
+                    if "context length" in err.lower():
+                        # One text in this batch is too long — embed each text individually
+                        # and keep batch mode enabled for future chunks
+                        print(f"[EMBED] Context limit hit, retrying {len(chunk)} texts one-by-one")
+                        for text in chunk:
+                            try:
+                                emb = self._encode_batch([text])[0]
+                            except Exception:
+                                emb = self._encode_single(text)
+                            all_embeddings.append(emb)
+                        continue
+                    # Any other error: disable batch for the rest of this document
+                    print(f"[EMBED] Batch endpoint unavailable ({err}), switching to single-call mode")
                     self._batch_ok = False
 
             # Single-call fallback

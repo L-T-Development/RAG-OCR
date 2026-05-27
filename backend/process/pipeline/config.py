@@ -3,9 +3,11 @@ import os
 # ── Paths & URLs ──────────────────────────────────────────────────────────────
 CHROMA_PATH = "./local_chroma_db"
 BM25_INDEX_PATH = "./local_chroma_db/bm25_index.pkl"
-OLLAMA_API = "http://localhost:11434/api/generate"
-OLLAMA_EMBED_API = "http://localhost:11434/api/embeddings"   # legacy single-text
-OLLAMA_EMBED_BATCH_API = "http://localhost:11434/api/embed"  # batch (Ollama ≥ 0.1.26)
+_OLLAMA_BASE = os.environ.get("OLLAMA_API_BASE", "http://localhost:11434")
+OLLAMA_API = f"{_OLLAMA_BASE}/api/generate"
+OLLAMA_EMBED_API = f"{_OLLAMA_BASE}/api/embeddings"   # legacy single-text
+OLLAMA_EMBED_BATCH_API = f"{_OLLAMA_BASE}/api/embed"  # batch (Ollama ≥ 0.1.26)
+OLLAMA_TAGS_API = f"{_OLLAMA_BASE}/api/tags"
 
 # ── Default models ────────────────────────────────────────────────────────────
 DEFAULT_LLM_MODEL = "llama3.1:8b"
@@ -16,18 +18,10 @@ DEFAULT_OLLAMA_EMBEDDING_MODEL = "nomic-embed-text.v1.5:latest"
 CANDIDATE_K = 10
 MAX_FINAL_CHUNKS = 5
 CHROMA_BATCH_SIZE = 5000
-EMBEDDING_BATCH_SIZE = 32
+EMBEDDING_BATCH_SIZE = 8
 
 # ── Disable ChromaDB telemetry ────────────────────────────────────────────────
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
-
-# ── CUDA detection ────────────────────────────────────────────────────────────
-try:
-    import torch as _torch
-    CUDA_AVAILABLE = _torch.cuda.is_available()
-except ImportError:
-    _torch = None
-    CUDA_AVAILABLE = False
 
 # ── Available LLM models ──────────────────────────────────────────────────────
 AVAILABLE_LLM_MODELS = {
@@ -68,8 +62,7 @@ _TIER_ORDER = {"efficient": 0, "balanced": 1, "performance": 2}
 def get_current_llm_model():
     try:
         from process.models import AppConfig
-        model = AppConfig.get_value("llm_model", DEFAULT_LLM_MODEL)
-        return model if model in AVAILABLE_LLM_MODELS else DEFAULT_LLM_MODEL
+        return AppConfig.get_value("llm_model", DEFAULT_LLM_MODEL)
     except Exception:
         return DEFAULT_LLM_MODEL
 
@@ -77,10 +70,10 @@ def get_current_llm_model():
 def set_llm_model(model_name):
     try:
         from process.models import AppConfig
-        if model_name not in AVAILABLE_LLM_MODELS:
-            return {"success": False, "error": f"Invalid model: {model_name}"}
-        AppConfig.set_value("llm_model", model_name)
-        return {"success": True, "model": model_name}
+        if not model_name or not isinstance(model_name, str):
+            return {"success": False, "error": "Model name is required"}
+        AppConfig.set_value("llm_model", model_name.strip())
+        return {"success": True, "model": model_name.strip()}
     except Exception as e:
         return {"success": False, "error": str(e)}
 

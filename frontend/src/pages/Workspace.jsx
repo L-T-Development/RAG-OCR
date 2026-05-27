@@ -222,57 +222,71 @@ export function Workspace() {
     }
   };
 
+  // Poll the backend progress endpoint until ingestion finishes (or errors out)
+  const pollIngestion = async (docId) => {
+    while (true) {
+      try {
+        const { ok, data } = await api.getDocumentProgress(docId);
+        if (!ok) {
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
+
+        const pct = Math.max(20, Math.min(100, data.progress ?? 20));
+        setUploadProgress(pct);
+        setUploadStatus(data.progress_detail || 'Processing…');
+
+        if (data.status === 'done' || data.status === 'completed' || pct >= 100) {
+          setUploadProgress(100);
+          setUploadStatus('Upload complete!');
+          return { success: true };
+        }
+        if (data.status === 'error' || data.error_message) {
+          return { success: false, error: data.error_message || 'Processing failed' };
+        }
+      } catch {
+        // network blip — keep polling
+      }
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  };
+
   const handleUpload = async (file, category = 'other') => {
     if (!currentThreadId) {
-      // No thread selected - use quick upload to create one
       await handleQuickUpload(file, category);
       return;
     }
 
     setIsUploading(true);
-    setUploadProgress(10);
-    setUploadStatus('Uploading...');
-
-    // Progress animation to 20% during upload
-    const progressInterval = setInterval(() => {
-      setUploadProgress(prev => {
-        if (prev >= 20) return prev;
-        return prev + 2;
-      });
-    }, 100);
+    setUploadProgress(5);
+    setUploadStatus('Uploading…');
 
     try {
       const { ok, data } = await api.uploadFile(currentThreadId, file, category);
-      clearInterval(progressInterval);
-      
-      if (ok) {
-        setUploadProgress(50);
-        setUploadStatus('Processing document...');
-        await new Promise(resolve => setTimeout(resolve, 400));
-        
-        setUploadProgress(80);
-        setUploadStatus('Embedding text...');
-        await new Promise(resolve => setTimeout(resolve, 400));
-        
-        setUploadProgress(100);
-        setUploadStatus('Upload complete!');
-        
-        const filesData = await api.getThreadFiles(currentThreadId);
-        setDocuments(filesData.files || []);
-        
-        // Clear status after delay
-        setTimeout(() => {
-          setUploadStatus('');
-          setUploadProgress(0);
-        }, 2000);
-      } else {
-        clearInterval(progressInterval);
+      if (!ok) {
         alert('Upload failed: ' + (data.error || 'Unknown error'));
         setUploadStatus('');
         setUploadProgress(0);
+        return;
       }
+
+      setUploadProgress(20);
+      setUploadStatus('Queued for processing…');
+
+      const result = await pollIngestion(data.doc_id);
+
+      const filesData = await api.getThreadFiles(currentThreadId);
+      setDocuments(filesData.files || []);
+
+      if (!result.success) {
+        alert('Processing failed: ' + result.error);
+      }
+
+      setTimeout(() => {
+        setUploadStatus('');
+        setUploadProgress(0);
+      }, 2000);
     } catch (e) {
-      clearInterval(progressInterval);
       alert('Upload failed: Network error');
       setUploadStatus('');
       setUploadProgress(0);
@@ -283,48 +297,35 @@ export function Workspace() {
 
   const handleQuickUpload = async (file, category = 'other') => {
     setIsUploading(true);
-    setUploadProgress(10);
-    setUploadStatus('Uploading...');
-
-    // Progress animation to 20% during upload
-    const progressInterval = setInterval(() => {
-      setUploadProgress(prev => {
-        if (prev >= 20) return prev;
-        return prev + 2;
-      });
-    }, 100);
+    setUploadProgress(5);
+    setUploadStatus('Uploading…');
 
     try {
       const { ok, data } = await api.quickUpload(file, category);
-      clearInterval(progressInterval);
-      
-      if (ok && data.thread) {
-        setUploadProgress(50);
-        setUploadStatus('Processing document...');
-        await new Promise(resolve => setTimeout(resolve, 400));
-        
-        setUploadProgress(80);
-        setUploadStatus('Embedding text...');
-        await new Promise(resolve => setTimeout(resolve, 400));
-        
-        setUploadProgress(100);
-        setUploadStatus('Upload complete!');
-        
-        await fetchThreads();
-        handleSelectThread(data.thread.id, data.thread.name);
-        
-        setTimeout(() => {
-          setUploadStatus('');
-          setUploadProgress(0);
-        }, 2000);
-      } else {
-        clearInterval(progressInterval);
+      if (!ok || !data.thread) {
         alert('Upload failed: ' + (data.error || 'Unknown error'));
         setUploadStatus('');
         setUploadProgress(0);
+        return;
       }
+
+      setUploadProgress(20);
+      setUploadStatus('Queued for processing…');
+
+      await fetchThreads();
+      handleSelectThread(data.thread.id, data.thread.name);
+
+      const result = await pollIngestion(data.document?.id || data.doc_id);
+
+      if (!result.success) {
+        alert('Processing failed: ' + result.error);
+      }
+
+      setTimeout(() => {
+        setUploadStatus('');
+        setUploadProgress(0);
+      }, 2000);
     } catch (e) {
-      clearInterval(progressInterval);
       alert('Upload failed: Network error');
       setUploadStatus('');
       setUploadProgress(0);

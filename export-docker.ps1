@@ -15,7 +15,7 @@ New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
 
 # Build the images first
 Write-Host "`nBuilding Docker images..." -ForegroundColor Yellow
-docker-compose build
+docker compose build
 
 # Export backend image
 Write-Host "`nExporting backend image..." -ForegroundColor Yellow
@@ -47,7 +47,7 @@ Write-Host "✓ Nginx base image saved" -ForegroundColor Green
 
 # Copy configuration files
 Write-Host "`nCopying configuration files..." -ForegroundColor Yellow
-Copy-Item "docker-compose.yml" "$packageDir\"
+Copy-Item "docker compose.yml" "$packageDir\"
 Copy-Item "DOCKER_DEPLOYMENT.md" "$packageDir\"
 Copy-Item ".dockerignore" "$packageDir\" -ErrorAction SilentlyContinue
 Copy-Item "backend\.dockerignore" "$packageDir\backend.dockerignore" -ErrorAction SilentlyContinue
@@ -108,7 +108,7 @@ Write-Host "   Download: https://ollama.com/download" -ForegroundColor Gray
 Write-Host "2. Pull the embedding model:" -ForegroundColor White
 Write-Host "   ollama pull nomic-embed-text" -ForegroundColor Gray
 Write-Host "3. Start the application:" -ForegroundColor White
-Write-Host "   docker-compose up -d" -ForegroundColor Gray
+Write-Host "   docker compose up -d" -ForegroundColor Gray
 Write-Host "4. Access the application:" -ForegroundColor White
 Write-Host "   Frontend: http://localhost" -ForegroundColor Gray
 Write-Host "   Backend:  http://localhost:8000" -ForegroundColor Gray
@@ -131,7 +131,7 @@ This package contains all Docker images needed to run RAG-OCR offline.
 * python-base.tar - Python 3.12 base image
 * node-base.tar - Node 20 base image
 * nginx-base.tar - Nginx Alpine base image
-* docker-compose.yml - Docker Compose configuration
+* docker compose.yml - Docker Compose configuration
 * install.ps1 - Automated installation script
 * DOCKER_DEPLOYMENT.md - Detailed deployment guide
 
@@ -167,12 +167,12 @@ Verify images loaded:
   docker images | findstr rag-ocr
 
 Start the application:
-  docker-compose up -d
+  docker compose up -d
 
 ## Post-Installation
 
-1. Verify containers are running: docker-compose ps
-2. Check logs if needed: docker-compose logs backend
+1. Verify containers are running: docker compose ps
+2. Check logs if needed: docker compose logs backend
 3. Access the application:
    * Frontend: http://localhost
    * Backend API: http://localhost:8000/api/

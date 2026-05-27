@@ -14,7 +14,6 @@ from .config import (
     CHROMA_BATCH_SIZE,
     EMBEDDING_BATCH_SIZE,
     AVAILABLE_LLM_MODELS,
-    CUDA_AVAILABLE,
     get_current_llm_model,
     set_llm_model,
     get_llm_models_list,
@@ -80,7 +79,7 @@ __all__ = [
     "DEFAULT_LLM_MODEL", "DEFAULT_EMBEDDING_PROVIDER",
     "DEFAULT_OLLAMA_EMBEDDING_MODEL",
     "CANDIDATE_K", "MAX_FINAL_CHUNKS", "CHROMA_BATCH_SIZE", "EMBEDDING_BATCH_SIZE",
-    "AVAILABLE_LLM_MODELS", "CUDA_AVAILABLE",
+    "AVAILABLE_LLM_MODELS",
     "get_current_llm_model", "set_llm_model", "get_llm_models_list",
     # embedding
     "OllamaEmbeddingProvider", "EmbeddingModelManager", "model_manager",

@@ -48,3 +48,7 @@ backend/models/
 Comparator-main/
 v1
 offline_packages
+
+docker-offline-package
+ db.sqlite3
+ 

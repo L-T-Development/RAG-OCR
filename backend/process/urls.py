@@ -50,6 +50,9 @@ urlpatterns = [
     path('api/llm/models/', views.llm_models_list, name='llm_models_list'),
     path('api/llm/select/', views.llm_model_select, name='llm_model_select'),
 
+    # Ollama installed models
+    path('api/ollama/models/', views.ollama_models_list, name='ollama_models_list'),
+
     # ==================== REPORTS / COMPARATOR ENDPOINTS ====================
     path('api/reports/columns/', views.get_columns_from_file, name='get_columns'),
     path('api/reports/column-preview/', views.get_column_preview_view, name='column_preview'),

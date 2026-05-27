@@ -40,3 +40,7 @@ docs/
 
 # Misc
 .eslintcache
+
+# Large archives (not needed in build)
+node_modules.tar.gz
+*.tar.gz

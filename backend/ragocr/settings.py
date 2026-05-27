@@ -10,22 +10,16 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.1/ref/settings/
 """
 
+import os
 from pathlib import Path
 
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-_d0f!i*$#4%-+25(6yw$#-y-9v&i@25l(-s66j04gcxzkw$9!o')
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
+DEBUG = os.environ.get('DEBUG', 'False').lower() in ('1', 'true', 'yes')
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-_d0f!i*$#4%-+25(6yw$#-y-9v&i@25l(-s66j04gcxzkw$9!o'
-
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = False
-
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
 
 
 # Application definition
@@ -135,10 +129,11 @@ STATICFILES_DIRS = [
 STATIC_ROOT = BASE_DIR / "staticfiles"   
 
 # CORS Settings (for React frontend)
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
+_cors_origins = os.environ.get(
+    'CORS_ALLOWED_ORIGINS',
+    'http://localhost:3000,http://127.0.0.1:3000,http://localhost:80,http://localhost'
+)
+CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_origins.split(',') if o.strip()]
 
 CORS_ALLOW_CREDENTIALS = True
 

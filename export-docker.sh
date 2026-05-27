@@ -17,7 +17,7 @@ mkdir -p "$PACKAGE_DIR"
 # Build the images first
 echo ""
 echo "Building Docker images..."
-docker-compose build
+docker compose build
 
 # Export backend image
 echo ""
@@ -112,7 +112,7 @@ echo "   Download: https://ollama.com/download"
 echo "2. Pull the embedding model:"
 echo "   ollama pull nomic-embed-text"
 echo "3. Start the application:"
-echo "   docker-compose up -d"
+echo "   docker compose up -d"
 echo "4. Access the application:"
 echo "   Frontend: http://localhost"
 echo "   Backend:  http://localhost:8000"
@@ -174,20 +174,20 @@ docker load -i frontend-image.tar
 docker images | grep rag-ocr
 
 # 4. Start the application
-docker-compose up -d
+docker compose up -d
 \`\`\`
 
 ## Post-Installation
 
 1. **Verify containers are running:**
    \`\`\`bash
-   docker-compose ps
+   docker compose ps
    \`\`\`
 
 2. **Check logs if needed:**
    \`\`\`bash
-   docker-compose logs backend
-   docker-compose logs frontend
+   docker compose logs backend
+   docker compose logs frontend
    \`\`\`
 
 3. **Access the application:**

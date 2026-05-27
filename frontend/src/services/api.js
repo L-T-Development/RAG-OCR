@@ -44,6 +44,11 @@ export const api = {
     return { ok: res.ok, data: await res.json() };
   },
 
+  async getDocumentProgress(docId) {
+    const res = await fetch(`${API_BASE}/documents/${docId}/progress/`);
+    return { ok: res.ok, data: await res.json() };
+  },
+
   async deleteDocument(docId) {
     const res = await fetch(`${API_BASE}/delete-document/${docId}/`, {
       method: 'DELETE',
@@ -179,6 +184,12 @@ export const api = {
 
   async getAppConfig() {
     const res = await fetch(`${API_BASE}/config/`);
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  // Ollama installed models (live from /api/tags)
+  async getOllamaModels() {
+    const res = await fetch(`${API_BASE}/ollama/models/`);
     return { ok: res.ok, data: await res.json() };
   },
 

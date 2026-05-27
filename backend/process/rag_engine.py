@@ -15,7 +15,6 @@ from .pipeline import (
     CHROMA_BATCH_SIZE,
     EMBEDDING_BATCH_SIZE,
     AVAILABLE_LLM_MODELS,
-    CUDA_AVAILABLE,
 
     # LLM model helpers
     get_current_llm_model,

@@ -2123,6 +2123,23 @@ def llm_model_select(request):
         return _server_error(e)
 
 
+def ollama_models_list(request):
+    """Proxy GET /api/ollama/models/ → Ollama /api/tags, returns installed model names."""
+    if request.method != "GET":
+        return JsonResponse({"error": "GET method required"}, status=405)
+
+    import requests as req
+    from .pipeline.config import OLLAMA_TAGS_API
+    try:
+        resp = req.get(OLLAMA_TAGS_API, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        models = [m["name"] for m in data.get("models", [])]
+        return JsonResponse({"models": models})
+    except Exception as e:
+        return _server_error(e, "Failed to fetch Ollama models")
+
+
 # ==================== REPORTS / COMPARATOR ENDPOINTS ====================
 
 @csrf_exempt

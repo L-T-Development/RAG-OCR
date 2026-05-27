@@ -5,93 +5,90 @@ import { Navigation } from '../components/shared/Navigation';
 import { api } from '../services/api';
 import {
   ArrowLeft, Cpu, Moon, Sun,
-  CheckCircle, XCircle, Loader2, Save, Zap, Scale, Sparkles,
+  CheckCircle, XCircle, Loader2, Save, Sparkles, RefreshCw,
 } from 'lucide-react';
 
 export function Settings() {
   const navigate = useNavigate();
   const { theme, setTheme } = useTheme();
 
-  const [ollamaModel, setOllamaModel] = useState('nomic-embed-text.v1.5:latest');
+  // Ollama model list (shared by both sections)
+  const [ollamaModels, setOllamaModels] = useState([]);
+  const [isLoadingModels, setIsLoadingModels] = useState(true);
+
+  // Embedding
+  const [embeddingModel, setEmbeddingModel] = useState('');
   const [modelStatus, setModelStatus] = useState(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingStatus, setIsLoadingStatus] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState(null);
 
-  const [llmModels, setLlmModels] = useState([]);
+  // LLM
   const [currentLLM, setCurrentLLM] = useState('');
-  const [isLoadingLLM, setIsLoadingLLM] = useState(true);
+  const [selectedLLM, setSelectedLLM] = useState('');
   const [isSwitchingLLM, setIsSwitchingLLM] = useState(false);
   const [llmMessage, setLlmMessage] = useState(null);
 
-  const fetchModelStatus = useCallback(async () => {
+  const fetchOllamaModels = useCallback(async () => {
+    setIsLoadingModels(true);
     try {
-      setIsLoading(true);
-      const result = await api.getModelStatus();
+      const result = await api.getOllamaModels();
       if (result.ok) {
-        setModelStatus(result.data);
-        const configuredModel = result.data.ollama_model || 'nomic-embed-text.v1.5:latest';
-        setOllamaModel(configuredModel === 'nomic-embed-text' ? 'nomic-embed-text.v1.5:latest' : configuredModel);
+        setOllamaModels(result.data.models || []);
       }
     } catch (error) {
-      console.error('Failed to fetch model status:', error);
-      setModelPath('models/all-MiniLM-L6-v2');
+      console.error('Failed to fetch Ollama models:', error);
     } finally {
-      setIsLoading(false);
+      setIsLoadingModels(false);
     }
   }, []);
 
-  const fetchLLMModels = useCallback(async () => {
+  const fetchModelStatus = useCallback(async () => {
+    setIsLoadingStatus(true);
     try {
-      setIsLoadingLLM(true);
-      const result = await api.getLLMModels();
+      const result = await api.getModelStatus();
       if (result.ok) {
-        setLlmModels(result.data.models || []);
-        setCurrentLLM(result.data.current || '');
+        setModelStatus(result.data);
+        const configured = result.data.ollama_model || '';
+        setEmbeddingModel(configured);
       }
     } catch (error) {
-      console.error('Failed to fetch LLM models:', error);
+      console.error('Failed to fetch model status:', error);
     } finally {
-      setIsLoadingLLM(false);
+      setIsLoadingStatus(false);
+    }
+  }, []);
+
+  const fetchLLMCurrent = useCallback(async () => {
+    try {
+      const result = await api.getLLMModels();
+      if (result.ok) {
+        const cur = result.data.current || '';
+        setCurrentLLM(cur);
+        setSelectedLLM(cur);
+      }
+    } catch (error) {
+      console.error('Failed to fetch current LLM:', error);
     }
   }, []);
 
   useEffect(() => {
+    fetchOllamaModels();
     fetchModelStatus();
-    fetchLLMModels();
-  }, [fetchModelStatus, fetchLLMModels]);
+    fetchLLMCurrent();
+  }, [fetchOllamaModels, fetchModelStatus, fetchLLMCurrent]);
 
-  const handleSelectLLM = async (modelId) => {
-    if (modelId === currentLLM || isSwitchingLLM) return;
-    setIsSwitchingLLM(true);
-    setLlmMessage(null);
-    try {
-      const result = await api.selectLLMModel(modelId);
-      if (result.ok) {
-        setCurrentLLM(modelId);
-        setLlmModels(result.data.models || llmModels.map(m => ({ ...m, selected: m.id === modelId })));
-        setLlmMessage({ type: 'success', text: 'LLM model switched successfully!' });
-      } else {
-        setLlmMessage({ type: 'error', text: result.data.error || 'Failed to switch model' });
-      }
-    } catch {
-      setLlmMessage({ type: 'error', text: 'Network error. Please try again.' });
-    } finally {
-      setIsSwitchingLLM(false);
-    }
-  };
-
-  const handleSave = async () => {
-    if (!ollamaModel.trim()) {
-      setSaveMessage({ type: 'error', text: 'Please enter an Ollama model name' });
+  const handleSaveEmbedding = async () => {
+    if (!embeddingModel) {
+      setSaveMessage({ type: 'error', text: 'Please select an embedding model' });
       return;
     }
     setIsSaving(true);
     setSaveMessage(null);
     try {
-      const result = await api.configureEmbeddingProvider('ollama', ollamaModel);
+      const result = await api.configureEmbeddingProvider('ollama', embeddingModel);
       if (result.ok && result.data.status?.loaded) {
-        setSaveMessage({ type: 'success', text: 'Ollama model configured successfully!' });
+        setSaveMessage({ type: 'success', text: 'Embedding model configured successfully!' });
         setModelStatus(result.data.status);
       } else {
         setSaveMessage({ type: 'error', text: result.data.error || result.data.status?.error || 'Failed to configure model' });
@@ -103,14 +100,33 @@ export function Settings() {
     }
   };
 
+  const handleSwitchLLM = async () => {
+    if (!selectedLLM || selectedLLM === currentLLM || isSwitchingLLM) return;
+    setIsSwitchingLLM(true);
+    setLlmMessage(null);
+    try {
+      const result = await api.selectLLMModel(selectedLLM);
+      if (result.ok) {
+        setCurrentLLM(selectedLLM);
+        setLlmMessage({ type: 'success', text: 'LLM model switched successfully!' });
+      } else {
+        setLlmMessage({ type: 'error', text: result.data?.error || 'Failed to switch model' });
+      }
+    } catch {
+      setLlmMessage({ type: 'error', text: 'Network error. Please try again.' });
+    } finally {
+      setIsSwitchingLLM(false);
+    }
+  };
+
   const getStatusIndicator = () => {
-    if (isLoading) return 'warning';
+    if (isLoadingStatus) return 'warning';
     if (modelStatus?.loaded) return 'success';
     return 'error';
   };
 
   const getStatusText = () => {
-    if (isLoading) return 'Loading...';
+    if (isLoadingStatus) return 'Loading...';
     if (modelStatus?.loaded) return 'Model loaded and ready';
     return modelStatus?.error || 'Model not configured';
   };
@@ -121,13 +137,7 @@ export function Settings() {
     warning: 'bg-yellow-500 animate-pulse',
   }[getStatusIndicator()];
 
-  const tierIconCls = {
-    efficient: 'bg-gradient-to-br from-green-500 to-green-600',
-    balanced: 'bg-gradient-to-br from-blue-500 to-blue-600',
-    performance: 'bg-gradient-to-br from-violet-500 to-violet-700',
-  };
-
-  const inputCls = 'flex-1 px-3 py-2 text-sm text-[var(--color-text-primary)] bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg focus:outline-none focus:border-[var(--color-border-focus)] focus:ring-2 focus:ring-blue-100 placeholder:text-[var(--color-text-muted)] transition-colors';
+  const selectCls = 'flex-1 px-3 py-2 text-sm text-[var(--color-text-primary)] bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg focus:outline-none focus:border-[var(--color-border-focus)] focus:ring-2 focus:ring-blue-100 transition-colors disabled:opacity-60';
 
   const saveBtnCls = 'px-4 py-2 text-sm font-medium bg-primary text-white rounded-lg hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5 transition-colors';
 
@@ -136,6 +146,26 @@ export function Settings() {
   const sectionCls = 'bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-xl mb-5 overflow-hidden';
   const sectionHeaderCls = 'px-5 py-4 border-b border-[var(--color-border)] flex items-center gap-3';
   const sectionIconCls = 'w-9 h-9 bg-primary-light rounded-lg flex items-center justify-center text-primary shrink-0';
+
+  const modelDropdown = (value, onChange, placeholder) => (
+    isLoadingModels ? (
+      <div className="flex-1 flex items-center gap-2 px-3 py-2 text-sm text-[var(--color-text-muted)] bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg">
+        <Loader2 size={14} className="animate-spin" />
+        Loading models from Ollama...
+      </div>
+    ) : ollamaModels.length === 0 ? (
+      <div className="flex-1 px-3 py-2 text-sm text-red-500 bg-[var(--color-bg-secondary)] border border-red-300 rounded-lg">
+        No models found — is Ollama running?
+      </div>
+    ) : (
+      <select className={selectCls} value={value} onChange={e => onChange(e.target.value)}>
+        {!value && <option value="">{placeholder}</option>}
+        {ollamaModels.map(m => (
+          <option key={m} value={m}>{m}</option>
+        ))}
+      </select>
+    )
+  );
 
   return (
     <div className="min-h-screen bg-[var(--color-bg-secondary)] text-[var(--color-text-primary)]">
@@ -149,6 +179,13 @@ export function Settings() {
           <ArrowLeft size={20} />
         </button>
         <h1 className="text-xl font-semibold text-[var(--color-text-primary)]">Settings</h1>
+        <button
+          className="ml-auto w-9 h-9 flex items-center justify-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
+          onClick={() => { fetchOllamaModels(); fetchModelStatus(); fetchLLMCurrent(); }}
+          title="Refresh model list"
+        >
+          <RefreshCw size={16} className={isLoadingModels ? 'animate-spin' : ''} />
+        </button>
       </header>
 
       <div className="max-w-3xl mx-auto px-6 py-6">
@@ -159,7 +196,7 @@ export function Settings() {
             <div className={sectionIconCls}><Cpu size={20} /></div>
             <div>
               <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Embedding Model</h2>
-              <p className="text-sm text-[var(--color-text-muted)]">Configure the AI model for document embeddings</p>
+              <p className="text-sm text-[var(--color-text-muted)]">Model used to embed documents into the vector store</p>
             </div>
           </div>
 
@@ -170,27 +207,30 @@ export function Settings() {
               <div className="flex-1">
                 <div className="text-sm font-medium text-[var(--color-text-primary)]">Model Status</div>
                 <div className="text-xs text-[var(--color-text-muted)]">{getStatusText()}</div>
-                {modelStatus?.loaded && (
+                {modelStatus?.loaded && modelStatus?.ollama_model && (
                   <div className="text-xs text-[var(--color-text-muted)] mt-1 opacity-70">
-                    Ollama · nomic-embed-text.v1.5:latest · 768 dims · 8K context
+                    Active: {modelStatus.ollama_model}
                   </div>
                 )}
               </div>
-              {isLoading && <Loader2 size={18} className="animate-spin" />}
+              {isLoadingStatus && <Loader2 size={18} className="animate-spin" />}
             </div>
 
-            {/* Ollama model input */}
             <div className="mb-5">
-              <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-2">Ollama Model</label>
+              <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-2">Select Embedding Model</label>
               <div className="flex gap-2">
-                <input type="text" className={inputCls} placeholder="nomic-embed-text.v1.5:latest" value={ollamaModel} onChange={e => setOllamaModel(e.target.value)} />
-                <button className={saveBtnCls} onClick={handleSave} disabled={isSaving || !ollamaModel.trim()}>
+                {modelDropdown(embeddingModel, setEmbeddingModel, '— choose a model —')}
+                <button
+                  className={saveBtnCls}
+                  onClick={handleSaveEmbedding}
+                  disabled={isSaving || !embeddingModel || isLoadingModels}
+                >
                   {isSaving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
                   Apply
                 </button>
               </div>
               <p className="text-xs text-[var(--color-text-muted)] mt-1">
-                Run <code className="bg-[var(--color-bg-tertiary)] px-1 rounded">ollama pull nomic-embed-text.v1.5:latest</code> first if not already downloaded.
+                Typical choice: <code className="bg-[var(--color-bg-tertiary)] px-1 rounded">nomic-embed-text:latest</code>. The model must already be pulled in Ollama.
               </p>
             </div>
 
@@ -203,69 +243,48 @@ export function Settings() {
           </div>
         </section>
 
-        {/* ── LLM Model ─────────────────────────────────────────── */}
+        {/* ── LLM / Reasoning Model ─────────────────────────────── */}
         <section className={sectionCls}>
           <div className={sectionHeaderCls}>
             <div className={sectionIconCls}><Sparkles size={20} /></div>
             <div>
-              <h2 className="text-base font-semibold text-[var(--color-text-primary)]">LLM Model</h2>
-              <p className="text-sm text-[var(--color-text-muted)]">Select the AI model for chat and summarization</p>
+              <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Reasoning Model</h2>
+              <p className="text-sm text-[var(--color-text-muted)]">Model used for chat, Q&amp;A, and summarization</p>
             </div>
           </div>
 
           <div className="p-5">
-            {isLoadingLLM ? (
-              <div className="flex items-center gap-4 p-4 bg-[var(--color-bg-secondary)] rounded-lg">
-                <Loader2 size={18} className="animate-spin" />
-                <div className="text-sm text-[var(--color-text-muted)]">Loading available models...</div>
+            {currentLLM && (
+              <div className="flex items-center gap-3 p-3 bg-[var(--color-bg-secondary)] rounded-lg mb-4 text-sm">
+                <CheckCircle size={16} className="text-green-500 shrink-0" />
+                <span className="text-[var(--color-text-muted)]">Active:</span>
+                <code className="text-[var(--color-text-primary)] font-medium">{currentLLM}</code>
               </div>
-            ) : (
-              <>
-                <div className="mb-5">
-                  <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-2">Choose Model</label>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                    {llmModels.map(model => {
-                      const active = model.id === currentLLM;
-                      return (
-                        <button
-                          key={model.id}
-                          className={`relative p-4 border-2 rounded-xl text-left transition-all ${active ? 'border-primary bg-primary-light' : 'bg-[var(--color-bg-secondary)] border-[var(--color-border)]'} ${isSwitchingLLM ? 'opacity-70 cursor-not-allowed' : 'cursor-pointer hover:border-[var(--color-text-muted)] hover:-translate-y-0.5 hover:shadow-md'}`}
-                          onClick={() => handleSelectLLM(model.id)}
-                          disabled={isSwitchingLLM}
-                        >
-                          <div className="flex justify-between items-start mb-2">
-                            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-white ${tierIconCls[model.tier] || 'bg-gray-500'}`}>
-                              {model.tier === 'efficient' && <Zap size={20} />}
-                              {model.tier === 'balanced' && <Scale size={20} />}
-                              {model.tier === 'performance' && <Sparkles size={20} />}
-                            </div>
-                            {active && (
-                              <div className="flex items-center gap-1 px-2 py-1 bg-green-500 text-white text-xs font-semibold rounded">
-                                <CheckCircle size={14} />Active
-                              </div>
-                            )}
-                          </div>
-                          <div className="text-base font-semibold text-[var(--color-text-primary)] mb-0.5">{model.title}</div>
-                          <div className="text-sm text-[var(--color-text-muted)] mb-2">{model.name}</div>
-                          <div className="text-xs text-[var(--color-text-secondary)] leading-relaxed">{model.description}</div>
-                          {isSwitchingLLM && !active && (
-                            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white/90 p-4 rounded-lg">
-                              <Loader2 size={16} className="animate-spin" />
-                            </div>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
+            )}
 
-                {llmMessage && (
-                  <div className={alertCls(llmMessage.type)}>
-                    {llmMessage.type === 'success' ? <CheckCircle size={18} /> : <XCircle size={18} />}
-                    {llmMessage.text}
-                  </div>
-                )}
-              </>
+            <div className="mb-5">
+              <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-2">Select Reasoning Model</label>
+              <div className="flex gap-2">
+                {modelDropdown(selectedLLM, setSelectedLLM, '— choose a model —')}
+                <button
+                  className={saveBtnCls}
+                  onClick={handleSwitchLLM}
+                  disabled={isSwitchingLLM || !selectedLLM || selectedLLM === currentLLM || isLoadingModels}
+                >
+                  {isSwitchingLLM ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+                  Apply
+                </button>
+              </div>
+              <p className="text-xs text-[var(--color-text-muted)] mt-1">
+                Any model installed in Ollama can be used. Larger models are slower but more accurate.
+              </p>
+            </div>
+
+            {llmMessage && (
+              <div className={alertCls(llmMessage.type)}>
+                {llmMessage.type === 'success' ? <CheckCircle size={18} /> : <XCircle size={18} />}
+                {llmMessage.text}
+              </div>
             )}
           </div>
         </section>

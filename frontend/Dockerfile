@@ -3,11 +3,11 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Copy package files
-COPY package.json ./
+# Copy lock files first for better layer caching
+COPY package.json package-lock.json ./
 
-# Install dependencies
-RUN npm install
+# Install dependencies (clean install from lockfile)
+RUN npm ci
 
 # Copy source code
 COPY . .
@@ -24,7 +24,6 @@ COPY --from=builder /app/dist /usr/share/nginx/html
 # Copy nginx configuration
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# Expose port
 EXPOSE 80
 
 CMD ["nginx", "-g", "daemon off;"]
