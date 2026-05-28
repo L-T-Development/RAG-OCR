@@ -595,7 +595,8 @@ def chat_thread(request, thread_id):
                     query,
                     current_thread_id=thread.id,
                     parent_thread_id=parent_id,
-                    conversation_history=conversation_context
+                    conversation_history=conversation_context,
+                    long_response=bool(data.get('long_response', False)),
                 )
                 
                 answer = result.get('answer') or result.get('response') or ""
@@ -1822,7 +1823,8 @@ def summarize_thread_documents(request, thread_id):
         documents = Document.objects.filter(thread=thread)
         doc_names = [doc.filename for doc in documents]
 
-        result = summarize_document(thread_id=thread.id)
+        long_response = request.GET.get('long_response', '').lower() in ('1', 'true', 'yes')
+        result = summarize_document(thread_id=thread.id, long_response=long_response)
 
         if "error" in result:
             return JsonResponse(result, status=500)
@@ -1847,7 +1849,8 @@ def summarize_single_document(request, doc_id):
     print(f"\n[API] Summarize single document: {doc_id}")
 
     try:
-        result = summarize_document(doc_id=doc_id)
+        long_response = request.GET.get('long_response', '').lower() in ('1', 'true', 'yes')
+        result = summarize_document(doc_id=doc_id, long_response=long_response)
 
         if "error" in result:
             print(f"[API] Summarization error: {result['error']}")

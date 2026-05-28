@@ -107,11 +107,11 @@ export const api = {
     return res.json();
   },
 
-  async sendMessage(threadId, query) {
+  async sendMessage(threadId, query, longResponse = false) {
     const res = await fetch(`${API_BASE}/chat/${threadId}/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({ query, long_response: longResponse }),
     });
     return res.json();
   },
@@ -134,13 +134,15 @@ export const api = {
   },
 
   // Document Summary
-  async summarizeThread(threadId) {
-    const res = await fetch(`${API_BASE}/summarize/thread/${threadId}/`);
+  async summarizeThread(threadId, longResponse = false) {
+    const q = longResponse ? '?long_response=true' : '';
+    const res = await fetch(`${API_BASE}/summarize/thread/${threadId}/${q}`);
     return { ok: res.ok, data: await res.json() };
   },
 
-  async summarizeDocument(docId) {
-    const res = await fetch(`${API_BASE}/summarize/document/${docId}/`);
+  async summarizeDocument(docId, longResponse = false) {
+    const q = longResponse ? '?long_response=true' : '';
+    const res = await fetch(`${API_BASE}/summarize/document/${docId}/${q}`);
     return { ok: res.ok, data: await res.json() };
   },
 

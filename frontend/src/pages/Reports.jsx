@@ -14,7 +14,6 @@ function Reports() {
   const [showPreview, setShowPreview] = useState(false);
   const [pdfFiles, setPdfFiles] = useState([]);
   const [singlePdfFile, setSinglePdfFile] = useState(null);
-  const [useOcr, setUseOcr] = useState(false);
   const [jobId, setJobId] = useState(null);
   const [jobStatus, setJobStatus] = useState(null);
   const [progress, setProgress] = useState(0);
@@ -71,8 +70,8 @@ function Reports() {
     setProgressMessage('Starting...'); setProgressLogs([]); setJobStatus('pending');
     try {
       const fn = comparisonMode === 'single'
-        ? () => api.startSinglePdfComparison(sourceFile, selectedColumn, singlePdfFile, useOcr)
-        : () => api.startMultiPdfComparison(sourceFile, selectedColumn, pdfFiles, useOcr);
+        ? () => api.startSinglePdfComparison(sourceFile, selectedColumn, singlePdfFile, false)
+        : () => api.startMultiPdfComparison(sourceFile, selectedColumn, pdfFiles, false);
       const { ok, data } = await fn();
       if (ok && data.job_id) { setJobId(data.job_id); pollJobStatus(data.job_id); }
       else { setError(data.error || 'Failed to start'); setIsProcessing(false); }
@@ -226,15 +225,6 @@ function Reports() {
                   )}
                 </>
               )}
-            </div>
-
-            {/* Options */}
-            <div className={cardCls}>
-              <h3 className="font-semibold mb-3 flex items-center gap-2"><i className="fa-solid fa-cog"></i>Options</h3>
-              <label className="flex items-center gap-2 text-sm cursor-pointer">
-                <input type="checkbox" checked={useOcr} onChange={e => setUseOcr(e.target.checked)} disabled={isProcessing} className="rounded" />
-                Enable OCR {comparisonMode==='single'?' (hybrid: text + scanned)':' (for scanned documents)'}
-              </label>
             </div>
 
             {/* Actions */}

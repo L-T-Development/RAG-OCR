@@ -161,14 +161,17 @@ def _retrieve_vectors(query_text, thread_id, file_filter):
 
 # ── LLM call ─────────────────────────────────────────────────────────────────
 
-def _call_llm(prompt, system_prompt, temperature=0, num_ctx=4096, timeout=120):
+def _call_llm(prompt, system_prompt, temperature=0, num_ctx=4096, num_predict=None, timeout=120):
+    options = {"num_thread": 8, "num_ctx": num_ctx}
+    if num_predict is not None:
+        options["num_predict"] = num_predict
     payload = {
         "model": get_current_llm_model(),
         "prompt": prompt,
         "system": system_prompt,
         "stream": False,
         "temperature": temperature,
-        "options": {"num_thread": 8, "num_ctx": num_ctx},
+        "options": options,
         "keep_alive": "5m",
     }
     r = requests.post(OLLAMA_API, json=payload, timeout=timeout)
@@ -305,7 +308,7 @@ def _gen_list(query_text, sql_tables, search_terms, vector_chunks):
     }
 
 
-def _gen_sql_answer(query_text, sql_tables, search_terms, vector_chunks):
+def _gen_sql_answer(query_text, sql_tables, search_terms, vector_chunks, long_response=False):
     """Generate an LLM answer grounded in table data."""
     all_terms = search_terms["codes"] + search_terms["names"] + search_terms["keywords"]
     table_ctx = ""
@@ -377,14 +380,27 @@ def _gen_sql_answer(query_text, sql_tables, search_terms, vector_chunks):
             for row in t.get("data", [])[:5]:
                 table_ctx += f"Row: {' | '.join(str(c) for c in row)}\n"
 
-    system = (
-        "You are a precise document assistant. Answer using ONLY the provided data.\n"
-        "RULES:\n"
-        "1. Use ONLY data from 'EXACT MATCHES' when available.\n"
-        "2. Never confuse similar names (e.g., 'SUPPORT ROLLER' ≠ 'SUPPORT ROLLER FIXING').\n"
-        "3. If no exact match: say 'No exact match found for [term]'.\n"
-        "4. Be concise and direct."
-    )
+    if long_response:
+        system = (
+            "You are a thorough document assistant. Answer using ONLY the provided data.\n"
+            "RULES:\n"
+            "1. Use ONLY data from 'EXACT MATCHES' when available.\n"
+            "2. Never confuse similar names (e.g., 'SUPPORT ROLLER' ≠ 'SUPPORT ROLLER FIXING').\n"
+            "3. If no exact match: say 'No exact match found for [term]'.\n"
+            "4. Provide a detailed answer: list every matching row, include all column "
+            "values, group by source, and explain any patterns or relationships you notice."
+        )
+        num_predict = 2048
+    else:
+        system = (
+            "You are a precise document assistant. Answer using ONLY the provided data.\n"
+            "RULES:\n"
+            "1. Use ONLY data from 'EXACT MATCHES' when available.\n"
+            "2. Never confuse similar names (e.g., 'SUPPORT ROLLER' ≠ 'SUPPORT ROLLER FIXING').\n"
+            "3. If no exact match: say 'No exact match found for [term]'.\n"
+            "4. Be concise and direct."
+        )
+        num_predict = None
     prompt = (
         f"QUESTION: {query_text}\n\n"
         f"SEARCH TERMS:\n"
@@ -395,7 +411,7 @@ def _gen_sql_answer(query_text, sql_tables, search_terms, vector_chunks):
     )
 
     try:
-        answer = _call_llm(prompt, system, temperature=0)
+        answer = _call_llm(prompt, system, temperature=0, num_predict=num_predict)
         locs   = "\n".join(
             f"• {t['source']} (Page {t['page']}, Table {t['table_index']})"
             for t in sql_tables
@@ -431,7 +447,7 @@ def _gen_location(sql_tables, vector_chunks):
     }
 
 
-def _gen_text_answer(query_text, vector_chunks):
+def _gen_text_answer(query_text, vector_chunks, long_response=False):
     """Standard semantic RAG: context → LLM → evaluate."""
     if not vector_chunks:
         return {
@@ -450,17 +466,37 @@ def _gen_text_answer(query_text, vector_chunks):
     sources  = list({f"{m['source']} (Page {m['page']})" for _, m, _ in vector_chunks})
     used_docs = [d for d, _, _ in vector_chunks]
 
-    system = (
-        "You are a precise and helpful document assistant.\n"
-        "- Answer ONLY using the provided context.\n"
-        "- If the answer is not in the context, say "
-        "'I don't know based on the provided documents'.\n"
-        "- Never make up information. Be concise. Use bullet points for longer answers."
-    )
+    if long_response:
+        system = (
+            "You are a thorough and detailed document assistant.\n"
+            "- Answer ONLY using the provided context.\n"
+            "- If the answer is not in the context, say "
+            "'I don't know based on the provided documents'.\n"
+            "- Never make up information.\n"
+            "- Provide a detailed, comprehensive answer. Explain reasoning, give "
+            "supporting evidence from the context, quote relevant passages, "
+            "and use headings or bullet points where helpful.\n"
+            "- Include every related detail from the context that helps the user understand the topic."
+        )
+        num_predict = 2048
+    else:
+        system = (
+            "You are a precise and helpful document assistant.\n"
+            "- Answer ONLY using the provided context.\n"
+            "- If the answer is not in the context, say "
+            "'I don't know based on the provided documents'.\n"
+            "- Never make up information. Be concise. Use bullet points for longer answers."
+        )
+        num_predict = None
 
     try:
         t0     = time.time()
-        answer = _call_llm(f"Context:\n{context}\nUser Query: {query_text}", system, temperature=0)
+        answer = _call_llm(
+            f"Context:\n{context}\nUser Query: {query_text}",
+            system,
+            temperature=0,
+            num_predict=num_predict,
+        )
         print(f"[QUERY] LLM done in {time.time()-t0:.2f}s")
         confidence, label = _evaluate(query_text, answer, used_docs)
         return {
@@ -734,7 +770,7 @@ def _gen_compare(query_text, thread_id, file_a, file_b, column_hint):
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-def query_rag(query_text, current_thread_id, parent_thread_id=None, conversation_history=None):
+def query_rag(query_text, current_thread_id, parent_thread_id=None, conversation_history=None, long_response=False):
     if not model_manager.is_ready():
         model_manager.load_model()
     if not model_manager.is_ready():
@@ -777,11 +813,11 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None, conversation
         if intent == "LIST":
             result = _gen_list(query_text, sql_tables, search_terms, vector_chunks)
         if result is None and intent in ("QUESTION", "LOOKUP"):
-            result = _gen_sql_answer(query_text, sql_tables, search_terms, vector_chunks)
+            result = _gen_sql_answer(query_text, sql_tables, search_terms, vector_chunks, long_response=long_response)
         if result is None:
             result = _gen_location(sql_tables, vector_chunks)
     else:
-        result = _gen_text_answer(query_text, vector_chunks)
+        result = _gen_text_answer(query_text, vector_chunks, long_response=long_response)
 
     print(f"[QUERY] done in {time.time()-t0:.2f}s | type={result.get('retrieval_type')}")
     return result

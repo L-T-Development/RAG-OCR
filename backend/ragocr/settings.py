@@ -70,10 +70,19 @@ WSGI_APPLICATION = 'ragocr.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
+# Per-user writable data dir. The Electron standalone launcher sets RAGOCR_DATA_DIR;
+# otherwise we fall back to BASE_DIR (dev mode).
+_data_dir = os.environ.get('RAGOCR_DATA_DIR')
+if _data_dir:
+    DATA_DIR = Path(_data_dir)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+else:
+    DATA_DIR = BASE_DIR
+
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'NAME': DATA_DIR / 'db.sqlite3',
     }
 }
 
@@ -122,11 +131,29 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 STATIC_URL = '/static/'
 
-STATICFILES_DIRS = [
-    BASE_DIR / "static",   # your global static folder
-]
+# Frontend build directory (Vite output). Used by the standalone Electron build.
+# Two layouts supported:
+#   dev / source repo:   <repo>/frontend/dist/
+#   standalone runtime:  <runtime>/frontend/    (flat — provisioning copies dist contents here)
+# RAGOCR_FRONTEND_DIR env var overrides both if set.
+_frontend_env = os.environ.get('RAGOCR_FRONTEND_DIR')
+if _frontend_env:
+    FRONTEND_DIST_DIR = Path(_frontend_env).resolve()
+else:
+    _candidates = [
+        (BASE_DIR / ".." / "frontend" / "dist").resolve(),
+        (BASE_DIR / ".." / "frontend").resolve(),
+    ]
+    FRONTEND_DIST_DIR = next((c for c in _candidates if (c / "index.html").is_file()), _candidates[0])
 
-STATIC_ROOT = BASE_DIR / "staticfiles"   
+STATICFILES_DIRS = [
+    BASE_DIR / "static",
+]
+# Serve Vite-built assets (the JS/CSS bundles) when the directory exists.
+if (FRONTEND_DIST_DIR / "assets").is_dir():
+    STATICFILES_DIRS.append(FRONTEND_DIST_DIR / "assets")
+
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
 # CORS Settings (for React frontend)
 _cors_origins = os.environ.get(
@@ -139,4 +166,4 @@ CORS_ALLOW_CREDENTIALS = True
 
 # Media files
 MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR
+MEDIA_ROOT = DATA_DIR / 'media' if _data_dir else BASE_DIR

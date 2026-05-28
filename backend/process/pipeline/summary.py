@@ -7,10 +7,11 @@ from .config import OLLAMA_API, get_current_llm_model
 from .storage import get_collection
 
 
-def summarize_document(doc_id=None, thread_id=None):
+def summarize_document(doc_id=None, thread_id=None, long_response=False):
     """
     Generate an LLM summary of a document or all documents in a thread.
     Dynamically scales prompt and chunk sampling to document size.
+    `long_response=True` forces a comprehensive, longer summary regardless of size.
     """
     if not doc_id and not thread_id:
         return {"error": "Either doc_id or thread_id is required"}
@@ -45,6 +46,15 @@ def summarize_document(doc_id=None, thread_id=None):
             scale, limit, word_limit, detail, timeout = "Large", 40, "600-1000", "comprehensive", 180
             step   = max(1, total // limit)
             sample = docs[::step][:limit]
+
+        # Long-response mode: upgrade word target + detail label + extend timeout
+        if long_response:
+            word_limit = "1200-2000"
+            detail = "comprehensive and thorough"
+            timeout = max(timeout, 240)
+            num_predict = 3072
+        else:
+            num_predict = None
 
         valid = [c for c in sample if c and c.strip()]
         if not valid:
@@ -84,6 +94,10 @@ FORMAT:
             f"Provide a {detail} summary:"
         )
 
+        options = {"num_thread": 8, "num_ctx": 8192}
+        if num_predict is not None:
+            options["num_predict"] = num_predict
+
         t0 = time.time()
         http_r = requests.post(
             OLLAMA_API,
@@ -93,7 +107,7 @@ FORMAT:
                 "system": system,
                 "stream": False,
                 "temperature": 0.3,
-                "options": {"num_thread": 8, "num_ctx": 8192},
+                "options": options,
                 "keep_alive": "5m",
             },
             timeout=timeout,

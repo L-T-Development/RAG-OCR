@@ -51,4 +51,7 @@ offline_packages
 
 docker-offline-package
  db.sqlite3
+
+electron-launcher
+standalone-launcher
  

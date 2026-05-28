@@ -4,7 +4,6 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   Send,
-  Paperclip,
   User,
   Bot,
   MessageSquare,
@@ -17,6 +16,7 @@ import {
   FileSearch,
   Loader2,
   X,
+  AlignLeft,
 } from 'lucide-react';
 
 // Confidence Ring Component
@@ -293,11 +293,12 @@ export function ChatArea({
   messages = [],
   documents = [],
   onSendMessage,
-  onUploadClick,
   onSummarizeThread,
   onSummarizeDocument,
   isLoading = false,
   isSummarizing = false,
+  longResponse = false,
+  onToggleLongResponse,
   disabled = false,
 }) {
   const [inputValue, setInputValue] = useState('');
@@ -462,9 +463,9 @@ export function ChatArea({
           {documents.length > 0 && onSummarizeThread && (
             <button
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm text-[var(--color-text-secondary)] border border-[var(--color-border)] hover:bg-[var(--color-bg-hover)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer bg-transparent"
-              onClick={onSummarizeThread}
+              onClick={() => onSummarizeThread()}
               disabled={isSummarizing}
-              title="Summarize all documents"
+              title={longResponse ? 'Summarize all documents (long, detailed)' : 'Summarize all documents'}
             >
               {isSummarizing ? (
                 <Loader2 size={16} className="animate-spin" />
@@ -580,12 +581,18 @@ export function ChatArea({
           <div className="flex items-center gap-1 flex-shrink-0 pb-0.5">
             <button
               type="button"
-              className="flex items-center justify-center w-8 h-8 rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer border-0 bg-transparent"
-              onClick={onUploadClick}
+              className={`flex items-center gap-1 px-2 h-8 rounded-lg transition-colors cursor-pointer border-0 text-xs font-medium ${
+                longResponse
+                  ? 'bg-primary-light text-primary'
+                  : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] bg-transparent'
+              }`}
+              onClick={onToggleLongResponse}
               disabled={disabled}
-              title="Upload Document (PDF, Excel, Word)"
+              title={longResponse ? 'Long response mode: ON — answers will be detailed' : 'Long response mode: OFF — answers will be concise'}
+              aria-pressed={longResponse}
             >
-              <Paperclip size={20} />
+              <AlignLeft size={16} />
+              <span>Long</span>
             </button>
             <button
               type="submit"

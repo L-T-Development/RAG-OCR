@@ -1,8 +1,16 @@
 import os
 
 # ── Paths & URLs ──────────────────────────────────────────────────────────────
-CHROMA_PATH = "./local_chroma_db"
-BM25_INDEX_PATH = "./local_chroma_db/bm25_index.pkl"
+# Honor RAGOCR_DATA_DIR (set by the standalone Electron launcher) so vector
+# storage lives in the user's writable data folder rather than the bundled
+# app directory. Falls back to a local folder for dev/docker.
+_data_root = os.environ.get("RAGOCR_DATA_DIR")
+if _data_root:
+    CHROMA_PATH = os.path.join(_data_root, "local_chroma_db")
+    BM25_INDEX_PATH = os.path.join(_data_root, "local_chroma_db", "bm25_index.pkl")
+else:
+    CHROMA_PATH = "./local_chroma_db"
+    BM25_INDEX_PATH = "./local_chroma_db/bm25_index.pkl"
 _OLLAMA_BASE = os.environ.get("OLLAMA_API_BASE", "http://localhost:11434")
 OLLAMA_API = f"{_OLLAMA_BASE}/api/generate"
 OLLAMA_EMBED_API = f"{_OLLAMA_BASE}/api/embeddings"   # legacy single-text

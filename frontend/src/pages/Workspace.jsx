@@ -25,6 +25,7 @@ export function Workspace() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadStatus, setUploadStatus] = useState('');
   const [isSummarizing, setIsSummarizing] = useState(false);
+  const [longResponse, setLongResponse] = useState(false);
   
   // UI state
   const [showCreateDialog, setShowCreateDialog] = useState(false);
@@ -189,7 +190,7 @@ export function Workspace() {
     setIsLoading(true);
 
     try {
-      const response = await api.sendMessage(currentThreadId, content.trim());
+      const response = await api.sendMessage(currentThreadId, content.trim(), longResponse);
       
       const assistantMessage = {
         id: Date.now() + 1,
@@ -375,10 +376,10 @@ export function Workspace() {
   // Document Summary Handlers
   const handleSummarizeThread = async () => {
     if (!currentThreadId) return;
-    
+
     setIsSummarizing(true);
     try {
-      const { ok, data } = await api.summarizeThread(currentThreadId);
+      const { ok, data } = await api.summarizeThread(currentThreadId, longResponse);
       if (ok && data.summary) {
         const summaryMessage = {
           id: Date.now(),
@@ -402,7 +403,7 @@ export function Workspace() {
   const handleSummarizeDocument = async (docId) => {
     setIsSummarizing(true);
     try {
-      const { ok, data } = await api.summarizeDocument(docId);
+      const { ok, data } = await api.summarizeDocument(docId, longResponse);
       if (ok && data.summary) {
         const doc = documents.find(d => d.id === docId);
         const summaryMessage = {
@@ -451,6 +452,8 @@ export function Workspace() {
             onSummarizeDocument={handleSummarizeDocument}
             isLoading={isLoading}
             isSummarizing={isSummarizing}
+            longResponse={longResponse}
+            onToggleLongResponse={() => setLongResponse(v => !v)}
             disabled={!currentThreadId}
           />
 
