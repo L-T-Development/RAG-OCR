@@ -373,7 +373,7 @@ def _run_comparison_worker(job_id: str):
                 "processing_time_seconds": processing_time
             }
         
-        print(f"[WORKER] ✓ Job {job_id} completed in {processing_time}s")
+        print(f"[WORKER] OK Job {job_id} completed in {processing_time}s")
     
     except Exception as e:
         # Handle errors gracefully (thread-safe)

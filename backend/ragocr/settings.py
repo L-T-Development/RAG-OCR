@@ -19,6 +19,42 @@ SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-_d0f!i*$#4%-+25(6yw$#
 
 DEBUG = os.environ.get('DEBUG', 'False').lower() in ('1', 'true', 'yes')
 
+# When running as the standalone Electron app (RAGOCR_DATA_DIR set), write Django
+# logs + the actual exception traceback to a file in the data directory. Without
+# this the .exe runs windowless and Django stack traces vanish into stdout.
+if os.environ.get('RAGOCR_DATA_DIR'):
+    _log_dir = Path(os.environ['RAGOCR_DATA_DIR']) / 'logs'
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    LOGGING = {
+        'version': 1,
+        'disable_existing_loggers': False,
+        'formatters': {
+            'verbose': {
+                'format': '{asctime} [{levelname}] {name}: {message}',
+                'style': '{',
+            },
+        },
+        'handlers': {
+            'file': {
+                'level': 'INFO',
+                'class': 'logging.handlers.RotatingFileHandler',
+                'filename': str(_log_dir / 'ragocr.log'),
+                'maxBytes': 5 * 1024 * 1024,
+                'backupCount': 3,
+                'formatter': 'verbose',
+            },
+        },
+        'root': {
+            'handlers': ['file'],
+            'level': 'INFO',
+        },
+        'loggers': {
+            'django': {'handlers': ['file'], 'level': 'INFO', 'propagate': False},
+            'django.request': {'handlers': ['file'], 'level': 'ERROR', 'propagate': False},
+            'process': {'handlers': ['file'], 'level': 'DEBUG', 'propagate': False},
+        },
+    }
+
 ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
 
 

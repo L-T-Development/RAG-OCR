@@ -1,190 +1,142 @@
-
 # RAG-OCR
 
-RAG-OCR is a compact, production-minded reference for a Retrieval-Augmented Generation (RAG) pipeline built around OCR'd documents. It supports ingestion, embedding, retrieval, document comparison, and LLM-backed generation.
+A document RAG (Retrieval-Augmented Generation) pipeline for technical manuals: ingest PDFs / Excel / Word / images, embed via Ollama, retrieve via hybrid vector + BM25, answer with a local LLM. Also supports multi-PDF column comparison and per-row OR-matching (e.g. "is each spare from `spares.pdf` mentioned in `manual.pdf`?").
 
-## 🐳 Docker Deployment
+## Deployment options
 
-**Quick Start with Docker:**
-```bash
-docker-compose up --build
-```
-See [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md) for complete Docker setup instructions, including production configurations.
+| Mode | Bundle | When to use |
+|---|---|---|
+| **Docker** | [`docker-offline-package/ragocr-docker-*.tar.gz`](docker-offline-package/) | Server / shared machine where Docker + Compose are available |
+| **Standalone .exe** | [`standalone-launcher/dist/RAG-OCR-Standalone.tar.gz`](standalone-launcher/) | Single Windows desktop without Docker. Bundles Python + JRE + backend + frontend |
 
-## Key Capabilities
-
-- Ingest and process PDFs and other document types.
-- Store and query embeddings in a local ChromaDB (`backend/local_chroma_db`).
-- Use **Ollama** for embeddings (nomic-embed-text, 768 dimensions) - **Default**
-- ~~Use a local sentence-transformer~~ - **No longer required**
-- LLM generation via Ollama API (e.g., llama3.2:1b).
-- Document comparison and difference summarization.
-- Document metadata: tags, notes, version tracking.
+Both require **Ollama** running on the host (`localhost:11434`) with at least one embedding model and one chat model pulled. See [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md) for Docker specifics.
 
 ## Requirements
 
-- Python 3.10+
-- Node.js 18+ (frontend)
-- Java 11+ (required when using OpenDataLoader PDF parser)
-- See `requirements.txt` for full Python dependencies.
+- **Python 3.12+** (for local dev) — dependencies in [`backend/requirements.txt`](backend/requirements.txt)
+- **Node.js 18+** — frontend dev server
+- **Java 11+** — required by OpenDataLoader for PDF table extraction (bundled in the standalone build's `runtime/jre/`)
+- **Ollama** — https://ollama.com/download
+  - `ollama pull nomic-embed-text` (embedding model)
+  - `ollama pull llama3.1:8b` (or any reasoning model — selectable in Settings)
 
-Use a virtual environment (venv, virtualenv, or conda).
-
-
-## Local LLM (Ollama) — recommended setup
-
-This project is tested with local LLM services such as Ollama. Below are practical steps and recommended environment variables to make the integration explicit and configurable.
-
-1) Install Ollama
-
-Download and install from the official site:
-
-https://ollama.com/download
-
-After installation verify it is available on your PATH:
+## Quick start — local development
 
 ```bash
-ollama --version
-```
-
-2) Pull a model (one-time)
-
-Example:
-
-```bash
-ollama pull llama3.2:1b
-```
-
-3) Run/test the model
-
-Quick smoke test:
-
-```bash
-ollama run llama3.2:1b
-```
-
-
-## Quick Start (Development)
-
-Clone and install:
-
-```bash
-git clone https://github.com/L-T-Development/RAG-OCR.git
-cd RAG-OCR
-```
-
-Backend (Python):
-
-```bash
+# 1. Backend
 python -m venv .venv
-# macOS / Linux
-source .venv/bin/activate
-# Windows PowerShell
-.\.venv\Scripts\Activate.ps1
-# Windows CMD
-.venv\Scripts\activate.bat
-pip install -r requirements.txt
+.\.venv\Scripts\Activate.ps1   # PowerShell
+# or: source .venv/bin/activate # Linux / Mac
+pip install -r backend/requirements.txt
 cd backend
 python manage.py migrate
 python manage.py runserver 0.0.0.0:8000
 ```
 
-Frontend (separate terminal):
-
 ```bash
+# 2. Frontend (separate terminal)
 cd frontend
 npm install
-npm run dev
+npm run dev          # → http://localhost:5173 (proxies /api to :8000)
 ```
 
-The React dev server proxies API requests to `http://localhost:8000` by default.
-
-## Frontend notes
-
-- Location: `frontend/` (React + Vite).
-- If you see CORS errors, install and enable `django-cors-headers` in `backend/ragocr/settings.py`.
-
-```bash
-pip install django-cors-headers
-```
-
-Adjust proxy settings in `frontend/vite.config.js` if needed.
-
-## Project Structure
-
-Top-level repository tree (concise):
+## Project structure
 
 ```
 .
-├── Jenkinsfile
-├── pipeline.yaml
 ├── README.md
-├── requirements.txt
+├── DOCKER_DEPLOYMENT.md
+├── docker-compose.yml
+├── export-docker.{ps1,sh}        # build the Docker offline bundle
 ├── backend/
+│   ├── requirements.txt          # ← canonical Python dependencies
 │   ├── manage.py
-│   ├── db.sqlite3
-│   ├── local_chroma_db/
-│   ├── models/
-│   │   └── all-MiniLM-L6-v2/
-│   ├── process/
-│   │   ├── rag_engine.py
-│   │   ├── document_compare.py
-│   │   ├── llm_summary.py
-│   │   ├── views.py
-│   │   └── models.py
-│   └── ragocr/
-│       ├── settings.py
-│       └── urls.py
-├── frontend/
-│   ├── index.html
+│   ├── Dockerfile
+│   ├── ragocr/                   # Django project settings + URLs
+│   └── process/                  # app code
+│       ├── views.py              # REST endpoints
+│       ├── models.py             # Thread, Document, ChatMessage, ExtractedTable, AppConfig
+│       ├── pipeline/             # ingestion / embedding / retrieval / generation
+│       │   ├── config.py         # OLLAMA_API, defaults, batch sizes
+│       │   ├── ingestion.py      # ODL + PyMuPDF + Excel + Word + image extraction
+│       │   ├── embedding.py      # Ollama embedding provider
+│       │   ├── tables.py         # table store + compare_columns(_multi)
+│       │   ├── query.py          # query_rag, _gen_compare, _gen_lookup_multi_col
+│       │   └── summary.py        # thread/document summaries
+│       ├── reports_engine.py     # single-PDF column comparator (Reports page)
+│       ├── reports_engine_merge.py  # multi-PDF column comparator
+│       ├── document_compare.py   # line-diff comparator (Compare page)
+│       └── eval_utils.py         # answer relevance / faithfulness scoring
+├── frontend/                     # React + Vite + Tailwind
 │   ├── package.json
 │   ├── vite.config.js
 │   └── src/
-│       ├── App.jsx
-│       └── components/
-└── docs/ (optional)
+│       ├── pages/                # Landing, Workspace, Reports, Compare, Settings
+│       ├── components/           # workspace components (Sidebar, ChatArea, DocumentPanel)
+│       └── services/api.js       # backend HTTP wrapper
+├── standalone-launcher/          # Electron desktop app (no Docker)
+│   ├── main.js                   # spawns python backend, opens BrowserWindow
+│   ├── provision-runtime.ps1     # downloads Python embed + JRE, installs deps into runtime/
+│   ├── patch-runtime.ps1         # quick-patch an installed launcher with the latest backend code
+│   └── package.json              # electron + electron-builder
+├── electron-launcher/            # Electron Docker-stack manager (alternative deployment)
+└── docker-offline-package/       # build output: Docker images + compose + install scripts
 ```
 
-Key backend files:
+## Where to look for things
 
-- `backend/process/rag_engine.py` — ingestion, embedding, retrieval, generation
-- `backend/process/document_compare.py` — document diff tools
-- `backend/process/views.py` — public API endpoints used by the frontend
+| What you want | Where it lives |
+|---|---|
+| Python dependencies | `backend/requirements.txt` |
+| Django settings + URL routing | `backend/ragocr/settings.py`, `backend/ragocr/urls.py` |
+| API endpoints | `backend/process/views.py` (mounted at `/api/`) |
+| Ollama URL / batch sizes / default model | `backend/process/pipeline/config.py` |
+| Vector store path | `RAGOCR_DATA_DIR/local_chroma_db` (standalone) or `backend/local_chroma_db` (dev) |
+| User data in standalone build | `%APPDATA%\RAG-OCR\data\` (sqlite, ChromaDB, uploaded PDFs) |
+| Standalone backend logs | `%APPDATA%\RAG-OCR\data\logs\ragocr.log` |
+| Frontend → backend proxy | `frontend/vite.config.js` (`/api` → `http://127.0.0.1:8000`) |
 
-Use this tree to quickly locate the main flow: ingest -> embed -> index -> query.
+## Configuration
 
-## Models, DB, and Config
+Environment variables (read by `backend/ragocr/settings.py` and `backend/process/pipeline/config.py`):
 
-- Embedding model (local): `backend/models/all-MiniLM-L6-v2`.
-- Chroma DB location: `backend/local_chroma_db`.
-- LLM endpoint: default `http://localhost:11434/api/generate` (see `backend/process/rag_engine.py`).
+| Var | Default | Purpose |
+|---|---|---|
+| `DEBUG` | `False` | Django debug mode |
+| `ALLOWED_HOSTS` | `localhost,127.0.0.1` | Comma-separated hosts |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:3000,…` | Comma-separated origins |
+| `OLLAMA_API_BASE` | `http://localhost:11434` | Ollama HTTP base URL |
+| `RAGOCR_DATA_DIR` | unset | When set, sqlite + media + Chroma are relocated here (used by Electron) |
+| `RAGOCR_FRONTEND_DIR` | unset | Override for the static SPA path |
 
-API endpoints: defined in `backend/process/views.py` and routed in `backend/urls.py`.
+## Common operations
 
-## Development Tips
+```bash
+# Build the Docker offline bundle (Windows)
+.\export-docker.ps1
 
-- Re-ingest documents after changing embedding models or tokenization.
-- Tune `CHROMA_BATCH_SIZE` and `SIMILARITY_THRESHOLD` in `backend/process/rag_engine.py` for retrieval behavior.
-- Ensure the LLM service used for generation is reachable; update `OLLAMA_API` if necessary.
-- PDF parser mode is configurable with `RAG_PDF_PARSER`:
-	- `opendataloader` (default): better structure/table extraction
-	- `pymupdf`: use legacy extraction path only
+# Build the Docker offline bundle (Linux / Mac)
+./export-docker.sh
+
+# Build the standalone Electron .exe
+cd standalone-launcher
+.\provision-runtime.ps1        # one-time: download Python embed + JRE, install deps
+npm install                    # one-time
+npm run dist:win               # produces dist/win-unpacked/RAG-OCR.exe (+ tar.gz archive)
+
+# Quick-patch an already-installed standalone launcher with current backend code
+cd standalone-launcher
+.\patch-runtime.ps1 -Target "<path-to-extracted-launcher-folder>"
+```
 
 ## Troubleshooting
 
-- Missing model files: populate `backend/models/all-MiniLM-L6-v2` or adjust code to download models.
-- Chroma DB issues: back up and remove `backend/local_chroma_db` to re-create the DB if indexing fails.
-- LLM unreachable: check local LLM service and firewall settings; confirm `OLLAMA_API` URL.
+- **Backend can't reach Ollama** → ensure Ollama is running (`ollama serve` or via the desktop app). The backend honors `OLLAMA_API_BASE`.
+- **OpenDataLoader (ODL) fails / falls back to PyMuPDF** → check Java is on PATH; the standalone build ships `runtime/jre/`. ODL failures on specific pages are logged and the affected pages are routed through PyMuPDF automatically.
+- **Embedding HTTP 400 ("input length exceeds context")** → already handled: long chunks are truncated to 8000 chars before being sent to `nomic-embed-text` (see `backend/process/pipeline/embedding.py`).
+- **Standalone .exe shows "Internal server error"** → backend stack traces go to `%APPDATA%\RAG-OCR\data\logs\ragocr.log`. Or run `RAG-OCR.exe` from a CMD window to see `[backend]`-prefixed live output.
+- **First-time DB error on launch** (`no such table: process_appconfig`) → harmless; the launcher runs migrations before the server, but the auto-init runs in parallel and may race once. Disappears after the first launch.
 
-## Tests & CI
+## License
 
-There are no automated tests included. The `pipeline.yaml` contains basic lint/test steps for CI.
-
-
-File references:
-
-- `backend/` — backend code
-- `frontend/` — frontend code
-- `requirements.txt` — Python dependencies
-
-
+Internal — see project owner.

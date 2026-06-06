@@ -355,6 +355,58 @@ def extract_column_values(tables, column_name):
     return index
 
 
+def compare_columns_multi(file_tables: dict, column_name: str) -> dict:
+    """
+    N-way version of compare_columns.
+
+    Args:
+        file_tables: {file_name: [tables]}  — N entries
+        column_name: header to compare on
+
+    Returns:
+        {
+          column_name: str (resolved header — first non-empty hit),
+          files:       [file_name, ...]  (preserves input order),
+          value_map:   {value: [file_name, ...]}  (files where the value appears),
+          common:      [value, ...]  (in every file),
+          only_in:     {file_name: [value, ...]}  (in exactly that file),
+          summary:     {file_name: {total}, total_unique, common, ...},
+        }
+    """
+    files = list(file_tables.keys())
+    per_file_values = {f: extract_column_values(file_tables[f], column_name) for f in files}
+
+    resolved = column_name
+    for vals in per_file_values.values():
+        if vals:
+            resolved = vals[next(iter(vals))]["header"]
+            break
+
+    # Build inverted index: value → set of files containing it
+    value_map: dict = {}
+    for f, vals in per_file_values.items():
+        for v in vals:
+            value_map.setdefault(v, set()).add(f)
+
+    all_files = set(files)
+    common = sorted(v for v, fs in value_map.items() if fs == all_files)
+    only_in = {f: sorted(v for v, fs in value_map.items() if fs == {f}) for f in files}
+
+    return {
+        "column_name": resolved,
+        "files":       files,
+        "value_map":   {v: sorted(fs) for v, fs in value_map.items()},
+        "common":      common,
+        "only_in":     only_in,
+        "summary": {
+            "totals":       {f: len(per_file_values[f]) for f in files},
+            "total_unique": len(value_map),
+            "common":       len(common),
+            "only_in":      {f: len(only_in[f]) for f in files},
+        },
+    }
+
+
 def compare_columns(tables_a, tables_b, column_name):
     """
     Extract one column from each table set and compare the unique values.

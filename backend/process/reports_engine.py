@@ -25,6 +25,30 @@ def log_progress(message: str):
     print(f"[{timestamp}] {message}")
 
 
+def _normalize_for_match(text: str) -> tuple:
+    """
+    Return (spaced, nospace) variants for resilient PDF-text matching.
+    PDF extractors drop spaces when a cell spans multiple lines, turning
+    'BIG LAUNCHER PAD' into 'BIG LAUNCHERPAD'. Matching against the no-space
+    variant recovers those cases.
+    """
+    if text is None:
+        return "", ""
+    s = str(text).lower()
+    spaced = re.sub(r"\s+", " ", s).strip()
+    nospace = re.sub(r"\s+", "", s)
+    return spaced, nospace
+
+
+def _contains_value(haystack_spaced: str, haystack_nospace: str, needle: str) -> bool:
+    n_spaced, n_nospace = _normalize_for_match(needle)
+    if not n_nospace:
+        return False
+    if n_spaced and n_spaced in haystack_spaced:
+        return True
+    return n_nospace in haystack_nospace
+
+
 class AdvancedComparator:
     """
     Compare specific column values from source file against target files.
@@ -332,15 +356,15 @@ class AdvancedComparator:
         for page_num, page_text in page_texts_pypdf.items():
             # For scanned pages, also check OCR text
             if page_num in scanned_pages and ocr_full_text:
-                # OCR text contains all pages merged, but we search it anyway
                 combined_text = page_text + "\n" + ocr_full_text
             else:
                 combined_text = page_text
-            
+
+            haystack_spaced, haystack_nospace = _normalize_for_match(combined_text)
+
             page_matches = 0
             for search_val in search_values:
-                search_str = str(search_val).strip()
-                if search_str in combined_text:
+                if _contains_value(haystack_spaced, haystack_nospace, search_val):
                     if not value_pages[search_val]:  # First match
                         matches_found += 1
                     if page_num not in value_pages[search_val]:
@@ -355,13 +379,13 @@ class AdvancedComparator:
         
         # Step 5: For values still not found, do a final OCR-only check
         if ocr_full_text:
+            ocr_spaced, ocr_nospace = _normalize_for_match(ocr_full_text)
             for search_val in search_values:
-                if not value_pages[search_val]:  # Not found in PyPDF2 text
-                    search_str = str(search_val).strip()
-                    if search_str in ocr_full_text:
+                if not value_pages[search_val]:
+                    if _contains_value(ocr_spaced, ocr_nospace, search_val):
                         value_pages[search_val].append("OCR Detected")
                         matches_found += 1
-                        self._log(f"  → '{search_str}' found via OCR (scanned content)")
+                        self._log(f"  -> '{str(search_val).strip()}' found via OCR (scanned content)")
         
         # Build final results with page numbers
         for search_val, pages in value_pages.items():
@@ -386,11 +410,11 @@ class AdvancedComparator:
             self._log(f"  → OCR extracted {len(text)} characters")
             
             found = {}
+            haystack_spaced, haystack_nospace = _normalize_for_match(text)
             for search_val in search_values:
-                search_str = str(search_val).strip()
-                if search_str in text:
+                if _contains_value(haystack_spaced, haystack_nospace, search_val):
                     found[search_val] = ["Image (OCR)"]
-                    self._log(f"  → Found '{search_str}' in image")
+                    self._log(f"  -> Found '{str(search_val).strip()}' in image")
             
             not_found = search_values - set(found.keys())
             self._log(f"  → Image results: {len(found)} found, {len(not_found)} not found")

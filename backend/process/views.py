@@ -24,9 +24,15 @@ logger = logging.getLogger(__name__)
 
 
 def _server_error(e, context="Internal server error"):
-    """Log the real exception server-side, return a generic message to the client."""
+    """Log the real exception server-side, return a generic message to the client.
+    When running as the standalone Electron app (RAGOCR_DATA_DIR set), include the
+    exception class + message so the user can diagnose without opening log files.
+    """
     logger.error("%s: %s", context, e, exc_info=True)
-    return JsonResponse({"error": context}, status=500)
+    payload = {"error": context}
+    if os.environ.get('RAGOCR_DATA_DIR'):
+        payload["detail"] = f"{type(e).__name__}: {e}"
+    return JsonResponse(payload, status=500)
 from typing import Optional
 from datetime import datetime
 from django.db import connection
@@ -545,9 +551,9 @@ def chat_thread(request, thread_id):
                 
                 # Log the routing decision
                 if is_table_search:
-                    print(f"[QUERY_ROUTING] → TABLE SEARCH selected for query: {query[:100]}")
+                    print(f"[QUERY_ROUTING] -> TABLE SEARCH selected for query: {query[:100]}")
                 else:
-                    print(f"[QUERY_ROUTING] → RAG SEARCH selected for query: {query[:100]}")
+                    print(f"[QUERY_ROUTING] -> RAG SEARCH selected for query: {query[:100]}")
                 
                 if is_table_search:
                     # Extract search term and type
@@ -1727,7 +1733,7 @@ def compare_documents(request):
             file_ext=old_ext
         )
 
-        print(f"[COMPARE] ✓ Job {job_id} created and submitted to background worker")
+        print(f"[COMPARE] OK Job {job_id} created and submitted to background worker")
         print("="*60 + "\n")
 
         # Return immediately with job identifier (HTTP 202 Accepted)
@@ -2127,7 +2133,7 @@ def llm_model_select(request):
 
 
 def ollama_models_list(request):
-    """Proxy GET /api/ollama/models/ → Ollama /api/tags, returns installed model names."""
+    """Proxy GET /api/ollama/models/ -> Ollama /api/tags, returns installed model names."""
     if request.method != "GET":
         return JsonResponse({"error": "GET method required"}, status=405)
 

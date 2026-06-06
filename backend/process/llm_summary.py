@@ -81,5 +81,5 @@ def summarize_diff(diff_result: dict, timeout=30):
     change_summary.append(f"Total Changes: {added_count + modified_count + removed_count}")
 
     total_changes = added_count + modified_count + removed_count
-    print(f"[LLM] ✓ Formatted summary with {total_changes} total changes")
+    print(f"[LLM] OK Formatted summary with {total_changes} total changes")
     return "\n".join(change_summary)
