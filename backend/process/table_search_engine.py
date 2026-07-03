@@ -41,18 +41,28 @@ class TableSearchEngine:
                     for table in tables:
                         if not table or len(table) < 2:
                             continue
-                        
+
                         # Clean and validate table structure
                         cleaned_table = self._clean_table_structure(table)
                         if not cleaned_table or len(cleaned_table) < 2:
                             continue
-                        
+
                         # Convert to DataFrame with proper column handling
                         df = self._create_dataframe_from_table(cleaned_table, page_num)
-                        
+
                         if not df.empty:
                             all_tables.append(df)
-        
+
+                # Fallback for line-less tabular forms (e.g. MRLS/ISPL spares
+                # lists) that pdfplumber's line strategy cannot detect. Uses a
+                # numbered "1 2 ... N" column-reference row as column anchors.
+                try:
+                    for adf in self._extract_anchor_tables(page, page_num):
+                        if not adf.empty:
+                            all_tables.append(adf)
+                except Exception as e:
+                    print(f"[TABLE] anchor fallback error on page {page_num}: {e}")
+
         # Merge tables with same column structure
         merged_tables = self._merge_similar_tables(all_tables)
         
@@ -156,6 +166,154 @@ class TableSearchEngine:
             print(f"Error creating DataFrame: {e}")
             return pd.DataFrame()
     
+    # ── Anchor-based extraction for line-less tabular forms ──────────────────
+    # Many defence/engineering spares forms (MRLS, ISPL, ...) draw their tables
+    # with whitespace-separated columns and no vertical rules, so pdfplumber's
+    # line strategy finds nothing. These forms carry a numbered "1 2 ... N"
+    # column-reference row directly under the header; we use the x-centres of
+    # those numbers as column anchors and bucket every word into a column.
+
+    _FOOTER_RE = re.compile(r'^(RESTRICTED|MRLS|ISPL|Page\b|NOTE\b|WARNING\b|CAUTION\b)', re.I)
+
+    def _cluster_words_into_lines(self, words: List[Dict], ytol: float = 3.0) -> List[Dict]:
+        """Group extracted words into visual lines by vertical centre."""
+        lines: List[Dict] = []
+        for w in sorted(words, key=lambda w: (round(w['top']), w['x0'])):
+            yc = (w['top'] + w['bottom']) / 2
+            for ln in lines:
+                if abs(ln['yc'] - yc) <= ytol:
+                    ln['words'].append(w)
+                    ln['yc'] = (ln['yc'] * (len(ln['words']) - 1) + yc) / len(ln['words'])
+                    break
+            else:
+                lines.append({'yc': yc, 'words': [w]})
+        for ln in lines:
+            ln['words'].sort(key=lambda w: w['x0'])
+        return sorted(lines, key=lambda l: l['yc'])
+
+    def _find_numbered_anchor(self, lines: List[Dict], min_cols: int = 6):
+        """Locate the '1 2 3 ... N' reference row; return (index, x-centres)."""
+        for idx, ln in enumerate(lines):
+            toks = [w for w in ln['words'] if re.fullmatch(r'\d{1,2}', w['text'])]
+            seq = [w['text'] for w in toks]
+            n = 0
+            for i, t in enumerate(seq):
+                if t == str(i + 1):
+                    n = i + 1
+                else:
+                    break
+            if n >= min_cols:
+                centres = [(w['x0'] + w['x1']) / 2 for w in toks[:n]]
+                return idx, centres
+        return None, None
+
+    def _column_bounds(self, centres: List[float]) -> List[float]:
+        bounds = [-1.0]
+        for a, b in zip(centres, centres[1:]):
+            bounds.append((a + b) / 2)
+        bounds.append(1e9)
+        return bounds
+
+    @staticmethod
+    def _assign_col(word: Dict, bounds: List[float]) -> int:
+        xc = (word['x0'] + word['x1']) / 2
+        for i in range(len(bounds) - 1):
+            if bounds[i] <= xc < bounds[i + 1]:
+                return i
+        return len(bounds) - 2
+
+    def _canonicalise_spares_headers(self, headers: List[str]) -> List[str]:
+        """Map noisy reconstructed headers of an MRLS/ISPL-style spares table to
+        canonical column names by keyword. Returns headers unchanged when the
+        spares-list signature is absent."""
+        band = ' '.join(headers).lower()
+        if 'manufactur' not in band or not (
+            'nomenclature' in band or 'source of supply' in band):
+            return headers  # not a spares list — leave reconstructed names as-is
+
+        out = list(headers)
+        for i, h in enumerate(headers):
+            hl = h.lower()
+            if i == 0:
+                out[i] = 'Sr. No.'                        # serial column, never "part"
+            elif 'manufactur' in hl:
+                out[i] = "Manufacturer's Part No."        # the part-number column
+            elif 'source' in hl:
+                out[i] = 'Source of Supply'
+            elif 'nomenclature' in hl or 'description' in hl:
+                out[i] = 'Nomenclature'
+            elif 'ispl' in hl or 'figure' in hl:
+                out[i] = 'ISPL Ref. No. (Figure No.)'     # drop stray "Item No." token
+            elif 'remark' in hl:
+                out[i] = 'Remarks'
+        # Guarantee a part column exists even if "Manufacturer's" wrapped away.
+        if not any('part' in h.lower() for h in out) and len(out) > 1:
+            out[1] = "Manufacturer's Part No."
+        return out
+
+    def _extract_anchor_tables(self, page, page_num: int) -> List[pd.DataFrame]:
+        """Reconstruct a line-less table using its numbered reference row."""
+        try:
+            words = page.extract_words(keep_blank_chars=False, use_text_flow=False)
+        except Exception:
+            return []
+        if not words:
+            return []
+        # Drop the rotated "RESTRICTED" watermark and page furniture.
+        words = [w for w in words if w['text'].strip().upper() != 'RESTRICTED']
+
+        lines = self._cluster_words_into_lines(words)
+        anchor_idx, centres = self._find_numbered_anchor(lines)
+        if not centres:
+            return []
+
+        bounds = self._column_bounds(centres)
+        ncols = len(centres)
+        anchor_yc = lines[anchor_idx]['yc']
+
+        # Header: bucket the band of lines just above the reference row.
+        header_cells = [[] for _ in range(ncols)]
+        for ln in lines[:anchor_idx]:
+            if ln['yc'] >= anchor_yc - 60:
+                for w in ln['words']:
+                    header_cells[self._assign_col(w, bounds)].append(w['text'])
+        headers = []
+        for i, cell in enumerate(header_cells):
+            name = ' '.join(cell).strip()
+            headers.append(name if name else f'Column_{i + 1}')
+
+        # Reconstructed headers from wrapped multi-line bands are noisy (e.g.
+        # "Manufacturer's" and "Part No." land on different rows/columns). When
+        # the band shows the spares-list signature, snap columns to canonical
+        # names by keyword so downstream column matching is reliable and the
+        # serial column never masquerades as the part column.
+        headers = self._canonicalise_spares_headers(headers)
+
+        # Data rows: a new logical row begins when column 0 holds a serial
+        # number ("11."); other lines are wrapped continuations of the row above.
+        rows: List[List[str]] = []
+        for ln in lines[anchor_idx + 1:]:
+            joined = ' '.join(w['text'] for w in ln['words']).strip()
+            if self._FOOTER_RE.match(joined):
+                continue
+            cells = [[] for _ in range(ncols)]
+            for w in ln['words']:
+                cells[self._assign_col(w, bounds)].append(w['text'])
+            cell_text = [' '.join(c).strip() for c in cells]
+            if not any(cell_text):
+                continue
+            if re.match(r'^\d{1,3}\.?$', cell_text[0]) or not rows:
+                rows.append(cell_text)
+            else:
+                for i, t in enumerate(cell_text):
+                    if t:
+                        rows[-1][i] = (rows[-1][i] + ' ' + t).strip()
+        if not rows:
+            return []
+
+        df = self._create_dataframe_from_table([headers] + rows, page_num)
+        return [df] if not df.empty else []
+
     def _merge_similar_tables(self, tables: List[pd.DataFrame]) -> List[pd.DataFrame]:
         """Merge tables with same column structure."""
         if not tables:
