@@ -522,23 +522,100 @@ def _ingest_pdf_pymupdf(file_path, doc_id, thread_id, parent_id, filename):
     return {"text_chunks": n, "table_chunks": table_count}
 
 
+def _ingest_pdfplumber_tables(file_path, doc_id, thread_id, parent_id, filename):
+    """
+    Supplementary pass: persist tables via pdfplumber — both line-based GRID tables
+    and the numbered "1 2 … N" reference-row ANCHOR extractor for line-less spares
+    lists (MRLS/ISPL etc.). Covers the tabular forms that ODL/PyMuPDF miss, so the
+    tables land in the structured DB and the fast comparison path works.
+
+    Values dedupe by value at compare time, so any overlap with tables the primary
+    ODL/PyMuPDF path already stored is harmless.
+    """
+    import pdfplumber
+    from process.table_search_engine import TableSearchEngine
+
+    engine = TableSearchEngine()
+    count = 0
+    try:
+        with pdfplumber.open(file_path) as pdf:
+            for page_num, page in enumerate(pdf.pages, 1):
+                matrices = []  # list of [headers, *rows]
+
+                # 1. Line-based grid tables
+                try:
+                    for t in (page.extract_tables() or []):
+                        if not t or len(t) < 2:
+                            continue
+                        ct = engine._clean_table_structure(t)
+                        if ct and len(ct) >= 2:
+                            matrices.append(ct)
+                except Exception:
+                    pass
+
+                # 2. Line-less anchor tables
+                try:
+                    for df in engine._extract_anchor_tables(page, page_num):
+                        if df.empty:
+                            continue
+                        cols = [c for c in df.columns if not str(c).startswith('_')]
+                        matrices.append(
+                            [[str(c) for c in cols]] + df[cols].astype(str).values.tolist())
+                except Exception:
+                    pass
+
+                for idx, matrix in enumerate(matrices):
+                    headers = [str(h) for h in matrix[0]]
+                    rows = matrix[1:]
+                    if not _is_quality_table(headers, rows):
+                        continue
+                    store_table(
+                        table_id=f"{doc_id}_{page_num-1}_table_pp_{idx}",
+                        doc_id=doc_id,
+                        thread_id=thread_id,
+                        parent_id=parent_id,
+                        source=filename,
+                        page=page_num,
+                        table_index=1000 + idx,
+                        headers=headers,
+                        row_count=len(rows),
+                        column_count=len(headers),
+                        table_data=matrix,
+                        caption="",
+                    )
+                    count += 1
+    except Exception as e:
+        print(f"[INGEST] pdfplumber table pass error: {e}")
+    if count:
+        print(f"[INGEST] pdfplumber pass stored {count} table(s)")
+    return count
+
+
 def _ingest_pdf(file_path, doc_id, thread_id, parent_id, filename):
     """
     Try OpenDataLoader first (best table accuracy).
     Falls back to PyMuPDF if ODL is not installed or fails.
+    Then a supplementary anchor pass captures line-less tables both miss.
     """
     model_manager.load_model()
     if not model_manager.is_ready():
         raise RuntimeError("Embedding model not loaded.")
 
+    result = None
     if _ODL_AVAILABLE:
         try:
             print(f"[INGEST] Using OpenDataLoader for: {filename}")
-            return _ingest_pdf_odl(file_path, doc_id, thread_id, parent_id, filename)
+            result = _ingest_pdf_odl(file_path, doc_id, thread_id, parent_id, filename)
         except Exception as e:
             print(f"[INGEST] ODL failed ({e}), falling back to PyMuPDF")
 
-    return _ingest_pdf_pymupdf(file_path, doc_id, thread_id, parent_id, filename)
+    if result is None:
+        result = _ingest_pdf_pymupdf(file_path, doc_id, thread_id, parent_id, filename)
+
+    pp_n = _ingest_pdfplumber_tables(file_path, doc_id, thread_id, parent_id, filename)
+    if pp_n:
+        result["table_chunks"] = result.get("table_chunks", 0) + pp_n
+    return result
 
 
 # ── Excel ingestion ───────────────────────────────────────────────────────────

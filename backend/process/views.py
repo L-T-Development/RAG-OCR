@@ -1025,6 +1025,8 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
             doc1_id=str(left_doc.id),
             doc2_id=str(right_doc.id),
             thread_ids=thread_ids,
+            category1=left_doc.category,
+            category2=right_doc.category,
         )
 
         # Fallback: if structured tables are unavailable, use file-based comparison.
@@ -1037,6 +1039,8 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
                     column_name_pdf2=right_col,
                     match_any_column_in_pdf2=match_any_column_in_pdf2,
                     comparison_type=comparison_type,
+                    category1=left_doc.category,
+                    category2=right_doc.category,
                 )
             else:
                 missing_files = []
