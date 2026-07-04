@@ -1154,9 +1154,27 @@ def _format_comparison_response(comparison_result: dict) -> str:
         extra_count = results_data['in_pdf2_only']['count']
         if extra_count > 0:
             response += f"❌ **{extra_count} items** from {pdf2} are **NOT found** in {pdf1}\n\n"
-    
+
+    if 'likely_matches' in results_data:
+        lm_count = results_data['likely_matches']['count']
+        response += (
+            f"⚠️ **{lm_count} item(s)** appear in BOTH files but written differently "
+            f"(leading zeros / annotations) — review below, not counted as missing\n\n"
+        )
+
     response += "---\n\n"
-    
+
+    # Likely matches (same item, different formatting) — reviewable table
+    if 'likely_matches' in results_data and results_data['likely_matches']['count'] > 0:
+        response += "### ⚠️ Likely Matches (same item, formatted differently)\n\n"
+        response += f"| {pdf1} | {pdf2} | Why |\n|---|---|---|\n"
+        for p in results_data['likely_matches']['pairs'][:15]:
+            response += f"| `{p['pdf1_value']}` | `{p['pdf2_value']}` | {p['reason']} |\n"
+        remaining = results_data['likely_matches']['count'] - 15
+        if remaining > 0:
+            response += f"\n_... and {remaining} more (see Excel report)_\n"
+        response += "\n---\n\n"
+
     # Detailed Missing Items
     if 'in_pdf1_only' in results_data and results_data['in_pdf1_only']['count'] > 0:
         response += f"### ❌ Missing from {pdf2} (found in {pdf1} only)\n\n"
@@ -2639,7 +2657,32 @@ def generate_comparison_excel(comparison_result: dict) -> bytes:
         summary_sheet[f'A{row}'] = 'Missing from File 1:'
         summary_sheet[f'A{row}'].font = Font(bold=True, color='0000FF')
         summary_sheet[f'B{row}'] = count
-    
+        row += 1
+
+    if 'likely_matches' in results_data:
+        count = results_data['likely_matches']['count']
+        summary_sheet[f'A{row}'] = 'Likely matches (formatting differs):'
+        summary_sheet[f'A{row}'].font = Font(bold=True, color='B8860B')
+        summary_sheet[f'B{row}'] = count
+
+    # Sheet: Likely Matches (same item, different formatting)
+    if 'likely_matches' in results_data and results_data['likely_matches']['count'] > 0:
+        lm_sheet = wb.create_sheet("Likely Matches")
+        lm_sheet['A1'] = 'Values present in both files but written differently — review'
+        lm_sheet['A1'].font = Font(size=14, bold=True)
+        lm_sheet['A1'].fill = PatternFill(start_color='FFF2CC', end_color='FFF2CC', fill_type='solid')
+        headers = [comparison_result.get('pdf1', 'File 1'),
+                   comparison_result.get('pdf2', 'File 2'), 'Reason']
+        for col_idx, h in enumerate(headers, 1):
+            c = lm_sheet.cell(row=3, column=col_idx, value=h)
+            c.font = Font(bold=True)
+        for r_idx, p in enumerate(results_data['likely_matches']['pairs'], 4):
+            lm_sheet.cell(row=r_idx, column=1, value=p['pdf1_value'])
+            lm_sheet.cell(row=r_idx, column=2, value=p['pdf2_value'])
+            lm_sheet.cell(row=r_idx, column=3, value=p['reason'])
+        for col_letter, width in (('A', 30), ('B', 30), ('C', 50)):
+            lm_sheet.column_dimensions[col_letter].width = width
+
     # Sheet 2: Missing Items
     if 'in_pdf1_only' in results_data and results_data['in_pdf1_only']['count'] > 0:
         missing_sheet = wb.create_sheet("Missing from File 2")

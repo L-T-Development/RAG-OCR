@@ -207,3 +207,90 @@ def normalize_value(value: str) -> str:
 def is_empty_value(value: str) -> bool:
     """True for cells that carry no comparable content."""
     return normalize_value(value) in ("", "-", "N/A", "NA", "NONE", "NIL")
+
+
+# ── 5. Likely-same pairing for code-like values ─────────────────────────────────
+# After the exact set-difference, values like "1534601" vs "01534601" or
+# "NAMP-12130000-NAMICA" vs "NAMP-12130000" land in the "missing" lists even
+# though they are almost certainly the same item written differently. These
+# DETERMINISTIC rules pair them up. We intentionally do NOT use character
+# similarity ratios: catalogues are full of sequential part numbers
+# (10106255 / 10106256) that are >85% similar yet genuinely different parts —
+# a fuzzy ratio would silently merge them. False "missing" beats false "same".
+
+def _zero_core(v: str):
+    """Numeric core with leading zeros stripped, or None if not purely numeric."""
+    if v.isdigit():
+        return v.lstrip("0") or "0"
+    return None
+
+
+def _token_eq(a: str, b: str) -> bool:
+    """Hyphen-token equality, tolerant of leading zeros on numeric tokens."""
+    if a == b:
+        return True
+    za, zb = _zero_core(a), _zero_core(b)
+    return za is not None and za == zb
+
+
+def _containment_reason(a: str, b: str):
+    """
+    If the shorter value's hyphen-tokens appear as a contiguous run inside the
+    longer value's tokens (e.g. "NAMP-12130000" inside "NAMP-12130000-NAMICA",
+    or "NAMP-01210000" inside "DIC-NAMP-01210000"), the extra tokens are almost
+    always an annotation prefix/suffix. Returns a reason string, or None.
+    """
+    short, long_ = (a, b) if len(a) <= len(b) else (b, a)
+    if len(short) < 6:
+        return None                      # too short to trust containment
+    ts = re.split(r"[-\s]+", short)      # hyphen OR space separated annotations
+    tl = re.split(r"[-\s]+", long_)
+    if len(ts) >= len(tl):
+        return None
+    for i in range(len(tl) - len(ts) + 1):
+        if all(_token_eq(ts[j], tl[i + j]) for j in range(len(ts))):
+            extra = [t for k, t in enumerate(tl) if k < i or k >= i + len(ts)]
+            return f"'{long_}' carries extra annotation '{'-'.join(extra)}'"
+    return None
+
+
+def pair_likely_values(only_a, only_b, max_scan=1_000_000):
+    """
+    Pair values from two "missing" sets that are likely the same item written
+    differently. Each value is used at most once (greedy, deterministic order).
+
+    Returns [(value_a, value_b, reason), ...].
+    """
+    pairs, used_b = [], set()
+
+    # Pass 1 — leading-zero variants, via an O(n) index on the numeric core.
+    core_index = {}
+    for b in only_b:
+        zc = _zero_core(b)
+        if zc is not None:
+            core_index.setdefault(zc, []).append(b)
+    for a in sorted(only_a):
+        zc = _zero_core(a)
+        if zc is None:
+            continue
+        for b in sorted(core_index.get(zc, [])):
+            if b not in used_b:
+                pairs.append((a, b, "differs only by leading zeros"))
+                used_b.add(b)
+                break
+
+    # Pass 2 — annotation prefix/suffix containment (guarded O(n·m)).
+    paired_a = {p[0] for p in pairs}
+    if len(only_a) * len(only_b) <= max_scan:
+        for a in sorted(only_a):
+            if a in paired_a:
+                continue
+            for b in sorted(only_b):
+                if b in used_b:
+                    continue
+                reason = _containment_reason(a, b)
+                if reason:
+                    pairs.append((a, b, reason))
+                    used_b.add(b)
+                    break
+    return pairs

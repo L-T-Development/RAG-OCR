@@ -11,7 +11,7 @@ import re
 from collections import defaultdict
 
 from .models import ExtractedTable
-from .field_schema import resolve_header, normalize_value, is_empty_value
+from .field_schema import resolve_header, normalize_value, is_empty_value, pair_likely_values
 
 
 class TableSearchEngine:
@@ -605,6 +605,29 @@ class TableSearchEngine:
         in_pdf1_only = pdf1_values - pdf2_values
         in_pdf2_only = pdf2_values - pdf1_values
         common_values = pdf1_values & pdf2_values
+
+        # Pair leftover values that are likely the same item written differently
+        # (leading zeros, annotation prefixes/suffixes). Deterministic rules only —
+        # see field_schema.pair_likely_values. Paired values move out of the
+        # "missing" lists into their own reviewable category.
+        likely_pairs = pair_likely_values(in_pdf1_only, in_pdf2_only)
+        if likely_pairs:
+            in_pdf1_only = in_pdf1_only - {p[0] for p in likely_pairs}
+            in_pdf2_only = in_pdf2_only - {p[1] for p in likely_pairs}
+
+        # Second chance: a leftover may be a formatting variant of a value the
+        # other file DOES contain but which already matched exactly (e.g. MRLS
+        # lists both "XL17461" and "XL17461 NAMICA" — the plain form lands in
+        # common, leaving the annotated one stranded as "missing").
+        second1 = pair_likely_values(in_pdf1_only, pdf2_values - in_pdf2_only)
+        if second1:
+            in_pdf1_only = in_pdf1_only - {p[0] for p in second1}
+            likely_pairs.extend(second1)
+        second2 = pair_likely_values(in_pdf2_only, pdf1_values - in_pdf1_only)
+        if second2:
+            in_pdf2_only = in_pdf2_only - {p[0] for p in second2}
+            # flip so pdf1_value/pdf2_value keep their meaning
+            likely_pairs.extend((b, a, reason) for a, b, reason in second2)
         
         # Prepare results. Show the ACTUAL resolved headers so the user sees which
         # real columns were compared (e.g. "Manufacturer's Part No. ↔ DS Cat No.").
@@ -623,6 +646,15 @@ class TableSearchEngine:
             'comparison_type': comparison_type,
             'results': {}
         }
+
+        if likely_pairs:
+            result['results']['likely_matches'] = {
+                'count': len(likely_pairs),
+                'pairs': [
+                    {'pdf1_value': a, 'pdf2_value': b, 'reason': reason}
+                    for a, b, reason in likely_pairs
+                ],
+            }
         
         if comparison_type in ['difference', 'all']:
             # Items in PDF1 but not in PDF2
