@@ -828,6 +828,34 @@ def _extract_search_info(query: str) -> tuple:
     return None, query_type
 
 
+def _format_available_columns(columns, limit: int = 20) -> str:
+    """Render the header list for the "column not found" message.
+
+    The list arrives sorted alphabetically, which buries real headers behind
+    "Column_7" placeholders and stray numeric values from tables whose header row
+    was never recovered — so a truncated list showed the user nothing usable.
+    Real labels come first, and the count of what was dropped is stated.
+    """
+    cols = [str(c) for c in columns if str(c).strip()]
+    if not cols:
+        return ''
+
+    def _is_placeholder(c):
+        return bool(re.fullmatch(r'Column_\d+(_\d+)?', c)) or not any(ch.isalpha() for ch in c)
+
+    named = [c for c in cols if not _is_placeholder(c)]
+    placeholders = [c for c in cols if _is_placeholder(c)]
+    shown = (named + placeholders)[:limit]
+    text = ', '.join(shown)
+    hidden = len(cols) - len(shown)
+    if hidden > 0:
+        text += f" … (+{hidden} more)"
+    if placeholders and not named:
+        text += ("\n\n> ⚠️ No column names were recovered from this file — its table "
+                 "headers did not extract. Re-upload or reprocess it.")
+    return text
+
+
 def _extract_comparison_info(query: str, thread) -> Optional[dict]:
     """
     Extract comparison parameters from natural language query.
@@ -872,6 +900,16 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
         'nsn': ['nsn', 'national stock']
     }
     
+    # Quoted column names, e.g.
+    #   compare "Firms Part No." column in @a.pdf with "Part No" column in @b.pdf
+    # The user named the headers outright, so take them verbatim — the keyword
+    # buckets below would collapse both to the single concept "part" and lose the
+    # distinction. Two quoted names map one per file, in the order given.
+    quoted_columns = [
+        q.strip() for q in re.findall(r'["“”]([^"“”]{2,60})["“”]', query)
+    ]
+    quoted_columns = [q for q in quoted_columns if q and not q.lower().endswith('.pdf')]
+
     column_name = None
     for col_type, keywords in column_keywords.items():
         if any(kw in query_lower for kw in keywords):
@@ -908,6 +946,15 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
     if 'manufacturer part no' in query_lower and any(k in query_lower for k in ['drg', 'drawing', 'dwg']):
         column_name_pdf1 = 'manufacturer part no'
         column_name_pdf2 = 'drg'
+
+    # Quoted names override every guess above, and switch column resolution to
+    # literal matching so the named header cannot be redirected to a different
+    # column of the same canonical field.
+    prefer_literal = bool(quoted_columns)
+    if quoted_columns:
+        column_name = quoted_columns[0]
+        column_name_pdf1 = quoted_columns[0]
+        column_name_pdf2 = quoted_columns[1] if len(quoted_columns) > 1 else None
 
     # Natural language mode: compare source column against ANY target column in second file.
     # Examples: "compare this column with contents", "match to any column of other pdf"
@@ -1008,9 +1055,10 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
         # This is robust even if source files were deleted after vectorization.
         thread_ids = [str(thread.id)] + [str(tid) for tid in get_ancestor_thread_ids(thread)]
         # If categories indicate MRLS/ISPL with mapped columns, align direction explicitly.
+        # Each column belongs to the document it was named for, so it travels with it.
         if column_name_pdf2 and pdf1_doc.category == 'ispl' and pdf2_doc.category == 'mrls':
             left_doc, right_doc = pdf2_doc, pdf1_doc
-            left_col, right_col = column_name_pdf1, column_name_pdf2
+            left_col, right_col = column_name_pdf2, column_name_pdf1
         else:
             left_doc, right_doc = pdf1_doc, pdf2_doc
             left_col, right_col = column_name_pdf1, column_name_pdf2
@@ -1027,6 +1075,7 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
             thread_ids=thread_ids,
             category1=left_doc.category,
             category2=right_doc.category,
+            prefer_literal=prefer_literal,
         )
 
         # Fallback: if structured tables are unavailable, use file-based comparison.
@@ -1041,6 +1090,7 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
                     comparison_type=comparison_type,
                     category1=left_doc.category,
                     category2=right_doc.category,
+                    prefer_literal=prefer_literal,
                 )
             else:
                 missing_files = []
@@ -1077,13 +1127,16 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
         # Structured comparison could not locate requested column(s)
         error_text = result.get('error') if isinstance(result, dict) else None
         if error_text:
-            cols1 = ', '.join(result.get('available_columns_pdf1', [])[:20])
-            cols2 = ', '.join(result.get('available_columns_pdf2', [])[:20])
+            cols1 = _format_available_columns(result.get('available_columns_pdf1', []))
+            cols2 = _format_available_columns(result.get('available_columns_pdf2', []))
+            requested = column_name_pdf1
+            if column_name_pdf2 and column_name_pdf2 != column_name_pdf1:
+                requested = f"{column_name_pdf1} (in {pdf1_doc.filename}) / {column_name_pdf2} (in {pdf2_doc.filename})"
             return {
                 'found': True,
                 'formatted_answer': (
                     "## ❌ Column Not Found for Comparison\n\n"
-                    f"Requested column: **{column_name}**\n\n"
+                    f"Requested column: **{requested}**\n\n"
                     f"{error_text}\n\n"
                     f"**{pdf1_doc.filename} columns:** {cols1 or 'N/A'}\n\n"
                     f"**{pdf2_doc.filename} columns:** {cols2 or 'N/A'}\n\n"

@@ -31,13 +31,16 @@ class TableSearchEngine:
         """
         pdf_name = Path(pdf_path).name
         all_tables = []
-        
+        # Last real header seen per column count, so continuation pages of a
+        # multi-page table inherit the header printed on its first page.
+        header_memo: Dict[int, List[str]] = {}
+
         with pdfplumber.open(pdf_path) as pdf:
             total_pages = len(pdf.pages)
-            
+
             for page_num, page in enumerate(pdf.pages, 1):
                 tables = page.extract_tables()
-                
+
                 if tables:
                     for table in tables:
                         if not table or len(table) < 2:
@@ -47,6 +50,8 @@ class TableSearchEngine:
                         cleaned_table = self._clean_table_structure(table)
                         if not cleaned_table or len(cleaned_table) < 2:
                             continue
+
+                        cleaned_table = self._with_carried_header(cleaned_table, header_memo)
 
                         # Convert to DataFrame with proper column handling
                         df = self._create_dataframe_from_table(cleaned_table, page_num)
@@ -58,7 +63,7 @@ class TableSearchEngine:
                 # lists) that pdfplumber's line strategy cannot detect. Uses a
                 # numbered "1 2 ... N" column-reference row as column anchors.
                 try:
-                    for adf in self._extract_anchor_tables(page, page_num):
+                    for adf in self._extract_anchor_tables(page, page_num, header_memo):
                         if not adf.empty:
                             all_tables.append(adf)
                 except Exception as e:
@@ -113,6 +118,62 @@ class TableSearchEngine:
         
         return standardized
     
+    # ── Header carry-forward across continuation pages ──────────────────────
+    # A long spares table prints its header once, on the page where it starts.
+    # Every later page begins straight into data, so the "row 0 is the header"
+    # rule below turns catalogue values into column names ("9900905066",
+    # "BEML"), and nothing downstream can resolve a column any more. We detect
+    # that case and re-use the last real header of the same width.
+
+    _PLACEHOLDER_COL_RE = re.compile(r'Column_\d+(_\d+)?$')
+
+    @classmethod
+    def _looks_like_header(cls, row) -> bool:
+        """True when a row reads as column labels rather than data.
+
+        Two things separate a header from a data row:
+
+        * it names most of its columns, so a line with one filled cell and the
+          rest blank is a stray data row, not a header;
+        * its cells read as words rather than codes. Digits alone do not
+          disqualify a label — "18 Months 500 Hour" is a perfectly good column
+          name — but letters must outweigh them, which excludes "9900905066" and
+          "45-0867". Reconstruction placeholders ("Column_7") never count.
+        """
+        width = len(row)
+        if width < 2:
+            return False
+        cells = [re.sub(r'\s+', ' ', str(c)).strip()
+                 for c in row if c is not None and str(c).strip()]
+        if len(cells) < 2 or len(cells) * 2 < width:
+            return False
+        labelish = 0
+        for c in cells:
+            if cls._PLACEHOLDER_COL_RE.match(c):
+                continue
+            letters = sum(ch.isalpha() for ch in c)
+            if letters >= 2 and letters > sum(ch.isdigit() for ch in c):
+                labelish += 1
+        return labelish * 2 >= len(cells)
+
+    def _with_carried_header(self, matrix: List[List], memo: Dict[int, List[str]]) -> List[List]:
+        """Guarantee `matrix` starts with a header row.
+
+        Records row 0 in `memo` when it reads as labels. When it does not — a
+        continuation page — the remembered header of the same width is prepended,
+        which also keeps that first row where it belongs, in the data.
+        """
+        if not matrix:
+            return matrix
+        width = len(matrix[0])
+        if self._looks_like_header(matrix[0]):
+            memo[width] = [str(c) if c is not None else '' for c in matrix[0]]
+            return matrix
+        carried = memo.get(width)
+        if carried:
+            return [list(carried)] + matrix
+        return matrix
+
     def _create_dataframe_from_table(self, table: List[List], page_num: int) -> pd.DataFrame:
         """
         Create DataFrame from table with robust column handling.
@@ -228,13 +289,22 @@ class TableSearchEngine:
                 return i
         return len(bounds) - 2
 
+    # The part-number column is labelled differently per document family:
+    # "Manufacturer's Part No." (NAMICA/TGS MRLS), "Firms Part No." (MMME ISPL),
+    # plain "Part No", "DS Cat No.". Any of them marks a spares list.
+    _PART_HDR_RE = re.compile(r"manufactur|firm|part\s*\.?\s*no|p/n|ds\s*cat", re.I)
+    # ...but only alongside one of the other columns a spares list always carries,
+    # so ordinary prose tables are not rewritten.
+    _SPARES_CTX_RE = re.compile(
+        r"nomenclature|description|source\s+of\s+supply|cct\s*ref|para\s*ref|"
+        r"ispl\s*ref|no\.?\s*off|qty|remark", re.I)
+
     def _canonicalise_spares_headers(self, headers: List[str]) -> List[str]:
         """Map noisy reconstructed headers of an MRLS/ISPL-style spares table to
         canonical column names by keyword. Returns headers unchanged when the
         spares-list signature is absent."""
-        band = ' '.join(headers).lower()
-        if 'manufactur' not in band or not (
-            'nomenclature' in band or 'source of supply' in band):
+        band = ' '.join(headers)
+        if not self._PART_HDR_RE.search(band) or not self._SPARES_CTX_RE.search(band):
             return headers  # not a spares list — leave reconstructed names as-is
 
         out = list(headers)
@@ -242,7 +312,7 @@ class TableSearchEngine:
             hl = h.lower()
             if i == 0:
                 out[i] = 'Sr. No.'                        # serial column, never "part"
-            elif 'manufactur' in hl:
+            elif 'manufactur' in hl or 'firm' in hl:
                 out[i] = "Manufacturer's Part No."        # the part-number column
             elif 'source' in hl:
                 out[i] = 'Source of Supply'
@@ -257,7 +327,8 @@ class TableSearchEngine:
             out[1] = "Manufacturer's Part No."
         return out
 
-    def _extract_anchor_tables(self, page, page_num: int) -> List[pd.DataFrame]:
+    def _extract_anchor_tables(self, page, page_num: int,
+                               header_memo: Optional[Dict[int, List[str]]] = None) -> List[pd.DataFrame]:
         """Reconstruct a line-less table using its numbered reference row."""
         try:
             words = page.extract_words(keep_blank_chars=False, use_text_flow=False)
@@ -294,6 +365,15 @@ class TableSearchEngine:
         # names by keyword so downstream column matching is reliable and the
         # serial column never masquerades as the part column.
         headers = self._canonicalise_spares_headers(headers)
+
+        # On a continuation page the numbered reference row is reprinted but the
+        # header band above it is not, leaving every name as "Column_N". Replace
+        # those with the header this table carried on the page it started.
+        if header_memo is not None:
+            if self._looks_like_header(headers):
+                header_memo[ncols] = list(headers)
+            elif ncols in header_memo:
+                headers = list(header_memo[ncols])
 
         # Data rows: a new logical row begins when column 0 holds a serial
         # number ("11."); other lines are wrapped continuations of the row above.
@@ -514,10 +594,11 @@ class TableSearchEngine:
                       match_any_column_in_pdf2: bool = False,
                       comparison_type: str = 'difference',
                       category1: Optional[str] = None,
-                      category2: Optional[str] = None) -> Dict[str, Any]:
+                      category2: Optional[str] = None,
+                      prefer_literal: bool = False) -> Dict[str, Any]:
         """
         Compare a specific column between two PDFs.
-        
+
         Args:
             pdf1_name: First PDF name (e.g., 'mrls.pdf')
             pdf2_name: Second PDF name (e.g., 'ISPL_Vol-I.pdf')
@@ -559,7 +640,7 @@ class TableSearchEngine:
                 if match_any:
                     cols = data_cols
                 else:
-                    col = resolve_header(target, data_cols, category)
+                    col = resolve_header(target, data_cols, category, prefer_literal=prefer_literal)
                     if not col:
                         continue
                     resolved = resolved or col
@@ -701,8 +782,12 @@ class TableSearchEngine:
             query = query.filter(thread_id__in=thread_ids)
 
         all_tables = []
+        # Same continuation-page problem as the live extractor, except the bad
+        # header is already persisted. Page order matters, so the header of a
+        # table reaches the pages that continue it.
+        header_memo: Dict[int, List[str]] = {}
 
-        for table in query:
+        for table in query.order_by('page', 'table_index'):
             table_dict = table.to_dict()
             headers = table_dict.get('headers', []) or []
             table_data = table_dict.get('data', []) or []
@@ -716,6 +801,16 @@ class TableSearchEngine:
 
             if not data_rows:
                 continue
+
+            width = len(headers) if headers else max((len(r) for r in data_rows), default=0)
+            if headers and self._looks_like_header(headers):
+                header_memo[width] = [str(h) for h in headers]
+            elif width in header_memo:
+                if headers:
+                    # What was stored as the header is really this page's first
+                    # data row — put it back before adopting the real header.
+                    data_rows = [list(headers)] + list(data_rows)
+                headers = list(header_memo[width])
 
             if headers and any(str(h).strip() for h in headers):
                 clean_headers = []
@@ -867,10 +962,11 @@ def compare_pdfs(pdf1_path: str, pdf2_path: str, column_name: str,
                 match_any_column_in_pdf2: bool = False,
                 comparison_type: str = 'difference',
                 category1: Optional[str] = None,
-                category2: Optional[str] = None) -> Dict[str, Any]:
+                category2: Optional[str] = None,
+                prefer_literal: bool = False) -> Dict[str, Any]:
     """
     Compare a specific column between two PDFs.
-    
+
     Args:
         pdf1_path: Path to first PDF (e.g., MRLS)
         pdf2_path: Path to second PDF (e.g., ISPL)
@@ -899,6 +995,7 @@ def compare_pdfs(pdf1_path: str, pdf2_path: str, column_name: str,
         comparison_type,
         category1=category1,
         category2=category2,
+        prefer_literal=prefer_literal,
     )
 
 
@@ -910,7 +1007,8 @@ def compare_structured_sources(source1_name: str, source2_name: str, column_name
                                doc2_id: Optional[str] = None,
                                thread_ids: Optional[List[str]] = None,
                                category1: Optional[str] = None,
-                               category2: Optional[str] = None) -> Dict[str, Any]:
+                               category2: Optional[str] = None,
+                               prefer_literal: bool = False) -> Dict[str, Any]:
     """
     Compare values by reading persisted structured tables from DB.
     This avoids file-path dependency and works even when uploaded PDFs are no longer on disk.
@@ -933,6 +1031,7 @@ def compare_structured_sources(source1_name: str, source2_name: str, column_name
         comparison_type,
         category1=category1,
         category2=category2,
+        prefer_literal=prefer_literal,
     )
 
 

@@ -537,6 +537,9 @@ def _ingest_pdfplumber_tables(file_path, doc_id, thread_id, parent_id, filename)
 
     engine = TableSearchEngine()
     count = 0
+    # Header printed on the page a table starts, carried to the pages it
+    # continues onto — otherwise those pages persist a data row as their header.
+    header_memo = {}
     try:
         with pdfplumber.open(file_path) as pdf:
             for page_num, page in enumerate(pdf.pages, 1):
@@ -549,13 +552,13 @@ def _ingest_pdfplumber_tables(file_path, doc_id, thread_id, parent_id, filename)
                             continue
                         ct = engine._clean_table_structure(t)
                         if ct and len(ct) >= 2:
-                            matrices.append(ct)
+                            matrices.append(engine._with_carried_header(ct, header_memo))
                 except Exception:
                     pass
 
                 # 2. Line-less anchor tables
                 try:
-                    for df in engine._extract_anchor_tables(page, page_num):
+                    for df in engine._extract_anchor_tables(page, page_num, header_memo):
                         if df.empty:
                             continue
                         cols = [c for c in df.columns if not str(c).startswith('_')]

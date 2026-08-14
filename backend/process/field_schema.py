@@ -48,6 +48,13 @@ def _canon(text) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def _canon_loose(text) -> str:
+    """As _canon, but punctuation becomes a separator, so a name the user typed
+    matches the header however either side punctuates it:
+    "Firms part no." / "Firms Part No" / "FIRM'S PART-NO." → "firms part no"."""
+    return re.sub(r"[^a-z0-9]+", " ", _canon(text)).strip()
+
+
 # ── 1. Canonical fields: internal name → words a user might type for it ──────────
 # Used to turn a free-text column word from the query ("part", "drawing no") into a
 # canonical field key. Keep the words lowercase.
@@ -143,19 +150,42 @@ def _schema_for(category):
     return CATEGORY_SCHEMA["_default"]
 
 
-def resolve_header(user_term: str, headers, category=None):
+def resolve_header(user_term: str, headers, category=None, prefer_literal: bool = False):
     """
     Translate a user's column word into the actual header present in `headers`,
     honouring the document `category`.
 
     Resolution order:
-      1. category-specific patterns for the canonical field (in priority order)
-      2. _default patterns for the canonical field
-      3. direct substring of the user term itself (last resort)
+      0. the user's own words, matched exactly (punctuation-insensitively)
+      1. that same term as a substring, when the user named a header outright
+         (`prefer_literal`) — a name they typed must not be second-guessed
+      2. category-specific patterns for the canonical field (in priority order)
+      3. _default patterns for the canonical field
+      4. direct substring of the user term itself (last resort)
+
+    Step 0 is skipped for single-word terms such as "part", which name a concept
+    rather than a header and must keep going through the schema so each document
+    type resolves them to its own column.
 
     Returns the original header string (as it appears in `headers`) or None.
     """
-    pairs = [(h, _canon(h)) for h in headers]
+    pairs = [(h, _canon(h), _canon_loose(h)) for h in headers]
+    term = _canon(user_term)
+    term_loose = _canon_loose(user_term)
+
+    if term_loose and (prefer_literal or " " in term_loose):
+        for orig, _hl, hloose in pairs:
+            if hloose == term_loose:
+                return orig
+
+    # An explicitly named column beats any schema guess. Without this, asking for
+    # ISPL "Firms Part No." resolves to "DS Cat No." — both are part_no, and the
+    # schema lists DS Cat No. first.
+    if prefer_literal and term_loose:
+        for orig, _hl, hloose in pairs:
+            if term_loose in hloose:
+                return orig
+
     field = canonical_field_for_query(user_term)
 
     schemas = []
@@ -167,14 +197,13 @@ def resolve_header(user_term: str, headers, category=None):
         for schema in schemas:
             for pat in schema.get(field, []):
                 patc = _canon(pat)
-                for orig, hl in pairs:
+                for orig, hl, _hloose in pairs:
                     if patc in hl:
                         return orig
 
     # Last resort: match the user's literal term against the headers.
-    term = _canon(user_term)
     if term:
-        for orig, hl in pairs:
+        for orig, hl, _hloose in pairs:
             if term in hl:
                 return orig
     return None
