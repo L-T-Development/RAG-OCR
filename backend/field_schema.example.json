@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "Optional override for the column-name schema used by document comparison.",
+    "Copy this file to <RAGOCR_DATA_DIR>/field_schema.json (packaged app:",
+    "%APPDATA%\\RAG-OCR\\data\\field_schema.json) or to backend/field_schema.json in dev.",
+    "It is re-read automatically whenever it changes - no restart needed.",
+    "GET /api/field-schema/ shows the effective merged schema and any load error.",
+    "",
+    "canonical_fields: extra words a user might TYPE for a concept (appended).",
+    "category_schema:  per document category, per concept, the ORDERED list of header",
+    "                  patterns to look for in a table (first match wins). A list given",
+    "                  here REPLACES the built-in list for that category+concept.",
+    "                  New category names are allowed. Known concepts:",
+    "                  part_no, nomenclature, drawing_no, nsn, qty, serial, reference."
+  ],
+
+  "canonical_fields": {
+    "part_no": ["works part no", "wpn"]
+  },
+
+  "category_schema": {
+    "ispl": {
+      "part_no": ["firms part no", "manufacturer's part no", "manufacturer part no", "ds cat no", "part no"]
+    },
+    "mrls": {
+      "part_no": ["manufacturer's part no", "manufacturer part no", "part no", "part"]
+    },
+    "manual": {
+      "part_no": ["part no", "part number", "cat no", "p/n"],
+      "nomenclature": ["nomenclature", "description", "item"]
+    }
+  }
+}

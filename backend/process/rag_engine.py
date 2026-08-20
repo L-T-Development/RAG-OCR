@@ -44,8 +44,6 @@ from .pipeline import (
     get_ancestor_ids,
     extract_search_terms,
     search_tables,
-    compare_tables,
-    cross_doc_search,
 
     # Ingestion
     smart_chunk_text,

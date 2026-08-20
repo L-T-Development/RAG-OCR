@@ -314,3 +314,120 @@ class TableCell(models.Model):
     
     def __str__(self):
         return f"{self.row.table.id} - Row {self.row.row_index} - Col {self.column_index}: {self.value[:50]}"
+
+
+class ConfirmedMatch(models.Model):
+    """
+    A user-confirmed "these are the same item, written differently" pairing
+    between two documents' comparison values (e.g. "NAMP-08020000" in one file
+    is the same part as "DIC-NAMP-08020000" in another).
+
+    Deterministic matching rules (leading zeros, annotation containment, typo
+    tolerance) only catch patterns anticipated in advance; this lets a human
+    confirmation stick permanently for whatever they don't catch, without
+    re-litigating it on every future comparison of the same two documents.
+    """
+    source_a = models.CharField(max_length=500, db_index=True)
+    source_b = models.CharField(max_length=500, db_index=True)
+    # Canonical field key (e.g. "part_no") when the compared column maps to one
+    # of the known concepts, else the raw column text the user compared on.
+    # Scopes a confirmation to the concept it was made for, so a part-number
+    # alias never leaks into a drawing-number comparison of the same files.
+    column_key = models.CharField(max_length=255, db_index=True)
+    value_a = models.CharField(max_length=255)  # normalized, matches source_a's side
+    value_b = models.CharField(max_length=255)  # normalized, matches source_b's side
+    note = models.CharField(max_length=500, blank=True, default="")
+    thread = models.ForeignKey(Thread, on_delete=models.SET_NULL, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['source_a', 'source_b', 'column_key']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['source_a', 'source_b', 'column_key', 'value_a', 'value_b'],
+                name='unique_confirmed_match',
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.value_a} = {self.value_b} ({self.source_a} vs {self.source_b})"
+
+class DocumentPageText(models.Model):
+    """
+    Searchable plain text of one page of one document.
+
+    Prose lives only in ChromaDB (as embedded chunks), which cannot answer
+    "does the string XL17461 appear in this manual?" — so a spares list could
+    only ever be compared against another document's *table columns*. Technical
+    manuals mention part numbers in running text, figure callouts and notes, and
+    those mentions were invisible to comparison.
+
+    Two forms of the text are stored because PDF extraction drops spaces when a
+    cell or line wraps ("BIG LAUNCHER PAD" → "BIG LAUNCHERPAD"): the whitespace-
+    collapsed form and the whitespace-free form. Checking a value against both
+    recovers those without loosening the match.
+    """
+    KIND_CHOICES = [('text', 'Prose / paragraph text'), ('table', 'Table cell text')]
+
+    doc_id = models.CharField(max_length=255, db_index=True)
+    thread_id = models.CharField(max_length=255, db_index=True)
+    parent_thread_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)
+    source = models.CharField(max_length=500, db_index=True)
+    page = models.IntegerField(default=1)
+    kind = models.CharField(max_length=10, choices=KIND_CHOICES, default='text')
+    text_norm = models.TextField(blank=True, default='')      # upper-case, single-spaced
+    text_nospace = models.TextField(blank=True, default='')   # upper-case, no whitespace
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['doc_id', 'page'])]
+        constraints = [
+            models.UniqueConstraint(fields=['doc_id', 'page', 'kind'],
+                                    name='unique_page_text_per_doc'),
+        ]
+
+    def __str__(self):
+        return f"{self.source} p{self.page} ({self.kind})"
+
+
+class IdentifierMention(models.Model):
+    """
+    One identifier-shaped token (part/drawing/stock number …) as it appears in a
+    document, with the page it was seen on.
+
+    This is the index that answers "is every spare in the MRLS mentioned anywhere
+    in the manual?" in one query instead of re-parsing PDFs per comparison. It is
+    populated from BOTH prose chunks and table cells, so a part mentioned only in
+    a paragraph still counts as found.
+
+    Deliberately not a foreign key to Document: ingestion writes these from a
+    background thread keyed by the same string doc_id the table store uses.
+    """
+    KIND_CHOICES = DocumentPageText.KIND_CHOICES
+
+    doc_id = models.CharField(max_length=255, db_index=True)
+    thread_id = models.CharField(max_length=255, db_index=True)
+    parent_thread_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)
+    source = models.CharField(max_length=500, db_index=True)
+    value_norm = models.CharField(max_length=255, db_index=True)     # normalize_value()
+    value_nospace = models.CharField(max_length=255, db_index=True)  # normalize_value() minus spaces
+    value_raw = models.CharField(max_length=255, blank=True, default='')
+    page = models.IntegerField(default=1)
+    kind = models.CharField(max_length=10, choices=KIND_CHOICES, default='text')
+    occurrences = models.IntegerField(default=1)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['doc_id', 'value_norm']),
+            models.Index(fields=['value_norm']),
+            models.Index(fields=['doc_id', 'value_nospace']),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=['doc_id', 'value_norm', 'page', 'kind'],
+                                    name='unique_mention_per_doc_page'),
+        ]
+
+    def __str__(self):
+        return f"{self.value_norm} @ {self.source} p{self.page}"

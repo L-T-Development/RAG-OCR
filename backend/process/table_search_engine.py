@@ -10,8 +10,11 @@ from typing import Dict, List, Any, Optional
 import re
 from collections import defaultdict
 
-from .models import ExtractedTable
-from .field_schema import resolve_header, normalize_value, is_empty_value, pair_likely_values
+from .models import ExtractedTable, ConfirmedMatch
+from .field_schema import (
+    resolve_header, normalize_value, is_empty_value, is_boilerplate_value,
+    pair_likely_values, canonical_field_for_query,
+)
 
 
 class TableSearchEngine:
@@ -587,7 +590,41 @@ class TableSearchEngine:
         
         # Fallback to general search
         return self.search_value(pdf_name, part_number, exact_match=False)
-    
+
+    def _get_confirmed_pairs(self, pdf1_name: str, pdf2_name: str, column_key: str):
+        """Previously confirmed value pairs for this document pair + concept,
+        returned as (value_for_pdf1, value_for_pdf2, note) — direction-normalized
+        regardless of which file was "A" when the confirmation was stored."""
+        from django.db.models import Q
+        qs = ConfirmedMatch.objects.filter(
+            Q(source_a__iexact=pdf1_name, source_b__iexact=pdf2_name) |
+            Q(source_a__iexact=pdf2_name, source_b__iexact=pdf1_name),
+            column_key=column_key,
+        )
+        pairs = []
+        for m in qs:
+            if m.source_a.lower() == pdf1_name.lower():
+                pairs.append((m.value_a, m.value_b, m.note))
+            else:
+                pairs.append((m.value_b, m.value_a, m.note))
+        return pairs
+
+    def confirm_match(self, source_a: str, source_b: str, column_name: str,
+                      value_a: str, value_b: str, note: str = "",
+                      thread_id: Optional[str] = None) -> Dict[str, Any]:
+        """Persist a human-confirmed 'these are the same item' pairing so future
+        comparisons of these two documents treat it as matched, not missing."""
+        column_key = canonical_field_for_query(column_name) or column_name.strip().lower()
+        na, nb = normalize_value(value_a), normalize_value(value_b)
+        if not na or not nb:
+            return {'ok': False, 'error': 'Both values must be non-empty.'}
+        obj, created = ConfirmedMatch.objects.update_or_create(
+            source_a=source_a, source_b=source_b, column_key=column_key,
+            value_a=na, value_b=nb,
+            defaults={'note': note, 'thread_id': thread_id},
+        )
+        return {'ok': True, 'created': created, 'value_a': na, 'value_b': nb, 'column_key': column_key}
+
     def compare_tables(self, pdf1_name: str, pdf2_name: str,
                       column_name: str,
                       column_name_pdf2: Optional[str] = None,
@@ -687,6 +724,34 @@ class TableSearchEngine:
         in_pdf2_only = pdf2_values - pdf1_values
         common_values = pdf1_values & pdf2_values
 
+        # How many rows in pdf2 carry each value — e.g. a part number that shows
+        # up on 3 different pages of the ISPL because it's used in 3 assemblies.
+        # The set-based comparison above dedupes to "present or not"; this answers
+        # the separate question of how many times.
+        pdf2_occurrences = defaultdict(int)
+        for r in pdf2_rows:
+            pdf2_occurrences[r['_norm_value']] += 1
+
+        # User-confirmed pairs take priority over every algorithmic rule below —
+        # a human already decided these are the same item, so they're pulled out
+        # first and never re-litigated by the deterministic passes.
+        column_key = canonical_field_for_query(column_name) or column_name.strip().lower()
+        confirmed_pairs = self._get_confirmed_pairs(pdf1_name, pdf2_name, column_key)
+        confirmed_pairs = [(a, b, note) for a, b, note in confirmed_pairs
+                           if a in in_pdf1_only and b in in_pdf2_only]
+        if confirmed_pairs:
+            in_pdf1_only = in_pdf1_only - {p[0] for p in confirmed_pairs}
+            in_pdf2_only = in_pdf2_only - {p[1] for p in confirmed_pairs}
+
+        # Generic placeholder text ("Standard Item", footnote markers) is not a
+        # unique part identifier — reporting it as a missing/extra part is noise,
+        # not a finding. Pulled out before the pairing passes so it isn't spent
+        # matching placeholder typos against each other either.
+        excluded_pdf1 = {v for v in in_pdf1_only if is_boilerplate_value(v)}
+        excluded_pdf2 = {v for v in in_pdf2_only if is_boilerplate_value(v)}
+        in_pdf1_only -= excluded_pdf1
+        in_pdf2_only -= excluded_pdf2
+
         # Pair leftover values that are likely the same item written differently
         # (leading zeros, annotation prefixes/suffixes). Deterministic rules only —
         # see field_schema.pair_likely_values. Paired values move out of the
@@ -732,11 +797,30 @@ class TableSearchEngine:
             result['results']['likely_matches'] = {
                 'count': len(likely_pairs),
                 'pairs': [
-                    {'pdf1_value': a, 'pdf2_value': b, 'reason': reason}
+                    {'pdf1_value': a, 'pdf2_value': b, 'reason': reason,
+                     'count_in_pdf2': pdf2_occurrences.get(b, 0)}
                     for a, b, reason in likely_pairs
                 ],
             }
-        
+
+        if confirmed_pairs:
+            result['results']['confirmed_matches'] = {
+                'count': len(confirmed_pairs),
+                'pairs': [
+                    {'pdf1_value': a, 'pdf2_value': b, 'note': note,
+                     'count_in_pdf2': pdf2_occurrences.get(b, 0)}
+                    for a, b, note in confirmed_pairs
+                ],
+            }
+
+        excluded_values = excluded_pdf1 | excluded_pdf2
+        if excluded_values:
+            result['results']['excluded'] = {
+                'count': len(excluded_values),
+                'values': sorted(excluded_values),
+                'reason': 'generic placeholder text, not a unique part identifier',
+            }
+
         if comparison_type in ['difference', 'all']:
             # Items in PDF1 but not in PDF2
             result['results']['in_pdf1_only'] = {
@@ -750,7 +834,8 @@ class TableSearchEngine:
             result['results']['common'] = {
                 'count': len(common_values),
                 'values': sorted(list(common_values)),
-                'rows': [r for r in pdf1_rows if r['_norm_value'] in common_values]
+                'rows': [r for r in pdf1_rows if r['_norm_value'] in common_values],
+                'occurrences_in_pdf2': {v: pdf2_occurrences.get(v, 0) for v in common_values},
             }
         
         if comparison_type in ['unique_both', 'all']:
@@ -917,6 +1002,7 @@ class TableSearchEngine:
 
 # Global instance
 _search_engine = TableSearchEngine()
+_MISSING = object()   # sentinel: "key was absent" when saving/restoring cache entries
 
 
 def extract_and_index_pdf(pdf_path: str) -> Dict[str, Any]:
@@ -963,7 +1049,8 @@ def compare_pdfs(pdf1_path: str, pdf2_path: str, column_name: str,
                 comparison_type: str = 'difference',
                 category1: Optional[str] = None,
                 category2: Optional[str] = None,
-                prefer_literal: bool = False) -> Dict[str, Any]:
+                prefer_literal: bool = False,
+                force_extract: bool = False) -> Dict[str, Any]:
     """
     Compare a specific column between two PDFs.
 
@@ -972,6 +1059,9 @@ def compare_pdfs(pdf1_path: str, pdf2_path: str, column_name: str,
         pdf2_path: Path to second PDF (e.g., ISPL)
         column_name: Column to compare (e.g., 'Part Number', 'DRG')
         comparison_type: 'difference', 'common', 'unique_both', or 'all'
+        force_extract: re-read both PDFs even if tables for these filenames are
+            already cached (the cache is keyed by bare filename, so a caller that
+            just ran the DB-backed compare must not be handed those tables back)
     
     Returns:
         Dictionary with comparison results
@@ -980,10 +1070,10 @@ def compare_pdfs(pdf1_path: str, pdf2_path: str, column_name: str,
     pdf2_name = Path(pdf2_path).name
     
     # Extract tables if not already done
-    if pdf1_name not in _search_engine.extracted_tables:
+    if force_extract or pdf1_name not in _search_engine.extracted_tables:
         extract_and_index_pdf(pdf1_path)
     
-    if pdf2_name not in _search_engine.extracted_tables:
+    if force_extract or pdf2_name not in _search_engine.extracted_tables:
         extract_and_index_pdf(pdf2_path)
     
     return _search_engine.compare_tables(
@@ -1019,20 +1109,41 @@ def compare_structured_sources(source1_name: str, source2_name: str, column_name
     if not source1_tables or not source2_tables:
         return {'found': False, 'error': 'Structured tables not available for one or both sources'}
 
-    _search_engine.extracted_tables[source1_name] = source1_tables
-    _search_engine.extracted_tables[source2_name] = source2_tables
+    # compare_tables reads from the engine's filename-keyed cache, so the DB
+    # tables are placed there for the duration of the call only. Whatever the
+    # cache held before (file-extracted tables for a same-named PDF, or nothing)
+    # is put back afterwards — otherwise the file-based fallback that callers run
+    # next would silently reuse these DB tables instead of re-reading the PDF.
+    cache = _search_engine.extracted_tables
+    saved = {name: cache.get(name, _MISSING) for name in (source1_name, source2_name)}
+    cache[source1_name] = source1_tables
+    cache[source2_name] = source2_tables
+    try:
+        return _search_engine.compare_tables(
+            source1_name,
+            source2_name,
+            column_name,
+            column_name_pdf2,
+            match_any_column_in_pdf2,
+            comparison_type,
+            category1=category1,
+            category2=category2,
+            prefer_literal=prefer_literal,
+        )
+    finally:
+        for name, prev in saved.items():
+            if prev is _MISSING:
+                cache.pop(name, None)
+            else:
+                cache[name] = prev
 
-    return _search_engine.compare_tables(
-        source1_name,
-        source2_name,
-        column_name,
-        column_name_pdf2,
-        match_any_column_in_pdf2,
-        comparison_type,
-        category1=category1,
-        category2=category2,
-        prefer_literal=prefer_literal,
-    )
+
+def confirm_match(source_a: str, source_b: str, column_name: str,
+                  value_a: str, value_b: str, note: str = "",
+                  thread_id: Optional[str] = None) -> Dict[str, Any]:
+    """Persist a human-confirmed value pairing (see TableSearchEngine.confirm_match)."""
+    return _search_engine.confirm_match(source_a, source_b, column_name, value_a, value_b,
+                                        note=note, thread_id=thread_id)
 
 
 def detect_conflicts(pdf1_path: str, pdf2_path: str = None) -> Dict[str, Any]:

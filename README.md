@@ -11,6 +11,11 @@ A document RAG (Retrieval-Augmented Generation) pipeline for technical manuals: 
 
 Both require **Ollama** running on the host (`localhost:11434`) with at least one embedding model and one chat model pulled. See [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md) for Docker specifics.
 
+> **Documentation map:** [HOW_IT_WORKS.md](HOW_IT_WORKS.md) explains the mechanism —
+> ingestion, retrieval, and the comparison engines. [MEMORY.md](MEMORY.md) is the
+> status record for the document-comparison work: which phases are done, what is
+> planned, the regression baselines, and the known caveats.
+
 ## Requirements
 
 - **Python 3.12+** (for local dev) — dependencies in [`backend/requirements.txt`](backend/requirements.txt)
@@ -127,7 +132,32 @@ npm run dist:win               # produces dist/win-unpacked/RAG-OCR.exe (+ tar.g
 # Quick-patch an already-installed standalone launcher with current backend code
 cd standalone-launcher
 .\patch-runtime.ps1 -Target "<path-to-extracted-launcher-folder>"
+
+# Back-fill / refresh the structured table store used by document comparison
+# (documents uploaded before the table pass existed, or after an extractor fix).
+# PDF-only, no re-embedding, Ollama not needed.
+cd backend
+python manage.py reextract_tables            # PDFs that have no tables yet
+python manage.py reextract_tables --all      # refresh every PDF
+python manage.py reextract_tables --source ISPL_MMME --dry-run
+
+# Build the identifier index that lets a spares list be checked against a MANUAL
+# ("are all these part numbers mentioned anywhere in it?"). New uploads are
+# indexed automatically; run this once for documents uploaded earlier.
+python manage.py build_mention_index         # documents not indexed yet
+python manage.py build_mention_index --all   # rebuild everything
 ```
+
+### Teaching the comparison engine a new column name
+
+"Compare part numbers" has to find the right column in each document, and every
+document family labels it differently (`Manufacturer's Part No.`, `DS Cat No.`,
+`Firms Part No.`, `P/N`, …). The mapping lives in
+`backend/process/field_schema.py` and can be extended **without a rebuild** by
+dropping a `field_schema.json` next to the data (packaged app:
+`%APPDATA%\RAG-OCR\data\field_schema.json`; dev: `backend/field_schema.json`) —
+see `backend/field_schema.example.json`. The file is re-read whenever it changes;
+`GET /api/field-schema/` shows the schema currently in force and any load error.
 
 ## Troubleshooting
 

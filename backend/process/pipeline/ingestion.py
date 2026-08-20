@@ -114,6 +114,20 @@ def _embed_and_store(chunks, metas, ids, collection):
     # Mirror chunks into BM25 index for hybrid search
     from .bm25 import bm25_index
     bm25_index.add_batch(list(zip(ids, chunks, metas)))
+
+    # Mirror the same text into the SQL mention index, so exact-string questions
+    # ("is XL17461 in this manual?") can be answered from prose, not just tables.
+    # One hook here covers every document type, since all of them end up in
+    # _embed_and_store. Never allowed to break an ingestion.
+    try:
+        m0 = metas[0] if metas else {}
+        if m0.get("doc_id"):
+            from process.mentions import index_chunks
+            index_chunks(m0["doc_id"], m0.get("thread_id"),
+                         None if m0.get("parent_id") in (None, "none") else m0.get("parent_id"),
+                         m0.get("source", ""), chunks, metas)
+    except Exception as e:
+        print(f"[INGEST] mention indexing skipped: {e}")
     return len(chunks)
 
 
@@ -618,6 +632,14 @@ def _ingest_pdf(file_path, doc_id, thread_id, parent_id, filename):
     pp_n = _ingest_pdfplumber_tables(file_path, doc_id, thread_id, parent_id, filename)
     if pp_n:
         result["table_chunks"] = result.get("table_chunks", 0) + pp_n
+
+    # Table cells go into the mention index too, so a part that appears only in a
+    # table of the *target* document still counts as mentioned.
+    try:
+        from process.mentions import index_tables
+        index_tables(doc_id, thread_id, parent_id, filename)
+    except Exception as e:
+        print(f"[INGEST] table mention indexing skipped: {e}")
     return result
 
 

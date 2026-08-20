@@ -34,6 +34,14 @@ COPY backend/ /app/
 RUN mkdir -p /app/pdfs /app/local_chroma_db /app/media /app/data
 
 # Entrypoint: symlink sqlite to persistent volume, migrate, start gunicorn
+#
+# ONE worker process, many threads — deliberately. Ingestion, report and diff
+# jobs live in in-process dicts and daemon threads, and the BM25 index is a
+# module-level singleton loaded once per process. With 2+ workers a status poll
+# that lands on the other worker 404s, keyword search goes stale for documents
+# ingested by the other worker, and --max-requests recycling kills a long
+# ingestion mid-run. Threads (gthread) keep the polling UI responsive while a
+# long request runs; --max-requests is intentionally absent.
 RUN printf '#!/bin/sh\n\
 set -e\n\
 if [ -f /app/db.sqlite3 ] && [ ! -L /app/db.sqlite3 ]; then\n\
@@ -46,10 +54,9 @@ ln -sf /app/data/db.sqlite3 /app/db.sqlite3\n\
 python manage.py migrate --noinput\n\
 exec gunicorn ragocr.wsgi:application \\\n\
     --bind 0.0.0.0:8000 \\\n\
-    --workers 2 \\\n\
-    --timeout 300 \\\n\
-    --max-requests 1000 \\\n\
-    --max-requests-jitter 100\n\
+    --workers 1 \\\n\
+    --threads 8 \\\n\
+    --timeout 300\n\
 ' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 EXPOSE 8000

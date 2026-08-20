@@ -216,11 +216,16 @@ docker-compose up --force-recreate
 - Hot reload (volume mounted)
 
 ### Production Recommendations
-1. **Use Gunicorn instead of dev server**
+1. **Use Gunicorn instead of dev server** (the shipped `backend/Dockerfile` already does)
    ```dockerfile
-   # In backend/Dockerfile
-   CMD ["gunicorn", "ragocr.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "4"]
+   # In backend/Dockerfile — keep ONE worker process; scale with threads
+   CMD ["gunicorn", "ragocr.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "1", "--threads", "8"]
    ```
+   > Do **not** raise `--workers` above 1 and do not add `--max-requests`. Ingestion,
+   > report and diff jobs live in in-process memory and daemon threads, and the BM25
+   > keyword index is loaded once per process — a second worker makes status polls
+   > 404 intermittently, leaves keyword search stale, and worker recycling kills
+   > long ingestions. Concurrency comes from `--threads`.
 
 2. **Disable DEBUG**
    ```yaml

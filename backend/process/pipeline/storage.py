@@ -56,6 +56,8 @@ def delete_from_chroma(doc_id=None, thread_id=None):
         delete_tables(doc_id=doc_id, thread_id=thread_id)
         from .bm25 import bm25_index
         bm25_index.delete(doc_id=doc_id, thread_id=thread_id)
+        from process.mentions import delete_for
+        delete_for(doc_id=doc_id, thread_id=thread_id)
         return True
     except Exception as e:
         print(f"[DB] Delete error: {e}")

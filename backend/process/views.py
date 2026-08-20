@@ -62,7 +62,13 @@ from process.reports_engine import (
 )
 
 # Table Search Engine imports
-from process.table_search_engine import search_in_pdf, get_pdf_table_info, compare_structured_sources
+from process.table_search_engine import search_in_pdf, get_pdf_table_info, compare_structured_sources, confirm_match
+from process import comparison as _cmp
+from process.comparison import (
+    format_comparison_response as _format_comparison_response,
+    format_row_line as _format_row_line,
+    format_available_columns as _format_available_columns,
+)
 import re
 
 # Keep source files by default because table comparison/search uses pdfplumber on disk paths.
@@ -403,14 +409,23 @@ def chat_thread(request, thread_id):
                 print(f"[CONTEXT] Resolved: {resolved_query}")
                 query = resolved_query
                 query_lower = query.lower()
-            
+
+            # Confirm-match intent ("confirm A and B are the same part in @f1 and @f2")
+            # is checked first and narrowly, since "confirm" is also a keyword the
+            # broader comparison-assessment routing below reacts to — this pattern
+            # is specific enough (requires "X and Y ... are the same") not to collide.
+            if _CONFIRM_MATCH_RE.search(query):
+                confirm_result = _extract_confirm_match_info(query, thread)
+                if confirm_result:
+                    table_search_result = confirm_result
+
             # Detect conflict detection query
             is_conflict_query = any(keyword in query_lower for keyword in [
                 'repeated', 'duplicate', 'conflict', 'inconsistent', 'same nomenclature',
                 'different part number', 'different drawing', 'multiple part', 'multiple drawing'
             ])
-            
-            if is_conflict_query:
+
+            if is_conflict_query and not table_search_result:
                 # Detect conflict analysis
                 from .table_search_engine import detect_conflicts
                 
@@ -466,6 +481,18 @@ def chat_thread(request, thread_id):
             if strict_assessment_query:
                 is_comparison = True
 
+            # Mention-style intent: "are all the part numbers in A mentioned
+            # anywhere in B / the manual". None of the words above appear, but this
+            # is a comparison — of a column against another document's whole text
+            # (process/comparison.py text mode), not a table-search for one value.
+            if not is_comparison and _cmp.wants_text_mode(query):
+                if len(_cmp.mentioned_files(query)) >= 2 or (
+                    any(t in query_lower for t in ['drg', 'drawing', 'dwg', 'part', 'nsn',
+                                                   'nomenclature', 'spare'])
+                    and _cmp.documents_in_scope(thread).count() >= 2
+                ):
+                    is_comparison = True
+
             # Assessment-style intent: "confirm whether X is in there or not" across 2 PDFs
             if not is_comparison:
                 assessment_terms = [
@@ -485,7 +512,12 @@ def chat_thread(request, thread_id):
                     if pdf_count >= 2:
                         is_comparison = True
             
-            if is_comparison and not table_search_result:
+            if table_search_result:
+                # Already resolved above (e.g. a confirm-match command) — the
+                # comparison/table-search/RAG routing below must not re-run and
+                # potentially overwrite it.
+                pass
+            elif is_comparison:
                 # Extract comparison details
                 comparison_result = _extract_comparison_info(query, thread)
 
@@ -493,7 +525,7 @@ def chat_thread(request, thread_id):
                 if not comparison_result and strict_assessment_query:
                     forced_query = f"Compare DRG present or not between {query}"
                     comparison_result = _extract_comparison_info(forced_query, thread)
-                
+
                 if comparison_result:
                     table_search_result = comparison_result
                 elif strict_assessment_query:
@@ -828,32 +860,103 @@ def _extract_search_info(query: str) -> tuple:
     return None, query_type
 
 
-def _format_available_columns(columns, limit: int = 20) -> str:
-    """Render the header list for the "column not found" message.
+_CONFIRM_MATCH_RE = re.compile(
+    r'confirm\s+(?:that\s+)?[`"‘’“”]?(.+?)[`"‘’“”]?'
+    r'\s+and\s+[`"‘’“”]?(.+?)[`"‘’“”]?'
+    r'\s+(?:are|is)\s+the\s+same\b',
+    re.IGNORECASE,
+)
 
-    The list arrives sorted alphabetically, which buries real headers behind
-    "Column_7" placeholders and stray numeric values from tables whose header row
-    was never recovered — so a truncated list showed the user nothing usable.
-    Real labels come first, and the count of what was dropped is stated.
-    """
-    cols = [str(c) for c in columns if str(c).strip()]
-    if not cols:
-        return ''
 
-    def _is_placeholder(c):
-        return bool(re.fullmatch(r'Column_\d+(_\d+)?', c)) or not any(ch.isalpha() for ch in c)
+def _resolve_confirm_docs(query: str, thread):
+    """Find the two documents a confirm-match command applies to. Requires
+    explicit @file.pdf mentions — unlike comparison queries, this shouldn't
+    guess from category, since a wrong guess would silently mis-file the
+    confirmation."""
+    mentioned = re.findall(r'@?([\w\-. ]+\.pdf)', query, re.IGNORECASE)
+    if len(mentioned) < 2:
+        return None, None
 
-    named = [c for c in cols if not _is_placeholder(c)]
-    placeholders = [c for c in cols if _is_placeholder(c)]
-    shown = (named + placeholders)[:limit]
-    text = ', '.join(shown)
-    hidden = len(cols) - len(shown)
-    if hidden > 0:
-        text += f" … (+{hidden} more)"
-    if placeholders and not named:
-        text += ("\n\n> ⚠️ No column names were recovered from this file — its table "
-                 "headers did not extract. Re-upload or reprocess it.")
-    return text
+    ancestor_ids = get_ancestor_thread_ids(thread)
+    if ancestor_ids:
+        docs = Document.objects.filter(Q(thread=thread) | Q(thread_id__in=ancestor_ids),
+                                       filename__iendswith='.pdf')
+    else:
+        docs = Document.objects.filter(thread=thread, filename__iendswith='.pdf')
+
+    resolved = []
+    for m in mentioned:
+        ml = m.strip().lower()
+        matched = next((d for d in docs if d.filename.lower() == ml), None)
+        if not matched:
+            matched = next((d for d in docs if ml in d.filename.lower()), None)
+        if matched and matched not in resolved:
+            resolved.append(matched)
+    if len(resolved) >= 2:
+        return resolved[0], resolved[1]
+    return None, None
+
+
+def _extract_confirm_match_info(query: str, thread) -> Optional[dict]:
+    """Parse 'confirm "A" and "B" are the same part in @f1.pdf and @f2.pdf' and
+    persist it as a ConfirmedMatch so future comparisons of these two files
+    treat A and B as matched instead of asking again."""
+    m = _CONFIRM_MATCH_RE.search(query)
+    if not m:
+        return None
+
+    def _clean(v):
+        return v.strip().strip('`"‘’“”').strip()
+
+    value_a, value_b = _clean(m.group(1)), _clean(m.group(2))
+    if not value_a or not value_b:
+        return None
+
+    pdf1_doc, pdf2_doc = _resolve_confirm_docs(query, thread)
+    if not pdf1_doc or not pdf2_doc:
+        return {
+            'found': True,
+            'formatted_answer': (
+                "## ⚠️ Could Not Confirm Match\n\n"
+                "I need to know which two files this applies to. Try:\n\n"
+                '`confirm "VALUE_A" and "VALUE_B" are the same part in @file1.pdf and @file2.pdf`'
+            ),
+        }
+
+    query_lower = query.lower()
+    column_name = 'part'
+    column_keywords = {
+        'part': ['part number', 'part no', 'p/n', 'part'],
+        'drg': ['drawing number', 'drg', 'drg no', 'drg. no', 'drawing no', 'dwg'],
+        'nomenclature': ['nomenclature', 'name', 'description'],
+        'nsn': ['nsn', 'national stock'],
+    }
+    for col_type, keywords in column_keywords.items():
+        if any(kw in query_lower for kw in keywords):
+            column_name = col_type
+            break
+
+    result = confirm_match(
+        pdf1_doc.filename, pdf2_doc.filename, column_name,
+        value_a, value_b, note="confirmed via chat", thread_id=str(thread.id),
+    )
+    if not result.get('ok'):
+        return {
+            'found': True,
+            'formatted_answer': f"## ⚠️ Could Not Confirm Match\n\n{result.get('error', 'Unknown error.')}",
+        }
+
+    already = "already recorded" if not result['created'] else "recorded"
+    return {
+        'found': True,
+        'formatted_answer': (
+            f"## ✅ Match Confirmed\n\n"
+            f"**`{result['value_a']}`** (in {pdf1_doc.filename}) and **`{result['value_b']}`** "
+            f"(in {pdf2_doc.filename}) are now treated as the same item for `{column_name}` "
+            f"comparisons between these two files ({already}).\n\n"
+            f"Future comparisons of these files won't flag this pair as missing."
+        ),
+    }
 
 
 def _extract_comparison_info(query: str, thread) -> Optional[dict]:
@@ -868,7 +971,6 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
     Returns:
         Comparison result dictionary or None
     """
-    from .table_search_engine import compare_pdfs
     
     query_lower = query.lower()
     
@@ -966,15 +1068,9 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
         ]
     )
     
-    # Get PDFs from thread (including inherited/ancestor docs)
-    ancestor_ids = get_ancestor_thread_ids(thread)
-    if ancestor_ids:
-        docs = Document.objects.filter(
-            Q(thread=thread) | Q(thread_id__in=ancestor_ids),
-            filename__iendswith='.pdf'
-        )
-    else:
-        docs = Document.objects.filter(thread=thread, filename__iendswith='.pdf')
+    # Table-bearing documents in scope (thread + inherited): PDFs, and also
+    # xlsx/xls/docx — those have ExtractedTable rows too and compare via the DB.
+    docs = _cmp.documents_in_scope(thread)
     
     if docs.count() < 2:
         return None
@@ -984,23 +1080,26 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
     pdf1_doc = None
     pdf2_doc = None
 
-    # Priority 0: Explicit @filename.pdf references in query
-    mentioned_files = re.findall(r'@([\w\-. ]+\.pdf)', query, re.IGNORECASE)
-    if len(mentioned_files) < 2:
-        # Also support plain filenames without @, e.g. "between ISPL_Vol-I.pdf and ISPL_Vol-II.pdf"
-        plain_files = re.findall(r'([\w\-. ]+\.pdf)', query, re.IGNORECASE)
-        for pf in plain_files:
-            if pf not in mentioned_files:
-                mentioned_files.append(pf)
+    # Priority 0: Explicit @filename references in query (any table-bearing
+    # extension; a bare "ISPL_Vol-I.pdf" without @ also counts).
+    mentioned_files = _cmp.mentioned_files(query)
     if len(mentioned_files) >= 2:
-        resolved_docs = []
-        for mentioned in mentioned_files:
-            mentioned_lower = mentioned.strip().lower()
-            matched = next((d for d in docs if d.filename.lower() == mentioned_lower), None)
-            if not matched:
-                matched = next((d for d in docs if mentioned_lower in d.filename.lower()), None)
-            if matched and matched not in resolved_docs:
-                resolved_docs.append(matched)
+        resolved_docs = _cmp.resolve_documents(thread, mentioned_files)
+
+        if len(resolved_docs) >= 3:
+            # N-way: first named file is the source, the rest are targets. This
+            # used to silently compare only the first two.
+            try:
+                return _cmp.run_comparison(
+                    thread, resolved_docs, column_name_pdf1,
+                    prefer_literal=prefer_literal, requested_label=column_name,
+                    text_mode=_cmp.wants_text_mode(query),
+                )
+            except Exception as e:
+                print(f"[COMPARISON] multi-file error: {e}")
+                import traceback
+                traceback.print_exc()
+                return None
 
         if len(resolved_docs) >= 2:
             pdf1_doc, pdf2_doc = resolved_docs[0], resolved_docs[1]
@@ -1051,9 +1150,6 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
         return None
 
     try:
-        # Preferred path: compare using persisted structured tables in DB.
-        # This is robust even if source files were deleted after vectorization.
-        thread_ids = [str(thread.id)] + [str(tid) for tid in get_ancestor_thread_ids(thread)]
         # If categories indicate MRLS/ISPL with mapped columns, align direction explicitly.
         # Each column belongs to the document it was named for, so it travels with it.
         if column_name_pdf2 and pdf1_doc.category == 'ispl' and pdf2_doc.category == 'mrls':
@@ -1063,260 +1159,27 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
             left_doc, right_doc = pdf1_doc, pdf2_doc
             left_col, right_col = column_name_pdf1, column_name_pdf2
 
-        result = compare_structured_sources(
-            left_doc.filename,
-            right_doc.filename,
-            left_col,
-            column_name_pdf2=right_col,
-            match_any_column_in_pdf2=match_any_column_in_pdf2,
+        requested = column_name_pdf1
+        if column_name_pdf2 and column_name_pdf2 != column_name_pdf1:
+            requested = f"{column_name_pdf1} (in {pdf1_doc.filename}) / {column_name_pdf2} (in {pdf2_doc.filename})"
+
+        # One engine for every caller: DB-backed first, PDF re-extraction as
+        # fallback, then formatting + Excel. See process/comparison.py.
+        return _cmp.run_comparison(
+            thread, [left_doc, right_doc], left_col,
+            column_b=right_col,
             comparison_type=comparison_type,
-            doc1_id=str(left_doc.id),
-            doc2_id=str(right_doc.id),
-            thread_ids=thread_ids,
-            category1=left_doc.category,
-            category2=right_doc.category,
+            match_any_column_in_b=match_any_column_in_pdf2,
             prefer_literal=prefer_literal,
+            requested_label=requested,
+            text_mode=_cmp.wants_text_mode(query),
         )
-
-        # Fallback: if structured tables are unavailable, use file-based comparison.
-        if not result.get('found'):
-            if os.path.exists(left_doc.file.path) and os.path.exists(right_doc.file.path):
-                result = compare_pdfs(
-                    left_doc.file.path,
-                    right_doc.file.path,
-                    left_col,
-                    column_name_pdf2=right_col,
-                    match_any_column_in_pdf2=match_any_column_in_pdf2,
-                    comparison_type=comparison_type,
-                    category1=left_doc.category,
-                    category2=right_doc.category,
-                    prefer_literal=prefer_literal,
-                )
-            else:
-                missing_files = []
-                if not os.path.exists(left_doc.file.path):
-                    missing_files.append(left_doc.filename)
-                if not os.path.exists(right_doc.file.path):
-                    missing_files.append(right_doc.filename)
-                missing_text = ', '.join(missing_files)
-                return {
-                    'found': True,
-                    'formatted_answer': (
-                        "## ❌ Assessment Could Not Be Completed\n\n"
-                        "Structured tables are not available and source PDF file(s) are missing:\n"
-                        f"- {missing_text}\n\n"
-                        "Please re-upload and reprocess these files, then run:\n"
-                        "`Compare DRG No present or not between @file1.pdf and @file2.pdf`"
-                    )
-                }
-        
-        if result.get('found'):
-            # Format the result
-            result['formatted_answer'] = _format_comparison_response(result)
-            
-            # Generate Excel report
-            excel_bytes = generate_comparison_excel(result)
-            job_id = store_comparison_report('Comparison_Report', result, excel_bytes)
-            
-            # Add download link to formatted answer
-            result['formatted_answer'] += f"\n\n---\n\n📥 **[Download Excel Report](/api/reports/download/{job_id}/)**"
-            result['report_job_id'] = job_id
-            
-            return result
-
-        # Structured comparison could not locate requested column(s)
-        error_text = result.get('error') if isinstance(result, dict) else None
-        if error_text:
-            cols1 = _format_available_columns(result.get('available_columns_pdf1', []))
-            cols2 = _format_available_columns(result.get('available_columns_pdf2', []))
-            requested = column_name_pdf1
-            if column_name_pdf2 and column_name_pdf2 != column_name_pdf1:
-                requested = f"{column_name_pdf1} (in {pdf1_doc.filename}) / {column_name_pdf2} (in {pdf2_doc.filename})"
-            return {
-                'found': True,
-                'formatted_answer': (
-                    "## ❌ Column Not Found for Comparison\n\n"
-                    f"Requested column: **{requested}**\n\n"
-                    f"{error_text}\n\n"
-                    f"**{pdf1_doc.filename} columns:** {cols1 or 'N/A'}\n\n"
-                    f"**{pdf2_doc.filename} columns:** {cols2 or 'N/A'}\n\n"
-                    "Try using one of the exact header names above in your query."
-                )
-            }
     except Exception as e:
         print(f"[COMPARISON] Error: {e}")
         import traceback
         traceback.print_exc()
     
     return None
-
-
-def _format_comparison_response(comparison_result: dict) -> str:
-    """Format comparison results as natural QA-style structured answer."""
-    summary = comparison_result.get('summary', '')
-    pdf1 = comparison_result.get('pdf1', 'PDF 1')
-    pdf2 = comparison_result.get('pdf2', 'PDF 2')
-    column = comparison_result.get('column', 'items')
-    pdf1_total = comparison_result.get('pdf1_total', 0)
-    pdf2_total = comparison_result.get('pdf2_total', 0)
-    
-    results_data = comparison_result.get('results', {})
-
-    missing_count = results_data.get('in_pdf1_only', {}).get('count', 0)
-    common_count = results_data.get('common', {}).get('count', 0)
-    verdict = "PASS" if missing_count == 0 else "FAIL"
-    
-    # Start with clear natural language answer
-    response = f"## 📊 QA Comparison: {pdf1} vs {pdf2}\n\n"
-
-    # Assessment verdict (explicit yes/no style)
-    response += "### ✅ Assessment Verdict\n\n" if verdict == "PASS" else "### ❌ Assessment Verdict\n\n"
-    if verdict == "PASS":
-        response += f"**{verdict}:** All {column} values from {pdf1} are present in {pdf2}.\n\n"
-    else:
-        response += (
-            f"**{verdict}:** {missing_count} {column} value(s) from {pdf1} are NOT present in {pdf2}.\n\n"
-        )
-
-    if common_count:
-        response += f"**Matched in both files:** {common_count}\n\n"
-
-    response += "---\n\n"
-    
-    # Executive Summary
-    response += f"**Column Compared:** {column}\n\n"
-    
-    # Key Findings
-    response += "### 🎯 Key Findings:\n\n"
-    
-    if 'in_pdf1_only' in results_data:
-        missing_count = results_data['in_pdf1_only']['count']
-        if missing_count > 0:
-            percentage = (missing_count / pdf1_total * 100) if pdf1_total > 0 else 0
-            response += f"❌ **{missing_count} items** from {pdf1} are **NOT found** in {pdf2} ({percentage:.1f}%)\n\n"
-        else:
-            response += f"✅ **All items** from {pdf1} are present in {pdf2}\n\n"
-    
-    if 'common' in results_data:
-        common_count = results_data['common']['count']
-        if common_count > 0:
-            percentage = (common_count / pdf1_total * 100) if pdf1_total > 0 else 0
-            response += f"✅ **{common_count} items** are **common** to both files ({percentage:.1f}%)\n\n"
-    
-    if 'in_pdf2_only' in results_data:
-        extra_count = results_data['in_pdf2_only']['count']
-        if extra_count > 0:
-            response += f"❌ **{extra_count} items** from {pdf2} are **NOT found** in {pdf1}\n\n"
-
-    if 'likely_matches' in results_data:
-        lm_count = results_data['likely_matches']['count']
-        response += (
-            f"⚠️ **{lm_count} item(s)** appear in BOTH files but written differently "
-            f"(leading zeros / annotations) — review below, not counted as missing\n\n"
-        )
-
-    response += "---\n\n"
-
-    # Likely matches (same item, different formatting) — reviewable table
-    if 'likely_matches' in results_data and results_data['likely_matches']['count'] > 0:
-        response += "### ⚠️ Likely Matches (same item, formatted differently)\n\n"
-        response += f"| {pdf1} | {pdf2} | Why |\n|---|---|---|\n"
-        for p in results_data['likely_matches']['pairs'][:15]:
-            response += f"| `{p['pdf1_value']}` | `{p['pdf2_value']}` | {p['reason']} |\n"
-        remaining = results_data['likely_matches']['count'] - 15
-        if remaining > 0:
-            response += f"\n_... and {remaining} more (see Excel report)_\n"
-        response += "\n---\n\n"
-
-    # Detailed Missing Items
-    if 'in_pdf1_only' in results_data and results_data['in_pdf1_only']['count'] > 0:
-        response += f"### ❌ Missing from {pdf2} (found in {pdf1} only)\n\n"
-        response += f"**Total Missing:** {results_data['in_pdf1_only']['count']}\n\n"
-        
-        rows = results_data['in_pdf1_only'].get('rows', [])[:10]
-        
-        for i, row in enumerate(rows, 1):
-            value = row.get('_matched_value', 'N/A')
-            page = row.get('_page', 'Unknown')
-            
-            response += f"**{i}. `{value}`** _(from page {page})_\n"
-            
-            # Show nomenclature or description if available
-            fields = []
-            for key, val in row.items():
-                if not key.startswith('_') and val and str(val).strip():
-                    key_lower = key.lower()
-                    if any(kw in key_lower for kw in ['nomenclature', 'designation', 'description', 'name']):
-                        fields.append(f"**{key}:** {val}")
-            
-            if fields:
-                response += "   " + " | ".join(fields[:2]) + "\n"
-            response += "\n"
-        
-        if results_data['in_pdf1_only']['count'] > 10:
-            response += f"_... and {results_data['in_pdf1_only']['count'] - 10} more missing items_\n\n"
-        
-        response += "---\n\n"
-    
-    # Common Items Summary
-    if 'common' in results_data and results_data['common']['count'] > 0:
-        response += f"### ✅ Common Items (verified in both)\n\n"
-        response += f"**Total Verified:** {results_data['common']['count']} items\n\n"
-        
-        values = results_data['common'].get('values', [])[:20]
-        if len(values) <= 10:
-            # Show all if <=10
-            for v in values:
-                response += f"- `{v}`\n"
-        else:
-            # Show first 5 and indicate more
-            for v in values[:5]:
-                response += f"- `{v}`\n"
-            response += f"\n_... and {results_data['common']['count'] - 5} more verified items_\n"
-        
-        response += "\n---\n\n"
-    
-    # Items missing from PDF1 (found only in PDF2)
-    if 'in_pdf2_only' in results_data and results_data['in_pdf2_only']['count'] > 0:
-        response += f"### ❌ Missing from {pdf1} (found in {pdf2} only)\n\n"
-        response += f"**Total Missing:** {results_data['in_pdf2_only']['count']}\n\n"
-
-        rows = results_data['in_pdf2_only'].get('rows', [])[:10]
-        if rows:
-            for i, row in enumerate(rows, 1):
-                value = row.get('_matched_value', 'N/A')
-                page = row.get('_page', 'Unknown')
-                response += f"**{i}. `{value}`** _(from page {page})_\n"
-
-                fields = []
-                for key, val in row.items():
-                    if not key.startswith('_') and val and str(val).strip():
-                        key_lower = key.lower()
-                        if any(kw in key_lower for kw in ['nomenclature', 'designation', 'description', 'name']):
-                            fields.append(f"**{key}:** {val}")
-
-                if fields:
-                    response += "   " + " | ".join(fields[:2]) + "\n"
-                response += "\n"
-        else:
-            values = results_data['in_pdf2_only'].get('values', [])[:10]
-            for v in values:
-                response += f"- `{v}`\n"
-
-        if results_data['in_pdf2_only']['count'] > 10:
-            response += f"\n_... and {results_data['in_pdf2_only']['count'] - 10} more missing items_\n"
-        
-        response += "\n---\n\n"
-    
-    # Recommendations
-    response += "### 💡 Quality Check Summary:\n\n"
-    
-    if 'in_pdf1_only' in results_data and results_data['in_pdf1_only']['count'] > 0:
-        response += f"⚠️ **Action Required:** {results_data['in_pdf1_only']['count']} spare parts from {pdf1} need to be verified in {pdf2}\n"
-    else:
-        response += f"✅ **Quality OK:** All parts are properly cross-referenced\n"
-    
-    return response
 
 
 def _format_table_search_response(search_result: dict) -> str:
@@ -1852,6 +1715,50 @@ def compare_status(request, job_id):
     return JsonResponse(job)
 
 
+@csrf_exempt
+@require_http_methods(["POST"])
+def confirm_comparison_match(request):
+    """
+    Persist a human-confirmed 'these are the same item' pairing between two
+    documents' comparison values, so future comparisons of the same files treat
+    the pair as matched instead of reporting it as missing. Complements the
+    chat command ("confirm A and B are the same part in @f1 and @f2") with a
+    stable endpoint a UI can call directly (e.g. a "confirm" button next to a
+    likely-match row) without depending on natural-language parsing.
+
+    POST body: {source_a, source_b, column, value_a, value_b, note?, thread_id?}
+    """
+    try:
+        data = json.loads(request.body)
+    except (json.JSONDecodeError, TypeError):
+        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+
+    required = ['source_a', 'source_b', 'column', 'value_a', 'value_b']
+    missing = [f for f in required if not data.get(f)]
+    if missing:
+        return JsonResponse({"error": f"Missing required field(s): {', '.join(missing)}"}, status=400)
+
+    result = confirm_match(
+        data['source_a'], data['source_b'], data['column'],
+        data['value_a'], data['value_b'],
+        note=data.get('note', ''), thread_id=data.get('thread_id'),
+    )
+    if not result.get('ok'):
+        return JsonResponse({"error": result.get('error', 'Could not confirm match')}, status=400)
+    return JsonResponse(result)
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def field_schema_view(request):
+    """
+    The column-name schema the comparison engine is using right now: canonical
+    concepts (part_no, nomenclature, ...) and, per document category, the ordered
+    header patterns each concept resolves to. Includes the path of the optional
+    JSON override file and any error loading it, so a "Column Not Found" can be
+    diagnosed and fixed by editing that file (no rebuild, no restart).
+    """
+    from .field_schema import effective_schema
+    return JsonResponse(effective_schema())
 
 
 
@@ -2668,55 +2575,142 @@ def generate_comparison_excel(comparison_result: dict) -> bytes:
     wb = openpyxl.Workbook()
     wb.remove(wb.active)  # Remove default sheet
     
+    results_data = comparison_result.get('results', {})
+    pdf1 = comparison_result.get('pdf1', 'File A')
+    pdf2 = comparison_result.get('pdf2', 'File B')
+    column = comparison_result.get('column', 'N/A')
+    pdf1_total = comparison_result.get('pdf1_total', 0)
+    pdf2_total = comparison_result.get('pdf2_total', 0)
+
+    missing_count = results_data.get('in_pdf1_only', {}).get('count', 0)
+    common_count = results_data.get('common', {}).get('count', 0)
+    extra_count = results_data.get('in_pdf2_only', {}).get('count', 0)
+    likely_count = results_data.get('likely_matches', {}).get('count', 0)
+    confirmed_count = results_data.get('confirmed_matches', {}).get('count', 0)
+    excluded_count = results_data.get('excluded', {}).get('count', 0)
+
+    if ' ↔ ' in column:
+        col1, col2 = (c.strip() for c in column.split(' ↔ ', 1))
+    else:
+        col1 = col2 = column
+
     # Sheet 1: Summary
     summary_sheet = wb.create_sheet("Summary")
+    summary_sheet.column_dimensions['A'].width = 34
+    summary_sheet.column_dimensions['B'].width = 46
+
     summary_sheet['A1'] = 'Comparison Report'
     summary_sheet['A1'].font = Font(size=16, bold=True)
-    
-    summary_sheet['A3'] = 'Files Compared:'
+
+    summary_sheet['A3'] = 'File A:'
     summary_sheet['A3'].font = Font(bold=True)
-    summary_sheet['B3'] = comparison_result.get('pdf1', 'File 1')
-    summary_sheet['A4'] = ''  
-    summary_sheet['B4'] = comparison_result.get('pdf2', 'File 2')
-    
-    summary_sheet['A6'] = 'Column:'
+    summary_sheet['B3'] = pdf1
+    summary_sheet['A4'] = 'File B:'
+    summary_sheet['A4'].font = Font(bold=True)
+    summary_sheet['B4'] = pdf2
+
+    summary_sheet['A6'] = 'Column in File A:'
     summary_sheet['A6'].font = Font(bold=True)
-    summary_sheet['B6'] = comparison_result.get('column', 'N/A')
-    
-    summary_sheet['A8'] = 'Total in File 1:'
-    summary_sheet['B8'] = comparison_result.get('pdf1_total', 0)
-    summary_sheet['A9'] = 'Total in File 2:'
-    summary_sheet['B9'] = comparison_result.get('pdf2_total', 0)
-    
-    results_data = comparison_result.get('results', {})
-    
-    row = 11
-    if 'in_pdf1_only' in results_data:
-        count = results_data['in_pdf1_only']['count']
-        summary_sheet[f'A{row}'] = 'Missing from File 2:'
-        summary_sheet[f'A{row}'].font = Font(bold=True, color='FF0000')
+    summary_sheet['B6'] = col1
+    summary_sheet['A7'] = 'Column in File B:'
+    summary_sheet['A7'].font = Font(bold=True)
+    summary_sheet['B7'] = col2
+
+    summary_sheet['A9'] = 'Distinct values in File A:'
+    summary_sheet['B9'] = pdf1_total
+    summary_sheet['A10'] = 'Distinct values in File B:'
+    summary_sheet['B10'] = pdf2_total
+    summary_sheet['A11'] = '(a value repeated across pages counts once)'
+    summary_sheet['A11'].font = Font(italic=True, size=9, color='888888')
+
+    # One result table — each count appears exactly once, with a plain-English meaning.
+    row = 13
+    summary_sheet[f'A{row}'] = 'Result'
+    summary_sheet[f'B{row}'] = 'Count'
+    summary_sheet[f'C{row}'] = 'Meaning'
+    for col_letter in ('A', 'B', 'C'):
+        cell = summary_sheet[f'{col_letter}{row}']
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
+    summary_sheet.column_dimensions['C'].width = 55
+    row += 1
+
+    def _result_row(label, count, meaning, color):
+        nonlocal row
+        summary_sheet[f'A{row}'] = label
+        summary_sheet[f'A{row}'].font = Font(bold=True, color=color)
         summary_sheet[f'B{row}'] = count
-        row += 1
-    
-    if 'common' in results_data:
-        count = results_data['common']['count']
-        summary_sheet[f'A{row}'] = 'Common (in both):'
-        summary_sheet[f'A{row}'].font = Font(bold=True, color='008000')
-        summary_sheet[f'B{row}'] = count
-        row += 1
-    
-    if 'in_pdf2_only' in results_data:
-        count = results_data['in_pdf2_only']['count']
-        summary_sheet[f'A{row}'] = 'Missing from File 1:'
-        summary_sheet[f'A{row}'].font = Font(bold=True, color='0000FF')
-        summary_sheet[f'B{row}'] = count
+        summary_sheet[f'C{row}'] = meaning
+        summary_sheet[f'C{row}'].alignment = Alignment(wrap_text=True)
         row += 1
 
-    if 'likely_matches' in results_data:
-        count = results_data['likely_matches']['count']
-        summary_sheet[f'A{row}'] = 'Likely matches (formatting differs):'
-        summary_sheet[f'A{row}'].font = Font(bold=True, color='B8860B')
-        summary_sheet[f'B{row}'] = count
+    _result_row('Matched exactly', common_count,
+                'Same value found in both files.', '008000')
+    if confirmed_count:
+        _result_row('Confirmed by you (previously reviewed)', confirmed_count,
+                     "You confirmed these as the same item in an earlier comparison of "
+                     "these two files — see the 'Confirmed Matches' sheet.", '006400')
+    if likely_count:
+        _result_row('Same item, written differently', likely_count,
+                     "Value appears in both but formatted differently (leading zero, "
+                     "supplier prefix/suffix) — confirm on the 'Likely Matches' sheet.", 'B8860B')
+    _result_row(f'Missing from File B', missing_count,
+                (f'In File A ({pdf1}) but not found in File B ({pdf2}) — needs review.'
+                 if missing_count else f'None — every value in File A ({pdf1}) was found in File B ({pdf2}).'),
+                'FF0000' if missing_count else '008000')
+    if extra_count:
+        _result_row(f'Extra in File B', extra_count,
+                     f'In File B ({pdf2}) but not in File A ({pdf1}) — often expected if '
+                     f'File B is the broader document.', '0000FF')
+    if excluded_count:
+        _result_row('Excluded (placeholder text)', excluded_count,
+                     "Generic values like 'Standard Item' — not unique part identifiers, "
+                     "so not compared at all. See the 'Excluded' sheet.", '888888')
+
+    # Bottom line, stated once.
+    row += 1
+    accounted = common_count + likely_count + confirmed_count
+    if missing_count == 0:
+        bottom_line = f'Bottom line: all {pdf1_total} distinct values in File A are accounted for in File B.'
+    else:
+        bottom_line = (
+            f'Bottom line: File A has {pdf1_total} distinct values. {accounted} are accounted for '
+            f'in File B. {missing_count} could not be found and need review.'
+        )
+    summary_sheet[f'A{row}'] = bottom_line
+    summary_sheet[f'A{row}'].font = Font(bold=True, size=12)
+    summary_sheet[f'A{row}'].alignment = Alignment(wrap_text=True)
+    summary_sheet.merge_cells(f'A{row}:C{row}')
+    summary_sheet.row_dimensions[row].height = 30
+
+    # Sheet: Confirmed Matches (human-confirmed in an earlier comparison)
+    if confirmed_count > 0:
+        cm_sheet = wb.create_sheet("Confirmed Matches")
+        cm_sheet['A1'] = 'Values confirmed as the same item in an earlier comparison'
+        cm_sheet['A1'].font = Font(size=14, bold=True)
+        cm_sheet['A1'].fill = PatternFill(start_color='D9EAD3', end_color='D9EAD3', fill_type='solid')
+        headers = [pdf1, pdf2, f'Times in {pdf2}']
+        for col_idx, h in enumerate(headers, 1):
+            c = cm_sheet.cell(row=3, column=col_idx, value=h)
+            c.font = Font(bold=True)
+        for r_idx, p in enumerate(results_data['confirmed_matches']['pairs'], 4):
+            cm_sheet.cell(row=r_idx, column=1, value=p['pdf1_value'])
+            cm_sheet.cell(row=r_idx, column=2, value=p['pdf2_value'])
+            cm_sheet.cell(row=r_idx, column=3, value=p.get('count_in_pdf2', ''))
+        for col_letter, width in (('A', 30), ('B', 30), ('C', 16)):
+            cm_sheet.column_dimensions[col_letter].width = width
+
+    # Sheet: Excluded (placeholder text, not unique part identifiers)
+    if excluded_count > 0:
+        ex_sheet = wb.create_sheet("Excluded")
+        ex_sheet['A1'] = 'Generic placeholder values — not unique part identifiers, not compared'
+        ex_sheet['A1'].font = Font(size=14, bold=True)
+        ex_sheet['A1'].fill = PatternFill(start_color='EEEEEE', end_color='EEEEEE', fill_type='solid')
+        ex_sheet['A3'] = 'Value'
+        ex_sheet['A3'].font = Font(bold=True)
+        for row_idx, value in enumerate(results_data['excluded']['values'], 4):
+            ex_sheet[f'A{row_idx}'] = value
+        ex_sheet.column_dimensions['A'].width = 30
 
     # Sheet: Likely Matches (same item, different formatting)
     if 'likely_matches' in results_data and results_data['likely_matches']['count'] > 0:
@@ -2725,7 +2719,7 @@ def generate_comparison_excel(comparison_result: dict) -> bytes:
         lm_sheet['A1'].font = Font(size=14, bold=True)
         lm_sheet['A1'].fill = PatternFill(start_color='FFF2CC', end_color='FFF2CC', fill_type='solid')
         headers = [comparison_result.get('pdf1', 'File 1'),
-                   comparison_result.get('pdf2', 'File 2'), 'Reason']
+                   comparison_result.get('pdf2', 'File 2'), 'Reason', f'Times in {pdf2}']
         for col_idx, h in enumerate(headers, 1):
             c = lm_sheet.cell(row=3, column=col_idx, value=h)
             c.font = Font(bold=True)
@@ -2733,7 +2727,8 @@ def generate_comparison_excel(comparison_result: dict) -> bytes:
             lm_sheet.cell(row=r_idx, column=1, value=p['pdf1_value'])
             lm_sheet.cell(row=r_idx, column=2, value=p['pdf2_value'])
             lm_sheet.cell(row=r_idx, column=3, value=p['reason'])
-        for col_letter, width in (('A', 30), ('B', 30), ('C', 50)):
+            lm_sheet.cell(row=r_idx, column=4, value=p.get('count_in_pdf2', ''))
+        for col_letter, width in (('A', 30), ('B', 30), ('C', 50), ('D', 16)):
             lm_sheet.column_dimensions[col_letter].width = width
 
     # Sheet 2: Missing Items
@@ -2796,13 +2791,18 @@ def generate_comparison_excel(comparison_result: dict) -> bytes:
         common_sheet['A1'] = "Items Found in Both Files"
         common_sheet['A1'].font = Font(size=14, bold=True)
         common_sheet['A1'].fill = PatternFill(start_color='CCFFCC', end_color='CCFFCC', fill_type='solid')
-        
+
         values = results_data['common'].get('values', [])
+        occurrences = results_data['common'].get('occurrences_in_pdf2', {})
         common_sheet['A3'] = comparison_result.get('column', 'Value')
         common_sheet['A3'].font = Font(bold=True)
-        
+        common_sheet['B3'] = f'Times in {pdf2}'
+        common_sheet['B3'].font = Font(bold=True)
+        common_sheet.column_dimensions['B'].width = 16
+
         for row_idx, value in enumerate(values, 4):
             common_sheet[f'A{row_idx}'] = value
+            common_sheet[f'B{row_idx}'] = occurrences.get(value, '')
     
     # Save to bytes
     output = io.BytesIO()

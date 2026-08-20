@@ -46,11 +46,6 @@ from .tables import (
     get_ancestor_ids,
     extract_search_terms,
     search_tables,
-    compare_tables,
-    cross_doc_search,
-    extract_column_values,
-    compare_columns,
-    compare_columns_multi,
 )
 
 from .ingestion import (
@@ -91,8 +86,6 @@ __all__ = [
     # tables
     "classify_table_type", "generate_searchable_text", "store_table", "delete_tables",
     "get_ancestor_ids", "extract_search_terms", "search_tables",
-    "compare_tables", "cross_doc_search", "extract_column_values", "compare_columns",
-    "compare_columns_multi",
     # ingestion
     "smart_chunk_text", "process_document", "process_pdf", "process_excel",
     "process_word", "process_image", "extract_pdf_title",

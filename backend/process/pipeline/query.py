@@ -17,7 +17,8 @@ import requests
 from .config import OLLAMA_API, CANDIDATE_K, MAX_FINAL_CHUNKS, get_current_llm_model
 from .embedding import model_manager
 from .storage import get_collection
-from .tables import search_tables, get_ancestor_ids, extract_search_terms, compare_tables, compare_columns, compare_columns_multi, cross_doc_search
+from .tables import search_tables, get_ancestor_ids, extract_search_terms
+from process.field_schema import resolve_header
 
 # ── File-scope filter (@filename.ext) ────────────────────────────────────────
 
@@ -537,7 +538,12 @@ _COMPARE_PATTERNS = [
 
 def _is_compare_query(query_text):
     ql = query_text.lower()
-    return sum(1 for w in _COMPARE_WORDS if w in ql) >= 2
+    if sum(1 for w in _COMPARE_WORDS if w in ql) >= 2:
+        return True
+    # "are all the parts in A mentioned anywhere in B" carries none of the compare
+    # words above but is a comparison — of a column against a document's full text.
+    from process.comparison import wants_text_mode
+    return wants_text_mode(query_text) and len(_parse_compare_files(query_text)[0]) >= 2
 
 
 def _parse_compare_files(query_text):
@@ -613,303 +619,85 @@ def _resolve_column(hint_text):
     return None
 
 
-# ── Compare diff formatter ────────────────────────────────────────────────────
+# ── Compare response generators ───────────────────────────────────────────────
+# Both delegate to process/comparison.py — the same engine, formatting and Excel
+# report as the chat router in views.py, so a comparison gives the same answer
+# whichever router caught it. (The previous implementation here used
+# pipeline/tables.compare_tables with SequenceMatcher fuzzy matching, which merges
+# sequential part numbers; that engine has been retired.)
 
-def _format_diff_answer(diff, file_a, file_b):
-    s = diff["summary"]
-    fuzzy_count = s.get("fuzzy_matched", 0)
-    lines = [
-        f"**Table Comparison: {file_a} vs {file_b}**\n",
-        "| | Count |",
-        "|---|---|",
-        f"| Rows only in **{file_a}** | {s['only_in_a']} |",
-        f"| Rows only in **{file_b}** | {s['only_in_b']} |",
-        f"| Modified rows (exact key match) | {s['modified']} |",
-        f"| Similar rows (fuzzy key match) | {fuzzy_count} |",
-        f"| Identical rows | {s['unchanged']} |",
-        f"| Total in A | {s['total_a']} |",
-        f"| Total in B | {s['total_b']} |",
-        "",
-    ]
+_QUOTED_COL_RE = re.compile(r'["“”]([^"“”]{2,60})["“”]')
 
-    def _abbrev_keys(items, limit=20):
-        shown = [f"• {x['key']}" for x in items[:limit]]
-        if len(items) > limit:
-            shown.append(f"  _...and {len(items)-limit} more_")
-        return shown
-
-    if diff["only_in_a"]:
-        lines.append(f"\n**Only in {file_a} ({s['only_in_a']}):**")
-        lines.extend(_abbrev_keys(diff["only_in_a"]))
-
-    if diff["only_in_b"]:
-        lines.append(f"\n**Only in {file_b} ({s['only_in_b']}):**")
-        lines.extend(_abbrev_keys(diff["only_in_b"]))
-
-    if diff["modified"]:
-        lines.append(f"\n**Modified rows — exact key match ({s['modified']}):**")
-        for item in diff["modified"][:10]:
-            lines.append(f"\n• **{item['key']}**")
-            for d in item["differences"][:4]:
-                lines.append(f"  - {d['column']}: `{d['value_a']}` → `{d['value_b']}`")
-        if s["modified"] > 10:
-            lines.append(f"\n  _...and {s['modified']-10} more_")
-
-    if diff.get("fuzzy_matches"):
-        lines.append(f"\n**Similar rows — fuzzy key match ({fuzzy_count}):**")
-        lines.append(f"_Keys differ but are likely the same item (similarity ≥ 75%)_\n")
-        for item in diff["fuzzy_matches"][:10]:
-            score_pct = int(item["score"] * 100)
-            lines.append(f"\n• **{item['key_a']}** ↔ **{item['key_b']}** _{score_pct}% similar_")
-            for d in item["differences"][:4]:
-                lines.append(f"  - {d['column']}: `{d['value_a']}` → `{d['value_b']}`")
-            if not item["differences"]:
-                lines.append("  _(all other columns identical)_")
-        if fuzzy_count > 10:
-            lines.append(f"\n  _...and {fuzzy_count-10} more_")
-
-    return "\n".join(lines)
-
-
-# ── Column comparison formatter ───────────────────────────────────────────────
-
-def _format_column_diff_answer(col_diff, file_a, file_b):
-    s   = col_diff["summary"]
-    col = col_diff["column_name"]
-    lines = [
-        f"**Column Comparison — `{col}`**\n",
-        f"**{file_a}** has **{s['total_a']}** unique values &nbsp;·&nbsp; "
-        f"**{file_b}** has **{s['total_b']}** unique values\n",
-        "| | Count |",
-        "|---|---|",
-        f"| Only in **{file_a}** | {s['only_in_a']} |",
-        f"| Only in **{file_b}** | {s['only_in_b']} |",
-        f"| Present in both | {s['common']} |",
-        "",
-    ]
-
-    def _abbrev(items, limit=30):
-        shown = [f"• {x['value']}" for x in items[:limit]]
-        if len(items) > limit:
-            shown.append(f"  _...and {len(items)-limit} more_")
-        return shown
-
-    def _abbrev_plain(values, limit=30):
-        shown = [f"• {v}" for v in values[:limit]]
-        if len(values) > limit:
-            shown.append(f"  _...and {len(values)-limit} more_")
-        return shown
-
-    if col_diff["only_in_a"]:
-        lines.append(f"\n**Only in {file_a} ({s['only_in_a']}):**")
-        lines.extend(_abbrev(col_diff["only_in_a"]))
-
-    if col_diff["only_in_b"]:
-        lines.append(f"\n**Only in {file_b} ({s['only_in_b']}):**")
-        lines.extend(_abbrev(col_diff["only_in_b"]))
-
-    if col_diff["common"]:
-        lines.append(f"\n**Present in both ({s['common']}):**")
-        lines.extend(_abbrev_plain(col_diff["common"]))
-
-    return "\n".join(lines)
-
-
-# ── Compare response generator ────────────────────────────────────────────────
 
 def _gen_compare(query_text, thread_id, file_a, file_b, column_hint):
-    cross    = cross_doc_search(query_text, thread_id, file_a, file_b)
-    tables_a = cross.get("file_a", {}).get("tables", [])
-    tables_b = cross.get("file_b", {}).get("tables", [])
+    return _gen_compare_multi(query_text, thread_id, [file_a, file_b], column_hint)
 
-    if not tables_a and not tables_b:
+
+def _gen_compare_multi(query_text, thread_id, files, column_hint):
+    """2 files → pairwise comparison; ≥3 files → first file vs each of the rest
+    (presence matrix). Any table-bearing document type (pdf/xlsx/xls/docx)."""
+    from process import comparison as cmp
+    from process.models import Thread
+
+    thread = Thread.objects.get(id=thread_id)
+    docs = cmp.resolve_documents(thread, files)
+    if len(docs) < 2:
+        found_names = {d.filename.lower() for d in docs}
+        unresolved = [f for f in files
+                      if not any(f.lower() == n or f.lower() in n for n in found_names)]
+        in_scope = [d.filename for d in cmp.documents_in_scope(thread)]
         return {
             "answer": (
-                "No tables found for either document.\n\n"
-                "Tip: Upload both documents, then use `@file1.pdf vs @file2.pdf` syntax."
+                "I couldn't find these file(s) in this thread: "
+                + ", ".join(f"`{f}`" for f in unresolved) + ".\n\n"
+                + ("Files available here: " + ", ".join(f"`{n}`" for n in in_scope)
+                   if in_scope else "No documents with tables are uploaded in this thread yet.")
+                + "\n\nTip: name files with `@`, e.g. `compare part no between @a.pdf and @b.pdf`."
             ),
             "sources": [], "chunks": [],
             "confidence": 0, "confidence_label": "LOW",
             "retrieval_type": "compare_no_data",
         }
 
-    if not tables_a or not tables_b:
-        missing    = file_a if not tables_a else file_b
-        found_name = file_b if not tables_a else file_a
-        found_tables = tables_b if not tables_a else tables_a
-        return {
-            "answer": f"No tables found for **{missing}**. Found {len(found_tables)} table(s) in **{found_name}**.",
-            "sources": [found_name],
-            "chunks": [_fmt_table(t) for t in found_tables[:5]],
-            "confidence": 30, "confidence_label": "LOW",
-            "retrieval_type": "compare_one_sided",
-        }
+    # Column: quoted header names are taken literally (one per file, in order);
+    # otherwise a concept word ("part", "drg", "nsn", ...) resolved per document
+    # through the category schema. Default concept is the part identifier.
+    quoted = [q.strip() for q in _QUOTED_COL_RE.findall(query_text)
+              if q.strip() and not q.strip().lower().endswith(tuple(cmp.TABLE_EXTENSIONS))]
+    if quoted:
+        column, column_b, prefer_literal = quoted[0], (quoted[1] if len(quoted) > 1 else None), True
+    else:
+        column, column_b, prefer_literal = (_resolve_column(column_hint or query_text) or "part"), None, False
 
-    preview = [_fmt_table(t) for t in tables_a[:3]] + [_fmt_table(t) for t in tables_b[:3]]
-
-    # ── Column-specific comparison ────────────────────────────────────────────
-    col_key = _resolve_column(column_hint or query_text)
-    if col_key:
-        col_diff = compare_columns(tables_a, tables_b, col_key)
-        if col_diff["summary"]["total_a"] > 0 or col_diff["summary"]["total_b"] > 0:
-            print(f"[QUERY] column compare on '{col_key}' -> col={col_diff['column_name']}")
-            return {
-                "answer":           _format_column_diff_answer(col_diff, file_a, file_b),
-                "sources":          [file_a, file_b],
-                "chunks":           preview,
-                "confidence":       95.0,
-                "confidence_label": "HIGH",
-                "retrieval_type":   "column_compare",
-                "diff_data":        col_diff,
-            }
-        # Column not found in either doc — fall through to full-table diff
-
-    # ── Full row-level table diff ─────────────────────────────────────────────
-    diff = compare_tables(tables_a, tables_b, key_column=col_key)
+    print(f"[QUERY] compare via process.comparison | files={[d.filename for d in docs]} | column={column!r}")
+    result = cmp.run_comparison(thread, docs, column, column_b=column_b,
+                                comparison_type="all", prefer_literal=prefer_literal,
+                                text_mode=cmp.wants_text_mode(query_text))
+    ok = bool(result.get("results") or result.get("matrix"))
     return {
-        "answer":           _format_diff_answer(diff, file_a, file_b),
-        "sources":          [file_a, file_b],
-        "chunks":           preview,
-        "confidence":       95.0,
-        "confidence_label": "HIGH",
-        "retrieval_type":   "table_compare",
-        "diff_data":        diff,
+        "answer":           result.get("formatted_answer", "Comparison produced no answer."),
+        "sources":          [d.filename for d in docs],
+        "chunks":           [],
+        "confidence":       95.0 if ok else 0,
+        "confidence_label": "HIGH" if ok else "LOW",
+        "retrieval_type":   ("mention_check" if result.get("mode") == "text"
+                             else "column_compare" if len(docs) == 2
+                             else "column_compare_multi") if ok else "compare_failed",
+        "report_job_id":    result.get("report_job_id"),
     }
 
 
-# ── Multi-file compare (N ≥ 3 files) ─────────────────────────────────────────
-
 def _fetch_tables_for_file(thread_id, file_name):
-    """Same partial-name filter cross_doc_search uses, but for a single file."""
+    """Tables for one file, matched on a partial source name, across the thread tree."""
     from process.models import ExtractedTable
     all_thread_ids = [str(thread_id)] + get_ancestor_ids(thread_id)
     qs = ExtractedTable.objects.filter(thread_id__in=all_thread_ids, source__icontains=file_name)
     return [dict(t.to_dict()) for t in qs]
 
 
-def _format_multi_compare_answer(result):
-    """Render a markdown answer for N-way column comparison."""
-    files = result["files"]
-    col   = result["column_name"]
-    s     = result["summary"]
-    n     = len(files)
-
-    lines = [
-        f"**Column Comparison — `{col}`** across **{n} files**\n",
-    ]
-
-    # Per-file totals
-    lines.append("| File | Unique values |")
-    lines.append("|---|---|")
-    for f in files:
-        lines.append(f"| {f} | {s['totals'][f]} |")
-    lines.append("")
-
-    # Overall summary
-    lines.append(f"**Total unique values across all files:** {s['total_unique']}")
-    lines.append(f"**Present in ALL {n} files:** {s['common']}")
-    for f in files:
-        if s['only_in'][f]:
-            lines.append(f"**Only in {f}:** {s['only_in'][f]}")
-    lines.append("")
-
-    def _abbrev(values, limit=25):
-        shown = [f"- {v}" for v in values[:limit]]
-        if len(values) > limit:
-            shown.append(f"  _...and {len(values)-limit} more_")
-        return shown
-
-    if result["common"]:
-        lines.append(f"\n### Common to all {n} files ({len(result['common'])})")
-        lines.extend(_abbrev(result["common"]))
-
-    for f in files:
-        only = result["only_in"][f]
-        if only:
-            lines.append(f"\n### Only in {f} ({len(only)})")
-            lines.extend(_abbrev(only))
-
-    # Per-value cross-file presence table (compact)
-    value_map = result["value_map"]
-    overlapping = sorted(
-        (v for v, fs in value_map.items() if 1 < len(fs) < n),
-        key=lambda v: (-len(value_map[v]), v),
-    )
-    if overlapping:
-        shown = overlapping[:25]
-        lines.append(f"\n### Partial overlap ({len(overlapping)} value{'s' if len(overlapping)!=1 else ''}, top 25 shown)")
-        lines.append("| Value | " + " | ".join(files) + " |")
-        lines.append("|---" * (n + 1) + "|")
-        for v in shown:
-            row = [v] + ["✓" if f in value_map[v] else "-" for f in files]
-            lines.append("| " + " | ".join(row) + " |")
-
-    return "\n".join(lines)
-
-
-def _gen_compare_multi(query_text, thread_id, files, column_hint):
-    """N-way column comparison (N ≥ 3)."""
-    file_tables = {f: _fetch_tables_for_file(thread_id, f) for f in files}
-
-    missing = [f for f, t in file_tables.items() if not t]
-    if len(missing) == len(files):
-        return {
-            "answer": (
-                "No tables found for any of the requested files.\n\n"
-                f"Searched: {', '.join(files)}\n\n"
-                "Make sure each file has been uploaded and finished processing."
-            ),
-            "sources": [], "chunks": [],
-            "confidence": 0, "confidence_label": "LOW",
-            "retrieval_type": "compare_multi_no_data",
-        }
-
-    col_key = _resolve_column(column_hint or query_text)
-    if not col_key:
-        # No column hint — fall back to listing table counts per file
-        lines = [
-            f"**Multi-file comparison across {len(files)} files** — no column specified.",
-            "",
-            "| File | Tables found |",
-            "|---|---|",
-        ]
-        for f in files:
-            lines.append(f"| {f} | {len(file_tables[f])} |")
-        lines.append("")
-        lines.append(
-            "_Tip:_ add a column hint, e.g. "
-            "`compare @a.pdf @b.pdf @c.pdf part number`"
-        )
-        return {
-            "answer": "\n".join(lines),
-            "sources": files,
-            "chunks": [_fmt_table(t) for f in files for t in file_tables[f][:1]],
-            "confidence": 60, "confidence_label": "MEDIUM",
-            "retrieval_type": "compare_multi_no_column",
-        }
-
-    result = compare_columns_multi(file_tables, col_key)
-
-    # Preview chunks: first table from each file
-    preview = []
-    for f in files:
-        if file_tables[f]:
-            preview.append(_fmt_table(file_tables[f][0]))
-
-    return {
-        "answer":           _format_multi_compare_answer(result),
-        "sources":          files,
-        "chunks":           preview,
-        "confidence":       95.0,
-        "confidence_label": "HIGH",
-        "retrieval_type":   "column_compare_multi",
-        "diff_data":        result,
-    }
-
-
 # ── Multi-column lookup (source vs N targets, OR across columns) ─────────────
 
-def _extract_rows_for_columns(tables, columns):
+def _extract_rows_for_columns(tables, columns, category=None):
     """
     Extract rows from the given tables that have at least one of `columns` populated.
 
@@ -924,11 +712,18 @@ def _extract_rows_for_columns(tables, columns):
         data    = table.get("data", [])
         src     = f"{table.get('source', '?')} (Page {table.get('page', '?')})"
 
-        # Map each requested column to the header index where it best matches
+        # Map each requested column to the header index where it best matches:
+        # category-aware schema resolution first ("part" → "Firms Part No."),
+        # plain substring as the fallback.
         col_idx_map = {}
+        hdr_strs = [str(h) for h in headers]
         for canon, canon_lower in zip(columns, col_lowers):
-            for i, h in enumerate(headers):
-                if canon_lower in str(h).lower():
+            resolved = resolve_header(canon, hdr_strs, category)
+            if resolved is not None:
+                col_idx_map[canon] = hdr_strs.index(resolved)
+                continue
+            for i, h in enumerate(hdr_strs):
+                if canon_lower in h.lower():
                     col_idx_map[canon] = i
                     break
 
@@ -996,7 +791,10 @@ def _gen_lookup_multi_col(thread_id, source_file, target_files, columns):
             "retrieval_type": "lookup_no_source",
         }
 
-    rows = _extract_rows_for_columns(source_tables, columns)
+    from process.models import Document
+    src_doc = Document.objects.filter(filename__iexact=source_file).first() or               Document.objects.filter(filename__icontains=source_file).first()
+    rows = _extract_rows_for_columns(source_tables, columns,
+                                     category=src_doc.category if src_doc else None)
     if not rows:
         return {
             "answer": (
