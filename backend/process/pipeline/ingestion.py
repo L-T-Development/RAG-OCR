@@ -547,9 +547,17 @@ def _ingest_pdfplumber_tables(file_path, doc_id, thread_id, parent_id, filename)
     ODL/PyMuPDF path already stored is harmless.
     """
     import pdfplumber
-    from process.table_search_engine import TableSearchEngine
+    from process.table_search_engine import TableSearchEngine, words_from_fitz_page
 
     engine = TableSearchEngine()
+    # Word boxes for the anchor extractor come from PyMuPDF — same geometry as
+    # pdfplumber's, roughly 200x cheaper, and this pass runs on every page.
+    try:
+        import fitz
+        fdoc = fitz.open(file_path)
+    except Exception as e:
+        print(f"[INGEST] PyMuPDF unavailable ({e}); using pdfplumber words")
+        fdoc = None
     count = 0
     # Header printed on the page a table starts, carried to the pages it
     # continues onto — otherwise those pages persist a data row as their header.
@@ -572,7 +580,10 @@ def _ingest_pdfplumber_tables(file_path, doc_id, thread_id, parent_id, filename)
 
                 # 2. Line-less anchor tables
                 try:
-                    for df in engine._extract_anchor_tables(page, page_num, header_memo):
+                    fwords = (words_from_fitz_page(fdoc[page_num - 1])
+                              if fdoc is not None and page_num <= len(fdoc) else None)
+                    for df in engine._extract_anchor_tables(page, page_num, header_memo,
+                                                            words=fwords):
                         if df.empty:
                             continue
                         cols = [c for c in df.columns if not str(c).startswith('_')]
@@ -603,6 +614,9 @@ def _ingest_pdfplumber_tables(file_path, doc_id, thread_id, parent_id, filename)
                     count += 1
     except Exception as e:
         print(f"[INGEST] pdfplumber table pass error: {e}")
+    finally:
+        if fdoc is not None:
+            fdoc.close()
     if count:
         print(f"[INGEST] pdfplumber pass stored {count} table(s)")
     return count

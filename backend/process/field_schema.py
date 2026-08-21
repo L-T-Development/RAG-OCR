@@ -587,6 +587,10 @@ def _typo_reason(a: str, b: str):
     return None
 
 
+def _nospace(v: str) -> str:
+    return _WS_RE.sub("", v)
+
+
 def pair_likely_values(only_a, only_b, max_scan=1_000_000):
     """
     Pair values from two "missing" sets that are likely the same item written
@@ -596,13 +600,38 @@ def pair_likely_values(only_a, only_b, max_scan=1_000_000):
     """
     pairs, used_b = [], set()
 
+    # Pass 0 — spacing only. A catalogue number that wraps inside its cell comes
+    # back as "442 071 820394" from one document and "442 071 820 394" from the
+    # other: the same digits in the same order, differing by where the PDF broke
+    # the line. Set difference calls that "missing", which is the single most
+    # misleading thing this report can say. Removing whitespace cannot merge two
+    # genuinely different identifiers — their character sequences would have to be
+    # identical — so this is the most certain rule here and runs first.
+    ns_index = {}
+    for b in only_b:
+        ns = _nospace(b)
+        if len(ns) >= 4:
+            ns_index.setdefault(ns, []).append(b)
+    for a in sorted(only_a):
+        ns = _nospace(a)
+        if len(ns) < 4:
+            continue
+        for b in sorted(ns_index.get(ns, [])):
+            if b not in used_b:
+                pairs.append((a, b, "differs only by spacing (wrapped in the cell)"))
+                used_b.add(b)
+                break
+
     # Pass 1 — leading-zero variants, via an O(n) index on the numeric core.
+    paired_a = {p[0] for p in pairs}
     core_index = {}
     for b in only_b:
         zc = _zero_core(b)
         if zc is not None:
             core_index.setdefault(zc, []).append(b)
     for a in sorted(only_a):
+        if a in paired_a:
+            continue
         zc = _zero_core(a)
         if zc is None:
             continue

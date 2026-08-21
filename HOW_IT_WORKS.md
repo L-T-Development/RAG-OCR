@@ -54,6 +54,7 @@ different matching rules, and both chat routers now funnel into one
 │  process/comparison.py ── THE comparison entry point            │
 │  process/table_search_engine.py ── structured table compare     │
 │  process/mentions.py ── identifier index (prose + cells)        │
+│  process/column_roles.py ── per-document pinned columns         │
 │  process/reports_engine*.py ── batch comparator + Excel         │
 │  process/document_compare.py ── line diff                       │
 └───┬────────────────┬──────────────────┬─────────────────────────┘
@@ -105,6 +106,7 @@ Thread ──┬── (self FK) parent          threads inherit their ancestors
 DocumentPageText   (doc_id, page, kind, text_norm, text_nospace)
 IdentifierMention  (doc_id, value_norm, value_nospace, page, kind, occurrences)
                    ▲ §6.4 — the only SQL-searchable copy of a document's prose
+ColumnRole         (doc_id, field, header_text) — a human's pinned column, §7.2
 ConfirmedMatch   (source_a, source_b, column_key, value_a, value_b) — unique together
 AppConfig        key/value table, one row per key: llm_model, embedding_provider,
                  ollama_embedding_model, embedding_model_path
@@ -172,6 +174,16 @@ page N (column counts within ±1, and a blank, very short (< 10 chars) or dissim
 header), and merges it.
 Captions come from `_extract_headings_pymupdf()`, which infers headings by font
 size ≥ 1.2× the page median, bold weight, or a `3.2 Title` numbering pattern.
+
+> **Cost.** On a 582-page spares list this whole path takes minutes, and profiling on
+> evenly-sampled real pages shows where: pdfplumber's ruled-table detection is ~500 ms
+> per table-dense page (~97% of parse time), while PyMuPDF text extraction of the same
+> document is ~1 s in total. Two fixes landed after measuring — table storage became one
+> transaction with bulk inserts (4.89 → 0.14 ms per cell, a third of total ingest time
+> removed), and the anchor extractor now takes its word boxes from PyMuPDF instead of
+> pdfplumber. Replacing pdfplumber's ruled-table pass with PyMuPDF's `find_tables()` was
+> tried and **rejected**: it looked 1.6x faster on one document but loses cells on others
+> (an MRLS dropped from 18 tables to 6). See MEMORY.md §2.6.
 
 **Stage 3 — pdfplumber supplementary pass (always runs).** Both engines above miss
 **line-less tables** — spares lists laid out purely by column position with no ruled
@@ -249,6 +261,8 @@ save user message   (the last 5 messages are also captured as conversation_conte
    │
    ├─ confirm-match?      "confirm X and Y are the same … in @a.pdf and @b.pdf"
    │                       → writes a ConfirmedMatch row   (checked first; narrow regex)
+   ├─ set-column?         'set the part no column to "Firms Part No." in @a.pdf'
+   │                       → writes a ColumnRole row (§7.2); also `clear the … column`
    ├─ conflict query?     any of 9 words — duplicate / repeated / conflict / inconsistent /
    │                       same nomenclature / different part number / different drawing …
    │                       → detect_conflicts() + Excel report   (a single PDF is enough)
@@ -399,6 +413,25 @@ The engine underneath. `compare_tables()` runs this cascade:
 7. second-chance pass: pair leftovers against values that ALREADY matched exactly
    (catches MRLS listing both "XL17461" and "XL17461 NAMICA")
 ```
+
+A ninth step then asks a different question of the values that *did* match: do the
+two documents agree about them? `_row_differences()` cross-checks nomenclature, NSN
+and quantity for each matched row and reports what disagrees — the `modified`
+bucket, "same part, different details".
+
+Making that signal rather than noise took three rules, without which every matched
+row was flagged (71 of 71 on the NAMICA pair; now 2):
+
+- values are compared with every separator stripped, because PDF extraction yields
+  `Set ofFuelLine- 1setconsist` in one document and `Set of Fuel Line - 1 set
+  consist` in the other;
+- **quantities are only compared between columns labelled the same way** — an MRLS
+  `Total Qty. / Launcher` (fleet total) and an ISPL `No. Off` (fitted in one
+  assembly) both resolve to `qty` but count different things, so `18 nos.` vs `1`
+  is two questions, not a discrepancy. Same-header pairs are the revision-vs-revision
+  case, where a change *is* meaningful;
+- figure/drawing references are excluded outright — `Figure3- 12,Item No.1` versus
+  `Figure 3-12 1` is house style.
 
 Steps 4–7 exist because "is this part in that manual?" is almost never a string
 equality question in real documents. Each rule is deterministic and reviewable;
@@ -600,7 +633,24 @@ one failure this codebase works hardest to avoid. So it never picks a column —
 adds a "these columns hold identifier-shaped values" hint to the *Column Not
 Found* message, leaving the choice with the person who can read the document.
 
-Two escape hatches sit on top:
+**Resolution order.** A pinned column beats the schema, and a header quoted in the
+current query beats everything:
+
+```
+"Firms Part No." quoted in THIS query    most specific instruction available
+  └→ ColumnRole for (document, concept)   a person read the document and decided
+      └→ CATEGORY_SCHEMA for its category  the rules above
+          └→ fail — with value-shape suggestions
+```
+
+[column_roles.py](backend/process/column_roles.py) stores **only** the human
+decisions. Schema resolutions are recomputed on every query rather than cached, so
+editing `field_schema.json` improves every document at once instead of leaving stale
+rows behind. Pins are set from chat (`set the part no column to "X" in @a.pdf`) or
+over `GET/POST/DELETE /api/documents/<id>/columns/`, which also reports *why* each
+concept currently resolves the way it does (`origin: user | schema | none`).
+
+Two further escape hatches sit on top:
 - **Quoted columns** in a chat query (`compare "Firms Part No." in @a.pdf with "DS Cat No." in @b.pdf`)
   switch resolution to **literal** mode, bypassing the canonical mapping entirely —
   the user named the header, so it is not second-guessed.
@@ -729,7 +779,7 @@ Start here, in this order:
 | Why chat sometimes bypasses RAG | [views.py:354](backend/process/views.py#L354) — `chat_thread` |
 | Hybrid search | [pipeline/query.py](backend/process/pipeline/query.py) — `_retrieve_vectors` |
 | Line-less table extraction | [table_search_engine.py:333](backend/process/table_search_engine.py#L333) — `_extract_anchor_tables` |
-| Column name resolution | [field_schema.py](backend/process/field_schema.py) |
+| Column name resolution | [field_schema.py](backend/process/field_schema.py) — then [column_roles.py](backend/process/column_roles.py) |
 | Batch comparison + Excel | [reports_engine.py](backend/process/reports_engine.py) — `MultiPDFComparator` |
 | Tuning constants | [pipeline/config.py](backend/process/pipeline/config.py) |
 

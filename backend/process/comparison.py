@@ -130,7 +130,8 @@ def compare_documents(doc_a: Document, doc_b: Document, column: str,
     b_pdf = doc_b.filename.lower().endswith(".pdf") and _file_exists(doc_b)
     if a_pdf and b_pdf:
         result = compare_pdfs(doc_a.file.path, doc_b.file.path, column,
-                              force_extract=True, **kwargs)
+                              force_extract=True,
+                              doc1_id=str(doc_a.id), doc2_id=str(doc_b.id), **kwargs)
         result["engine_path"] = "file"
         if result.get("found"):
             return result
@@ -286,8 +287,8 @@ def collect_column_values(doc: Document, column: str, thread=None,
     in the spares list, we just no longer need one in the target.
     """
     import pandas as pd
-    from .field_schema import (resolve_header, normalize_value, is_empty_value,
-                               is_boilerplate_value)
+    from .column_roles import resolve as resolve_column
+    from .field_schema import normalize_value, is_empty_value, is_boilerplate_value
     from .table_search_engine import _search_engine
 
     thread_ids = thread_scope_ids(thread) if thread is not None else None
@@ -302,7 +303,8 @@ def collect_column_values(doc: Document, column: str, thread=None,
     for df in dfs:
         data_cols = [c for c in df.columns if not str(c).startswith("_")]
         available.update(str(c) for c in data_cols)
-        col = resolve_header(column, data_cols, doc.category, prefer_literal=prefer_literal)
+        col = resolve_column(column, data_cols, doc.category, doc_id=str(doc.id),
+                             prefer_literal=prefer_literal)
         if not col:
             continue
         resolved = resolved or col
@@ -717,12 +719,15 @@ def format_comparison_response(comparison_result: dict) -> str:
     confirmed = results_data.get('confirmed_matches', {})
     excluded = results_data.get('excluded', {})
 
+    modified = results_data.get('modified', {})
+
     missing_count = missing.get('count', 0)
     extra_count = extra.get('count', 0)
     common_count = common.get('count', 0)
     likely_count = likely.get('count', 0)
     confirmed_count = confirmed.get('count', 0)
     excluded_count = excluded.get('count', 0)
+    modified_count = modified.get('count', 0)
 
     # Column label: only show the "A ↔ B" pairing when the two files actually
     # use different header text — otherwise the identical-looking name (or a
@@ -745,6 +750,8 @@ def format_comparison_response(comparison_result: dict) -> str:
         response += f"| ✔️ Confirmed by you (previously reviewed) | {confirmed_count} |\n"
     if likely_count:
         response += f"| ⚠️ Same item, written differently (review) | {likely_count} |\n"
+    if modified_count:
+        response += f"| 🔧 Matched, but other details differ (review) | {modified_count} |\n"
     missing_icon = "✅" if missing_count == 0 else "❌"
     response += f"| {missing_icon} In {pdf1} but missing from {pdf2} | {missing_count} |\n"
     if extra_count:
@@ -789,6 +796,27 @@ def format_comparison_response(comparison_result: dict) -> str:
                 response += f"{i}. `{v}`\n"
         if missing_count > 10:
             response += f"\n_...and {missing_count - 10} more — full list in the Excel report._\n"
+        response += "\n---\n\n"
+
+    # ── Review needed: same item, but the documents disagree about it ────────
+    if modified_count > 0:
+        response += (
+            f"### 🔧 Same item, different details ({modified_count})\n\n"
+            f"These matched on `{col1}` but disagree elsewhere — the usual sign of a "
+            f"revision that changed a quantity or a description.\n\n"
+        )
+        for item in modified.get('items', [])[:10]:
+            label = f"`{item['value']}`"
+            if item.get('matched_value'):
+                label += f" (matched `{item['matched_value']}`)"
+            response += f"\n**{label}**\n"
+            for d in item['differences'][:4]:
+                same_header = d['header_a'].lower() == d['header_b'].lower()
+                where = (f"{d['header_a']}" if same_header
+                         else f"{d['header_a']} → {d['header_b']}")
+                response += f"- {where}: `{d['value_a']}` → `{d['value_b']}`\n"
+        if modified_count > 10:
+            response += f"\n_...and {modified_count - 10} more — full list in the Excel report._\n"
         response += "\n---\n\n"
 
     # ── Review needed: same item, different formatting ───────────────────────

@@ -419,6 +419,14 @@ def chat_thread(request, thread_id):
                 if confirm_result:
                     table_search_result = confirm_result
 
+            # Column-mapping command ("set the part no column to "X" in @f.pdf").
+            # Also checked early: it names a column and a file, which the comparison
+            # routing below would otherwise treat as a request to compare them.
+            if not table_search_result:
+                set_col_result = _extract_set_column_info(query, thread)
+                if set_col_result:
+                    table_search_result = set_col_result
+
             # Detect conflict detection query
             is_conflict_query = any(keyword in query_lower for keyword in [
                 'repeated', 'duplicate', 'conflict', 'inconsistent', 'same nomenclature',
@@ -866,6 +874,84 @@ _CONFIRM_MATCH_RE = re.compile(
     r'\s+(?:are|is)\s+the\s+same\b',
     re.IGNORECASE,
 )
+
+# "set the part no column to "Firms Part No." in @a.pdf"
+# "use "DS Cat No." as the part number column in @a.pdf"
+# Deliberately narrow (an explicit verb, a quoted header and one named file) so it
+# cannot swallow an ordinary comparison question.
+_SET_COLUMN_RES = (
+    re.compile(r'\b(?:set|map|pin)\s+(?:the\s+)?(.+?)\s+column\s+(?:to|=|as)\s+'
+               r'[`"‘’“”](.+?)[`"‘’“”]', re.IGNORECASE),
+    re.compile(r'\buse\s+[`"‘’“”](.+?)[`"‘’“”]\s+(?:as|for)\s+(?:the\s+)?(.+?)\s+column',
+               re.IGNORECASE),
+)
+_CLEAR_COLUMN_RE = re.compile(
+    r'\b(?:clear|reset|forget|unset)\s+(?:the\s+)?(.+?)\s+column\b', re.IGNORECASE)
+
+
+def _extract_set_column_info(query: str, thread) -> Optional[dict]:
+    """
+    Handle "set the part no column to "Firms Part No." in @file.pdf".
+
+    Pinning a column is otherwise a JSON POST, which is not something anyone can do
+    mid-conversation — and this is exactly the decision a person makes *while*
+    looking at a failed comparison. The pin is durable and applies to every later
+    comparison of that document (process/column_roles.py).
+    """
+    from . import column_roles
+    from .field_schema import canonical_field_for_query
+
+    field_term = header = None
+    for i, rx in enumerate(_SET_COLUMN_RES):
+        m = rx.search(query)
+        if m:
+            field_term, header = (m.group(1), m.group(2)) if i == 0 else (m.group(2), m.group(1))
+            break
+    clearing = False
+    if not field_term:
+        m = _CLEAR_COLUMN_RE.search(query)
+        if not m:
+            return None
+        field_term, clearing = m.group(1), True
+
+    field = canonical_field_for_query(field_term)
+    if not field:
+        return {'found': True, 'formatted_answer': (
+            f"## ⚠️ Unknown Column Concept\n\n"
+            f"I don't have a concept called **{field_term.strip()}**. Known concepts: "
+            + ", ".join(f"`{f}`" for f in sorted(_cmp_fields())) + ".")}
+
+    names = _cmp.mentioned_files(query)
+    docs = _cmp.resolve_documents(thread, names) if names else []
+    if len(docs) != 1:
+        return {'found': True, 'formatted_answer': (
+            "## ⚠️ Which Document?\n\n"
+            "Name exactly one file, e.g.\n\n"
+            '`set the part no column to "Firms Part No." in @ISPL_MMME.pdf`')}
+    doc = docs[0]
+
+    if clearing:
+        result = column_roles.set_role(doc, field, None)
+        return {'found': True, 'formatted_answer': (
+            f"## ✅ Column Mapping Cleared\n\n`{field}` in **{doc.filename}** is back to "
+            f"automatic detection from the header name.")}
+
+    result = column_roles.set_role(doc, field, header)
+    if not result.get('ok'):
+        cols = _format_available_columns(result.get('available_columns', []))
+        return {'found': True, 'formatted_answer': (
+            f"## ⚠️ Could Not Set Column\n\n{result.get('error')}\n\n"
+            f"**Columns in {doc.filename}:** {cols or 'none extracted'}")}
+    return {'found': True, 'formatted_answer': (
+        f"## ✅ Column Mapping Saved\n\n"
+        f"In **{doc.filename}**, `{field}` now means **{result['header']}**.\n\n"
+        f"Every future comparison of this document uses that column — no need to quote "
+        f"it again. Say `clear the {field_term.strip()} column in @{doc.filename}` to undo.")}
+
+
+def _cmp_fields():
+    from .field_schema import CANONICAL_FIELDS
+    return CANONICAL_FIELDS
 
 
 def _resolve_confirm_docs(query: str, thread):
@@ -1746,6 +1832,56 @@ def confirm_comparison_match(request):
     if not result.get('ok'):
         return JsonResponse({"error": result.get('error', 'Could not confirm match')}, status=400)
     return JsonResponse(result)
+
+@csrf_exempt
+@require_http_methods(["GET", "POST", "DELETE"])
+def document_columns(request, doc_id):
+    """
+    How one document's columns are understood, and how to correct that.
+
+    GET    → {headers, roles: {field: {header, origin: user|schema|none}},
+              suggestions: [{header, why}], fields}
+             `origin` says *why* a column was chosen: a person pinned it (user),
+             the category schema matched the header (schema), or nothing matched
+             (none) — in which case `suggestions` lists columns whose values look
+             like identifiers.
+    POST   → {field, header}  pin a column for a concept ("part_no" → "Firms Part No.")
+             `header` empty/null clears the pin. Takes effect on the next comparison
+             of this document, in either chat router, permanently.
+    DELETE → clear every pin for this document (?field=part_no for just one).
+    """
+    from . import column_roles
+
+    doc = get_object_or_404(Document, id=doc_id)
+    thread_ids = ([str(doc.thread_id)] +
+                  [str(t) for t in get_ancestor_thread_ids(doc.thread)]) if doc.thread else None
+
+    if request.method == "GET":
+        return JsonResponse(column_roles.describe(doc, thread_ids=thread_ids))
+
+    if request.method == "DELETE":
+        from .models import ColumnRole
+        qs = ColumnRole.objects.filter(doc_id=str(doc.id).replace('-', ''))
+        field = request.GET.get('field')
+        if field:
+            qs = qs.filter(field=field)
+        n, _ = qs.delete()
+        return JsonResponse({"ok": True, "cleared": n})
+
+    try:
+        data = json.loads(request.body)
+    except (json.JSONDecodeError, TypeError):
+        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+    field = (data.get('field') or '').strip()
+    if not field:
+        return JsonResponse({"error": "Missing required field: 'field'"}, status=400)
+
+    result = column_roles.set_role(doc, field, data.get('header'), note=data.get('note', ''))
+    if not result.get('ok'):
+        return JsonResponse(result, status=400)
+    result['roles'] = column_roles.describe(doc, thread_ids=thread_ids)['roles']
+    return JsonResponse(result)
+
 
 @csrf_exempt
 @require_http_methods(["GET"])
@@ -2711,6 +2847,28 @@ def generate_comparison_excel(comparison_result: dict) -> bytes:
         for row_idx, value in enumerate(results_data['excluded']['values'], 4):
             ex_sheet[f'A{row_idx}'] = value
         ex_sheet.column_dimensions['A'].width = 30
+
+    # Sheet: Modified (matched on the compared column, disagree elsewhere)
+    if results_data.get('modified', {}).get('count', 0) > 0:
+        md_sheet = wb.create_sheet("Changed Details")
+        md_sheet['A1'] = 'Same item in both files, but another column disagrees — review'
+        md_sheet['A1'].font = Font(size=14, bold=True)
+        md_sheet['A1'].fill = PatternFill(start_color='FFF2CC', end_color='FFF2CC', fill_type='solid')
+        for col_idx, h in enumerate(['Value', 'Field', f'In {pdf1}', f'In {pdf2}',
+                                     'Column in File 1', 'Column in File 2'], 1):
+            md_sheet.cell(row=3, column=col_idx, value=h).font = Font(bold=True)
+        r_idx = 4
+        for item in results_data['modified']['items']:
+            for d in item['differences']:
+                md_sheet.cell(row=r_idx, column=1, value=item['value'])
+                md_sheet.cell(row=r_idx, column=2, value=d['field'])
+                md_sheet.cell(row=r_idx, column=3, value=d['value_a'])
+                md_sheet.cell(row=r_idx, column=4, value=d['value_b'])
+                md_sheet.cell(row=r_idx, column=5, value=d['header_a'])
+                md_sheet.cell(row=r_idx, column=6, value=d['header_b'])
+                r_idx += 1
+        for col, w in zip('ABCDEF', (26, 16, 40, 40, 26, 26)):
+            md_sheet.column_dimensions[col].width = w
 
     # Sheet: Likely Matches (same item, different formatting)
     if 'likely_matches' in results_data and results_data['likely_matches']['count'] > 0:

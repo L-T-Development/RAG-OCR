@@ -34,6 +34,7 @@ urlpatterns = [
     path("api/compare/status/<str:job_id>/", views.compare_status),
     path("api/comparison/confirm-match/", views.confirm_comparison_match, name="confirm_comparison_match"),
     path("api/field-schema/", views.field_schema_view, name="field_schema"),
+    path("api/documents/<str:doc_id>/columns/", views.document_columns, name="document_columns"),
 
     # Document Summary Endpoints
     path('api/summarize/thread/<str:thread_id>/', views.summarize_thread_documents, name='summarize_thread'),

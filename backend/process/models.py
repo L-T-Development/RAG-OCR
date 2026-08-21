@@ -431,3 +431,39 @@ class IdentifierMention(models.Model):
 
     def __str__(self):
         return f"{self.value_norm} @ {self.source} p{self.page}"
+
+
+class ColumnRole(models.Model):
+    """
+    A human's decision about which real column of one document holds a concept.
+
+    Header resolution (field_schema) covers every label we have seen, and value
+    shape (column_profile) can spot identifier columns but cannot tell a part
+    number from a stock number. When both fall short — a new document family, a
+    header lost to a bad extraction — the person looking at the document knows the
+    answer, and this is where they record it once instead of quoting the header in
+    every query.
+
+    Only *user* decisions live here. Schema-derived resolutions are recomputed on
+    demand rather than cached, so improving field_schema.json immediately improves
+    every document instead of leaving stale rows behind. A row here therefore
+    always wins over the schema — that is its entire purpose.
+    """
+    doc_id = models.CharField(max_length=255, db_index=True)
+    source = models.CharField(max_length=500, blank=True, default='')
+    thread_id = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    # Canonical concept key from field_schema.CANONICAL_FIELDS (e.g. "part_no").
+    field = models.CharField(max_length=64, db_index=True)
+    # The column header exactly as it appears in the document's tables.
+    header_text = models.CharField(max_length=500)
+    note = models.CharField(max_length=500, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['doc_id', 'field'], name='unique_column_role_per_doc'),
+        ]
+
+    def __str__(self):
+        return f"{self.source or self.doc_id}: {self.field} -> {self.header_text}"

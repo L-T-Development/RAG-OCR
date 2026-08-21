@@ -37,69 +37,91 @@ def generate_searchable_text(headers, rows, table_type, caption=""):
 
 def store_table(table_id, doc_id, thread_id, parent_id, source, page,
                 table_index, headers, row_count, column_count, table_data, caption=""):
+    from django.db import transaction
     from process.models import ExtractedTable, TableRow, TableCell, Thread
     try:
-        rows = table_data[1:] if len(table_data) > 1 else []
-        table_type = classify_table_type(headers, rows, row_count, column_count)
-        searchable_text = generate_searchable_text(headers, rows, table_type, caption=caption)
+        with transaction.atomic():
+            rows = table_data[1:] if len(table_data) > 1 else []
+            table_type = classify_table_type(headers, rows, row_count, column_count)
+            searchable_text = generate_searchable_text(headers, rows, table_type, caption=caption)
 
-        thread = Thread.objects.get(id=thread_id)
-        parent_thread = Thread.objects.get(id=parent_id) if parent_id else None
+            thread = Thread.objects.get(id=thread_id)
+            parent_thread = Thread.objects.get(id=parent_id) if parent_id else None
 
-        table_obj, created = ExtractedTable.objects.update_or_create(
-            id=table_id,
-            defaults={
-                "doc_id": doc_id,
-                "thread": thread,
-                "parent_thread": parent_thread,
-                "source": source,
-                "page": page,
-                "table_index": table_index,
-                "row_count": row_count,
-                "column_count": column_count,
-                "table_type": table_type,
-                "searchable_text": searchable_text,
-                "caption": caption[:500] if caption else "",
-            },
-        )
-        if not created:
-            table_obj.rows.all().delete()
+            table_obj, created = ExtractedTable.objects.update_or_create(
+                id=table_id,
+                defaults={
+                    "doc_id": doc_id,
+                    "thread": thread,
+                    "parent_thread": parent_thread,
+                    "source": source,
+                    "page": page,
+                    "table_index": table_index,
+                    "row_count": row_count,
+                    "column_count": column_count,
+                    "table_type": table_type,
+                    "searchable_text": searchable_text,
+                    "caption": caption[:500] if caption else "",
+                },
+            )
+            if not created:
+                table_obj.rows.all().delete()
 
-        # Header row
-        if headers and any(headers):
-            hr = TableRow.objects.create(table=table_obj, row_index=0, is_header=True)
-            for col_idx, h in enumerate(headers):
-                TableCell.objects.create(
-                    row=hr, column_index=col_idx,
-                    column_name=str(h) if h else "",
-                    value=str(h) if h else "",
-                    is_key=False,
-                )
+            # One transaction and two bulk inserts for the whole table.
+            #
+            # This used to be a create() per row and per CELL, each its own SQLite
+            # transaction — measured at 4.9 ms per cell, which on a 582-page spares
+            # list came to ~150 s of pure commit overhead (a third of the ingest time)
+            # for a few thousand small rows.
+            rows_to_make, cell_specs = [], []
 
-        # Data rows
-        data_rows = table_data[1:] if (len(table_data) > 1) else ([] if headers else table_data)
-        start_idx = 1 if headers else 0
-        is_kv = table_type == "key_value"
+            if headers and any(headers):
+                rows_to_make.append(TableRow(table=table_obj, row_index=0, is_header=True))
+                cell_specs.append([
+                    (col_idx, str(h) if h else "", str(h) if h else "", False)
+                    for col_idx, h in enumerate(headers)
+                ])
 
-        for offset, row_data in enumerate(data_rows):
-            if not row_data or not isinstance(row_data, (list, tuple)):
-                continue
-            dr = TableRow.objects.create(table=table_obj, row_index=start_idx + offset, is_header=False)
-            for col_idx, cell_value in enumerate(row_data):
-                if col_idx >= column_count:
-                    break
-                col_name = (
-                    str(headers[col_idx])
-                    if (headers and col_idx < len(headers) and headers[col_idx])
-                    else f"Column {col_idx}"
-                )
-                TableCell.objects.create(
-                    row=dr,
-                    column_index=col_idx,
-                    column_name=col_name,
-                    value=str(cell_value) if cell_value else "",
-                    is_key=(is_kv and col_idx == 0),
-                )
+            data_rows = table_data[1:] if (len(table_data) > 1) else ([] if headers else table_data)
+            start_idx = 1 if headers else 0
+            is_kv = table_type == "key_value"
+
+            for offset, row_data in enumerate(data_rows):
+                if not row_data or not isinstance(row_data, (list, tuple)):
+                    continue
+                rows_to_make.append(
+                    TableRow(table=table_obj, row_index=start_idx + offset, is_header=False))
+                spec = []
+                for col_idx, cell_value in enumerate(row_data):
+                    if col_idx >= column_count:
+                        break
+                    col_name = (
+                        str(headers[col_idx])
+                        if (headers and col_idx < len(headers) and headers[col_idx])
+                        else f"Column {col_idx}"
+                    )
+                    spec.append((col_idx, col_name,
+                                 str(cell_value) if cell_value else "",
+                                 is_kv and col_idx == 0))
+                cell_specs.append(spec)
+
+            if rows_to_make:
+                TableRow.objects.bulk_create(rows_to_make, batch_size=500)
+                # bulk_create only returns primary keys on some backends; read them
+                # back by (row_index, is_header) so the cell FKs are always correct.
+                saved = {(r.row_index, r.is_header): r
+                         for r in TableRow.objects.filter(table=table_obj)}
+                cells = []
+                for row_obj, spec in zip(rows_to_make, cell_specs):
+                    parent = saved.get((row_obj.row_index, row_obj.is_header))
+                    if parent is None:
+                        continue
+                    for col_idx, col_name, value, is_key in spec:
+                        cells.append(TableCell(row=parent, column_index=col_idx,
+                                               column_name=col_name, value=value,
+                                               is_key=is_key))
+                if cells:
+                    TableCell.objects.bulk_create(cells, batch_size=2000)
     except Exception as e:
         import traceback
         print(f"[TABLE] Error storing {table_id}: {e}")

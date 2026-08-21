@@ -148,6 +148,20 @@ python manage.py build_mention_index         # documents not indexed yet
 python manage.py build_mention_index --all   # rebuild everything
 ```
 
+### Fixing a column mapping for one document
+
+When a comparison picks the wrong column (or none) for a single document, pin it from
+chat — it sticks for every later comparison of that document:
+
+```
+set the part no column to "Firms Part No." in @ISPL_MMME.pdf
+clear the part no column in @ISPL_MMME.pdf          # undo
+```
+
+`GET /api/documents/<id>/columns/` shows what each concept resolves to and why
+(`user` = pinned, `schema` = matched by header name, `none` = unresolved), plus
+suggestions based on what the values look like. `POST` pins, `DELETE` clears.
+
 ### Teaching the comparison engine a new column name
 
 "Compare part numbers" has to find the right column in each document, and every
