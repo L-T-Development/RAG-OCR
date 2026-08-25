@@ -647,6 +647,18 @@ def _ingest_pdf(file_path, doc_id, thread_id, parent_id, filename):
     if pp_n:
         result["table_chunks"] = result.get("table_chunks", 0) + pp_n
 
+    # Record what could not be read (pages with no text layer). Cheap, and it is
+    # what lets a later comparison say "12 pages of this file are scans" rather
+    # than reporting everything on them as missing.
+    try:
+        from process.extraction_qa import record_for_document
+        from process.models import Document
+        doc = Document.objects.filter(id=doc_id).first()
+        if doc is not None:
+            record_for_document(doc, pdf_path=file_path)
+    except Exception as e:
+        print(f"[INGEST] extraction QA skipped: {e}")
+
     # Table cells go into the mention index too, so a part that appears only in a
     # table of the *target* document still counts as mentioned.
     try:

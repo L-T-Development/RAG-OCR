@@ -6,10 +6,17 @@ import { api } from '../services/api';
 import {
   ArrowLeft, Cpu, Moon, Sun,
   CheckCircle, XCircle, Loader2, Save, Sparkles, RefreshCw,
+  ShieldCheck, Download, Upload, Archive,
 } from 'lucide-react';
 
 export function Settings() {
   const navigate = useNavigate();
+
+  // Corrections a person made: confirmed matches and pinned columns.
+  const [importPreview, setImportPreview] = useState(null);
+  const [importPayload, setImportPayload] = useState(null);
+  const [decisionsBusy, setDecisionsBusy] = useState(false);
+  const [decisionsNote, setDecisionsNote] = useState('');
   const { theme, setTheme } = useTheme();
 
   // Ollama model list (shared by both sections)
@@ -321,6 +328,144 @@ export function Settings() {
                 );
               })}
             </div>
+          </div>
+        </section>
+
+        {/* Corrections — the only thing here that cannot be rebuilt */}
+        <section className={sectionCls}>
+          <div className={sectionHeaderCls}>
+            <div className={sectionIconCls}><ShieldCheck size={20} /></div>
+            <div>
+              <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Your corrections</h2>
+              <p className="text-sm text-[var(--color-text-muted)]">
+                Confirmed matches and pinned columns — carry them to another machine, or back everything up
+              </p>
+            </div>
+          </div>
+
+          <div className="p-5">
+            <p className="text-sm text-[var(--color-text-muted)] mb-4">
+              Tables, embeddings and the search index can all be rebuilt by re-uploading a
+              document. Two things cannot: the pairs you confirmed are the same item, and the
+              columns you pinned for a document. They live only on this machine.
+            </p>
+
+            <div className="flex flex-wrap gap-2 mb-4">
+              <a
+                href={api.getDecisionsExportUrl()}
+                download
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-white text-sm font-medium hover:bg-primary-hover transition-colors no-underline"
+              >
+                <Download size={16} /> Export corrections
+              </a>
+
+              <label className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-[var(--color-border)] text-sm font-medium cursor-pointer hover:bg-[var(--color-bg-hover)] transition-colors">
+                <Upload size={16} /> Import from a file
+                <input
+                  type="file"
+                  accept="application/json,.json"
+                  className="hidden"
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    if (!file) return;
+                    setDecisionsNote('');
+                    setImportPreview(null);
+                    try {
+                      const parsed = JSON.parse(await file.text());
+                      setImportPayload(parsed);
+                      setDecisionsBusy(true);
+                      const { ok, data } = await api.importDecisions(parsed, { dryRun: true });
+                      setDecisionsBusy(false);
+                      if (!ok) { setDecisionsNote(data?.error || 'That file could not be read.'); return; }
+                      setImportPreview(data);
+                    } catch (err) {
+                      setDecisionsBusy(false);
+                      setDecisionsNote(`That file is not valid JSON (${err.message}).`);
+                    }
+                  }}
+                />
+              </label>
+
+              <button
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-[var(--color-border)] text-sm font-medium cursor-pointer hover:bg-[var(--color-bg-hover)] transition-colors bg-transparent text-[var(--color-text-primary)]"
+                disabled={decisionsBusy}
+                onClick={async () => {
+                  setDecisionsBusy(true);
+                  setDecisionsNote('');
+                  const { ok, data } = await api.backupData();
+                  setDecisionsBusy(false);
+                  setDecisionsNote(ok
+                    ? `Backed up ${data.files} file(s) to ${data.path}`
+                    : (data?.error || 'Backup failed.'));
+                }}
+              >
+                <Archive size={16} /> Back up everything
+              </button>
+            </div>
+
+            {decisionsBusy && (
+              <p className="text-sm text-[var(--color-text-muted)] flex items-center gap-2">
+                <Loader2 size={14} className="animate-spin" /> Working…
+              </p>
+            )}
+
+            {decisionsNote && (
+              <p className="text-sm text-[var(--color-text-secondary)] break-all">{decisionsNote}</p>
+            )}
+
+            {importPreview && (
+              <div className="mt-2 p-4 rounded-lg bg-[var(--color-bg-secondary)] text-sm">
+                <p className="font-medium text-[var(--color-text-primary)] mb-2">
+                  This file would add:
+                </p>
+                <ul className="text-[var(--color-text-secondary)] mb-3 list-disc pl-5">
+                  <li>
+                    {importPreview.confirmed_matches.added} confirmed match(es)
+                    {importPreview.confirmed_matches.unchanged > 0 &&
+                      ` — ${importPreview.confirmed_matches.unchanged} already here`}
+                  </li>
+                  <li>
+                    {importPreview.column_roles.added} pinned column(s)
+                    {importPreview.column_roles.unchanged > 0 &&
+                      ` — ${importPreview.column_roles.unchanged} already here`}
+                  </li>
+                </ul>
+
+                {importPreview.column_roles.no_such_document?.length > 0 && (
+                  <p className="text-amber-700 mb-3">
+                    Not applicable yet — these documents are not on this machine:{' '}
+                    {[...new Set(importPreview.column_roles.no_such_document)].join(', ')}.
+                    Upload them and import again.
+                  </p>
+                )}
+
+                <div className="flex gap-2">
+                  <button
+                    className={saveBtnCls}
+                    disabled={decisionsBusy}
+                    onClick={async () => {
+                      setDecisionsBusy(true);
+                      const { ok, data } = await api.importDecisions(importPayload, { dryRun: false });
+                      setDecisionsBusy(false);
+                      setImportPreview(null);
+                      setImportPayload(null);
+                      setDecisionsNote(ok
+                        ? `Imported ${data.confirmed_matches.added} match(es) and ${data.column_roles.added} pinned column(s).`
+                        : (data?.error || 'Import failed.'));
+                    }}
+                  >
+                    <Save size={16} /> Apply
+                  </button>
+                  <button
+                    className="px-4 py-2 rounded-lg border border-[var(--color-border)] text-sm cursor-pointer bg-transparent text-[var(--color-text-secondary)]"
+                    onClick={() => { setImportPreview(null); setImportPayload(null); }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </section>
       </div>

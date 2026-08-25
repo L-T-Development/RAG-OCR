@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Sidebar, ChatArea, DocumentPanel, DropZone } from '../components/workspace';
+import { Sidebar, ChatArea, DocumentPanel, DropZone, ComparePanel } from '../components/workspace';
 import { Navigation } from '../components/shared/Navigation';
 import { CategorySelector } from '../components/workspace/CategorySelector';
 import { api } from '../services/api';
@@ -15,6 +15,9 @@ export function Workspace() {
   const [currentThreadId, setCurrentThreadId] = useState(null);
   const [currentThreadName, setCurrentThreadName] = useState('');
   
+  // Comparison wizard
+  const [showCompare, setShowCompare] = useState(false);
+
   // Chat state
   const [messages, setMessages] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -466,8 +469,17 @@ export function Workspace() {
             isUploading={isUploading}
             uploadProgress={uploadProgress}
             uploadStatus={uploadStatus}
+            onCompare={() => setShowCompare(true)}
           />
         </main>
+
+        {showCompare && (
+          <ComparePanel
+            threadId={currentThreadId}
+            documents={documents}
+            onClose={() => setShowCompare(false)}
+          />
+        )}
       </div>
 
       <DropZone onDrop={handleDrop} disabled={isUploading} />

@@ -521,11 +521,6 @@ def _gen_text_answer(query_text, vector_chunks, long_response=False):
 
 # ── Compare intent detection ──────────────────────────────────────────────────
 
-_COMPARE_WORDS = {
-    "compare", "comparison", "difference", "differences", "diff", "versus",
-    "contrast", "mismatch", "missing", "added", "removed", "only in",
-}
-
 _COMPARE_PATTERNS = [
     # "compare parts list between file1.pdf and file2.pdf"
     re.compile(r"compare\s+(.+?)\s+(?:between|in|from|across)\s+(.+?)\s+and\s+(.+)", re.I),
@@ -536,14 +531,18 @@ _COMPARE_PATTERNS = [
 ]
 
 
-def _is_compare_query(query_text):
-    ql = query_text.lower()
-    if sum(1 for w in _COMPARE_WORDS if w in ql) >= 2:
-        return True
-    # "are all the parts in A mentioned anywhere in B" carries none of the compare
-    # words above but is a comparison — of a column against a document's full text.
-    from process.comparison import wants_text_mode
-    return wants_text_mode(query_text) and len(_parse_compare_files(query_text)[0]) >= 2
+def _is_compare_query(query_text, thread_id=None):
+    """Ask the shared parser (process/intent.py), so both routers agree."""
+    from process.intent import parse as parse_intent
+    doc_count = None
+    if thread_id is not None:
+        try:
+            from process.models import Thread
+            from process.comparison import documents_in_scope
+            doc_count = documents_in_scope(Thread.objects.get(id=thread_id)).count()
+        except Exception:
+            doc_count = None
+    return parse_intent(query_text, doc_count=doc_count).is_comparison
 
 
 def _parse_compare_files(query_text):
@@ -581,44 +580,6 @@ def _parse_compare_files(query_text):
     return [], None
 
 
-# ── Column hint resolver ──────────────────────────────────────────────────────
-
-# Maps user-facing keyword → canonical column search string
-_COL_KEYWORDS: list[tuple[list[str], str]] = [
-    (["part no", "part number", "part.no", "partno", "part"],          "part"),
-    (["nsn", "n.s.n", "stock number"],                                  "nsn"),
-    (["drg", "dwg", "drawing no", "drawing number", "drawing"],        "drg"),
-    (["nomenclature", "designation", "description", "name"],           "nomenclature"),
-    (["ref no", "reference no", "ref.", "reference"],                   "ref"),
-    (["plate", "plate ref"],                                            "plate"),
-    (["sr no", "sl no", "serial", "sr.", "sl."],                       "sr"),
-    (["qty", "quantity"],                                               "qty"),
-    (["price", "cost", "rate", "amount"],                               "price"),
-    (["date"],                                                          "date"),
-]
-
-
-def _resolve_column(hint_text):
-    """
-    Extract a column search string from free-text like
-    'compare part numbers between ...' or 'NSN column'.
-    Returns None if no recognisable column keyword is found.
-    """
-    if not hint_text:
-        return None
-    hl = hint_text.lower()
-    for keywords, canonical in _COL_KEYWORDS:
-        if any(kw in hl for kw in keywords):
-            return canonical
-    # Fallback: any token that looks like a column name (short, not stop-word)
-    _stops = {"compare", "between", "and", "the", "of", "in", "from", "across", "column", "field"}
-    for token in re.split(r"[\s,]+", hl):
-        t = token.strip()
-        if len(t) >= 2 and t not in _stops:
-            return t
-    return None
-
-
 # ── Compare response generators ───────────────────────────────────────────────
 # Both delegate to process/comparison.py — the same engine, formatting and Excel
 # report as the chat router in views.py, so a comparison gives the same answer
@@ -626,7 +587,6 @@ def _resolve_column(hint_text):
 # pipeline/tables.compare_tables with SequenceMatcher fuzzy matching, which merges
 # sequential part numbers; that engine has been retired.)
 
-_QUOTED_COL_RE = re.compile(r'["“”]([^"“”]{2,60})["“”]')
 
 
 def _gen_compare(query_text, thread_id, file_a, file_b, column_hint):
@@ -659,20 +619,21 @@ def _gen_compare_multi(query_text, thread_id, files, column_hint):
             "retrieval_type": "compare_no_data",
         }
 
-    # Column: quoted header names are taken literally (one per file, in order);
-    # otherwise a concept word ("part", "drg", "nsn", ...) resolved per document
-    # through the category schema. Default concept is the part identifier.
-    quoted = [q.strip() for q in _QUOTED_COL_RE.findall(query_text)
-              if q.strip() and not q.strip().lower().endswith(tuple(cmp.TABLE_EXTENSIONS))]
-    if quoted:
-        column, column_b, prefer_literal = quoted[0], (quoted[1] if len(quoted) > 1 else None), True
-    else:
-        column, column_b, prefer_literal = (_resolve_column(column_hint or query_text) or "part"), None, False
+    # What to compare comes from the shared parser, so this router cannot reach a
+    # different conclusion than views.chat_thread for the same sentence.
+    from process.intent import parse as parse_intent
+    intent = parse_intent(query_text,
+                          available_files=[d.filename for d in cmp.documents_in_scope(thread)],
+                          doc_count=len(docs))
+    column = intent.columns[0] or intent.concept
+    column_b = intent.columns[1]
 
-    print(f"[QUERY] compare via process.comparison | files={[d.filename for d in docs]} | column={column!r}")
+    print(f"[QUERY] compare via process.comparison | files={[d.filename for d in docs]} "
+          f"| {intent.describe()}")
     result = cmp.run_comparison(thread, docs, column, column_b=column_b,
-                                comparison_type="all", prefer_literal=prefer_literal,
-                                text_mode=cmp.wants_text_mode(query_text))
+                                comparison_type=intent.comparison_type,
+                                prefer_literal=intent.prefer_literal,
+                                text_mode=(intent.mode == "mentions"))
     ok = bool(result.get("results") or result.get("matrix"))
     return {
         "answer":           result.get("formatted_answer", "Comparison produced no answer."),
@@ -912,7 +873,7 @@ def query_rag(query_text, current_thread_id, parent_thread_id=None, conversation
     t0 = time.time()
 
     # 0. Compare intent — check before single-file filter extraction
-    if _is_compare_query(query_text):
+    if _is_compare_query(query_text, current_thread_id):
         files, col_hint = _parse_compare_files(query_text)
         # Comma-separated column hint → multi-column OR-match (source vs targets lookup)
         col_list = [c.strip() for c in (col_hint or "").split(",") if c.strip()]

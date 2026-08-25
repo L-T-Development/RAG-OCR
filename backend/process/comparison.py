@@ -264,19 +264,6 @@ def _short_error(r: Dict[str, Any]) -> str:
 
 # ── Text mode: a column vs another document's whole text ───────────────────────
 
-_TEXT_MODE_PHRASES = (
-    "mentioned", "mention", "anywhere", "appear in", "appears in", "referenced",
-    "referred", "in the text", "full text", "anywhere in", "covered in", "listed in",
-)
-
-
-def wants_text_mode(query: str) -> bool:
-    """True when the user asked about *mentions* rather than a column-to-column diff
-    ("are all these parts mentioned anywhere in the manual?")."""
-    q = (query or "").lower()
-    return any(p in q for p in _TEXT_MODE_PHRASES)
-
-
 def collect_column_values(doc: Document, column: str, thread=None,
                           prefer_literal: bool = False) -> Dict[str, Any]:
     """
@@ -1057,13 +1044,34 @@ def _run_text_mode(thread, docs: List[Document], column: str,
                              prefer_literal=prefer_literal)
     if not m.get("found"):
         return None
-    m["formatted_answer"] = format_text_mode_response(m)
+    m["formatted_answer"] = extraction_warnings(docs) + format_text_mode_response(m)
     try:
         attach_excel_report(m, report_type="Mention_Report",
                             excel_bytes=generate_text_mode_excel(m))
     except Exception as e:
         print(f"[COMPARISON] mention Excel failed: {e}")
     return m
+
+
+def extraction_warnings(docs: List[Document]) -> str:
+    """
+    A banner for anything in these documents that could not be read.
+
+    A comparison is only as trustworthy as the extraction under it. If 12 pages of
+    the target are scans, every part printed on them is reported as missing — a
+    confident, precisely-formatted, wrong answer. Saying so costs two lines.
+    """
+    try:
+        from .extraction_qa import warnings_for
+    except Exception:
+        return ""
+    notes = []
+    for doc in docs:
+        notes.extend(warnings_for(doc))
+    if not notes:
+        return ""
+    return ("> ⚠️ **Before trusting this comparison**\n>\n"
+            + "\n".join(f"> - {n}" for n in notes) + "\n\n")
 
 
 def run_comparison(thread, docs: List[Document], column: str,
@@ -1099,7 +1107,8 @@ def run_comparison(thread, docs: List[Document], column: str,
                                    match_any_column_in_b=match_any_column_in_b,
                                    prefer_literal=prefer_literal, thread=thread)
         if result.get("found"):
-            result["formatted_answer"] = format_comparison_response(result)
+            result["formatted_answer"] = (extraction_warnings([a, b])
+                                          + format_comparison_response(result))
             attach_excel_report(result)
             return result
 
@@ -1136,7 +1145,8 @@ def run_comparison(thread, docs: List[Document], column: str,
                 f"so I searched their full text for each value instead.\n\n"
                 + answer["formatted_answer"])
             return answer
-    m["formatted_answer"] = format_multi_comparison_response(m)
+    m["formatted_answer"] = (extraction_warnings(docs)
+                             + format_multi_comparison_response(m))
     if m["found"]:
         try:
             attach_excel_report(m, report_type="Multi_Comparison_Report",

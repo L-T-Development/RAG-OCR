@@ -79,6 +79,13 @@ class Document(models.Model):
     progress_detail = models.CharField(max_length=255, blank=True, default="")
     error_message   = models.TextField(blank=True, default="")
     
+    # What could NOT be read from this file: page count, pages with no text layer,
+    # and how many of those are scans (an image with no text) rather than blanks.
+    # Recorded at ingest by process/extraction_qa.py so a comparison can warn that
+    # part of the document was never searchable, instead of silently reporting the
+    # parts on those pages as missing.
+    extraction_stats = models.JSONField(default=dict, blank=True)
+
     # Document metadata and organization
     tags = models.JSONField(default=list, blank=True)  # List of custom tags: ["Revision A", "Q1-2026", "Approved"]
     notes = models.TextField(blank=True, default='')  # User annotations/comments

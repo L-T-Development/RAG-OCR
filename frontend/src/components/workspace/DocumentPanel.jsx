@@ -17,8 +17,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
-  MessageSquare
-} from 'lucide-react';
+  MessageSquare, GitCompare } from 'lucide-react';
 import { CategorySelector } from './CategorySelector';
 import { api } from '../../services/api';
 
@@ -340,6 +339,7 @@ export function DocumentPanel({
   onUpload,
   onDelete,
   onSummarize,
+  onCompare,
   disabled = false,
   isUploading = false,
   uploadProgress = 0,
@@ -413,6 +413,21 @@ export function DocumentPanel({
           </span>
         )}
       </div>
+
+      {/* Compare — needs two documents to mean anything */}
+      {onCompare && documents.length >= 2 && (
+        <div className="px-3 pt-3 flex-shrink-0">
+          <button
+            className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-primary text-white text-sm font-medium hover:bg-primary-hover transition-colors disabled:opacity-50 cursor-pointer border-none"
+            onClick={onCompare}
+            disabled={disabled}
+            title="Compare a column across these documents"
+          >
+            <GitCompare size={16} />
+            Compare documents
+          </button>
+        </div>
+      )}
 
       {/* Upload button */}
       <div className="p-3 border-b border-[var(--color-border)] flex-shrink-0">

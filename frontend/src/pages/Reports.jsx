@@ -280,6 +280,7 @@ function Reports() {
                   {[
                     { label:'Total Values',  val: result.total_values||0, icon:'fa-list', cls:'text-primary bg-primary-light' },
                     { label:'Found',         val: result.found_count ?? Object.keys(foundData).length, icon:'fa-check', cls:'text-green-700 bg-green-50' },
+                    { label:'Review',        val: result.likely_count ?? (result.likely_matches?.length||0), icon:'fa-triangle-exclamation', cls:'text-amber-700 bg-amber-50' },
                     { label:'Not Found',     val: result.not_found_count ?? (result.not_found?.length||0), icon:'fa-times', cls:'text-red-700 bg-red-50' },
                     { label:'Match Rate',    val: `${result.match_percentage ?? (result.total_values>0?Math.round(Object.keys(foundData).length/result.total_values*100):0)}%`, icon:'fa-percent', cls:'text-purple-700 bg-purple-50' },
                   ].map(s => (
@@ -307,7 +308,7 @@ function Reports() {
                     <input className="flex-1 bg-transparent text-sm outline-none text-[var(--color-text-primary)]" placeholder="Search values..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
                   </div>
                   <div className="flex rounded-lg border border-[var(--color-border)] overflow-hidden">
-                    {[['found','fa-check-circle',`Found (${Object.keys(foundData).length})`],['not-found','fa-times-circle',`Not Found (${result.not_found?.length||0})`]].map(([id,icon,label]) => (
+                    {[['found','fa-check-circle',`Found (${Object.keys(foundData).length})`],['likely','fa-triangle-exclamation',`Written Differently (${result.likely_matches?.length||0})`],['not-found','fa-times-circle',`Not Found (${result.not_found?.length||0})`]].map(([id,icon,label]) => (
                       <button key={id} className={`px-4 py-2 text-sm font-medium flex items-center gap-1.5 transition-colors ${activeTab===id?'bg-primary text-white':'bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'}`} onClick={() => setActiveTab(id)}>
                         <i className={`fa-solid ${icon}`}></i>{label}
                       </button>
@@ -335,6 +336,41 @@ function Reports() {
                         </div>
                       ))
                   )}
+                  {activeTab === 'likely' && (
+                    <div className="p-4">
+                      <p className="text-sm text-[var(--color-text-secondary)] mb-3">
+                        These were not present word-for-word, but appear in a form that
+                        differs only by spacing, a leading zero, an annotation or a small
+                        typo. They are <strong>not</strong> counted as found — confirm each
+                        before treating it either way.
+                      </p>
+                      {(result.likely_matches || []).length === 0 ? (
+                        <p className="text-sm text-[var(--color-text-muted)]">Nothing needed review.</p>
+                      ) : (
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="text-left text-[var(--color-text-secondary)]">
+                              <th className="py-1.5 pr-3">Value</th>
+                              <th className="py-1.5 pr-3">Found as</th>
+                              <th className="py-1.5 pr-3">Why</th>
+                              <th className="py-1.5">In</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {result.likely_matches.map((m, i) => (
+                              <tr key={i} className="border-t border-[var(--color-border)]">
+                                <td className="py-1.5 pr-3 font-mono text-xs">{m.value}</td>
+                                <td className="py-1.5 pr-3 font-mono text-xs">{m.matched}</td>
+                                <td className="py-1.5 pr-3 text-[var(--color-text-secondary)]">{m.reason}</td>
+                                <td className="py-1.5 text-[var(--color-text-secondary)]">{m.pdf_name}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
+                  )}
+
                   {activeTab === 'not-found' && (
                     filteredNotFound.length === 0
                       ? <div className="py-8 text-center text-[var(--color-text-muted)] text-sm">No matching not-found values</div>

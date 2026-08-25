@@ -34,6 +34,11 @@ urlpatterns = [
     path("api/compare/status/<str:job_id>/", views.compare_status),
     path("api/comparison/confirm-match/", views.confirm_comparison_match, name="confirm_comparison_match"),
     path("api/field-schema/", views.field_schema_view, name="field_schema"),
+    path("api/documents/<str:doc_id>/extraction/", views.document_extraction_view, name="document_extraction"),
+    path("api/comparison/run/", views.run_comparison_view, name="run_comparison"),
+    path("api/decisions/export/", views.export_decisions_view, name="export_decisions"),
+    path("api/decisions/import/", views.import_decisions_view, name="import_decisions"),
+    path("api/decisions/backup/", views.backup_data_view, name="backup_data"),
     path("api/documents/<str:doc_id>/columns/", views.document_columns, name="document_columns"),
 
     # Document Summary Endpoints

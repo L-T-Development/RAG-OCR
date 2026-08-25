@@ -24,6 +24,77 @@ export const api = {
     return { ok: res.ok, data: await res.json() };
   },
 
+  // Decisions a person made — confirmed matches and pinned columns. These are the
+  // only things here that cannot be rebuilt by re-uploading a document.
+  getDecisionsExportUrl() {
+    return `${API_BASE}/decisions/export/`;
+  },
+
+  async importDecisions(payload, { dryRun = true, overwrite = false, applySchema = false } = {}) {
+    const res = await fetch(`${API_BASE}/decisions/import/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        payload, dry_run: dryRun, overwrite, apply_schema: applySchema,
+      }),
+    });
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  async backupData({ includeMedia = true, includeVectors = true } = {}) {
+    const res = await fetch(`${API_BASE}/decisions/backup/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ include_media: includeMedia, include_vectors: includeVectors }),
+    });
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  // Comparison (the wizard — same engine as chat, without the phrasing)
+  async runComparison({ threadId, docIds, column, columnB = null, literal = false, mode = 'columns' }) {
+    const res = await fetch(`${API_BASE}/comparison/run/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        thread_id: threadId, doc_ids: docIds, column,
+        column_b: columnB, literal, mode,
+      }),
+    });
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  // How one document's columns are understood, and pinning them
+  async getDocumentColumns(docId) {
+    const res = await fetch(`${API_BASE}/documents/${docId}/columns/`);
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  async setDocumentColumn(docId, field, header) {
+    const res = await fetch(`${API_BASE}/documents/${docId}/columns/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ field, header }),
+    });
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  async getDocumentExtraction(docId) {
+    const res = await fetch(`${API_BASE}/documents/${docId}/extraction/`);
+    return { ok: res.ok, data: await res.json() };
+  },
+
+  async confirmMatch({ sourceA, sourceB, column, valueA, valueB, threadId = null, note = '' }) {
+    const res = await fetch(`${API_BASE}/comparison/confirm-match/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source_a: sourceA, source_b: sourceB, column,
+        value_a: valueA, value_b: valueB, thread_id: threadId, note,
+      }),
+    });
+    return { ok: res.ok, data: await res.json() };
+  },
+
   // Files
   async getThreadFiles(threadId) {
     if (!threadId || threadId === 'undefined' || threadId === 'null') {

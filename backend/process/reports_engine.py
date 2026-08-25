@@ -8,6 +8,19 @@ Features:
 - Accurate page number detection using PyPDF2
 - Real-time progress updates
 - In-memory Excel report generation
+
+RELATIONSHIP TO THE MAIN COMPARISON ENGINE
+------------------------------------------
+This page compares *ad-hoc uploaded files*, which have no Document rows, no stored
+tables and no mention index — so it cannot use process/comparison.py, which is built
+on those. What it can and now does share is the part that decides whether two strings
+are the same item: `field_schema.is_boilerplate_value` and `pair_likely_values`.
+
+Without them this page called a value **missing** that the chat would have reported as
+a near-match of the very same documents — a wrapped cell (`442 071 820394` vs
+`442 071 820 394`), a leading zero, an annotation suffix — and counted placeholder text
+like "Standard Item" as a real part. Same documents, same question, two different
+answers, and no way to tell which to believe.
 """
 
 import pandas as pd
@@ -38,6 +51,33 @@ def _normalize_for_match(text: str) -> tuple:
     spaced = re.sub(r"\s+", " ", s).strip()
     nospace = re.sub(r"\s+", "", s)
     return spaced, nospace
+
+
+def _target_vocabulary(pdf_path: str) -> set:
+    """
+    Every identifier-shaped token in a PDF's text.
+
+    The near-match rules work value-to-value, so a value that is not present verbatim
+    needs something to be compared *against*. This is the same token extraction the
+    mention index uses, read straight from the file since these uploads are never
+    ingested.
+    """
+    try:
+        import fitz
+        from process.mentions import extract_identifiers, norm_forms
+    except Exception:
+        return set()
+    vocab = set()
+    try:
+        with fitz.open(pdf_path) as doc:
+            for page in doc:
+                for token in extract_identifiers(page.get_text("text") or ""):
+                    n, _ = norm_forms(token)
+                    if n:
+                        vocab.add(n)
+    except Exception as e:
+        log_progress(f"   (could not read {Path(pdf_path).name} for near-matches: {e})")
+    return vocab
 
 
 def _contains_value(haystack_spaced: str, haystack_nospace: str, needle: str) -> bool:
@@ -454,7 +494,17 @@ class MultiPDFComparator:
         self._log(f"   Source: {source_name}")
         
         search_values = self.comparator.extract_values_from_file(source_file, column_name)
+
+        # Placeholder designations ("Standard Item", "N/A", footnote markers) are not
+        # part identifiers, so reporting them as missing is noise. Excluded up front,
+        # exactly as the main comparison engine does.
+        from process.field_schema import is_boilerplate_value, pair_likely_values
+        excluded = {v for v in search_values if is_boilerplate_value(v)}
+        search_values = set(search_values) - excluded
         total_values = len(search_values)
+        if excluded:
+            self._log(f"   ⊘ {len(excluded)} placeholder value(s) excluded "
+                      f"(e.g. {sorted(excluded)[:3]})")
         
         if total_values == 0:
             self._log("✗ No values found!")
@@ -504,6 +554,28 @@ class MultiPDFComparator:
                 'found': found_in_pdf
             })
         
+        # Anything still missing gets the same second look the chat comparison gives
+        # it: is this value present in a form that differs only by spacing, a leading
+        # zero, an annotation, or a one-character typo in a word? Reported as its own
+        # reviewable tier — never silently counted as found.
+        likely_matches = []
+        if still_not_found:
+            self._log(f"\n🔎 Re-checking {len(still_not_found)} unmatched value(s) "
+                      f"for known formatting differences")
+            for pdf_file in pdf_files:
+                if not still_not_found:
+                    break
+                vocab = _target_vocabulary(pdf_file)
+                if not vocab:
+                    continue
+                for a, b, reason in pair_likely_values(set(still_not_found), vocab):
+                    likely_matches.append({'value': a, 'matched': b, 'reason': reason,
+                                           'pdf_name': Path(pdf_file).name})
+                    still_not_found.discard(a)
+            if likely_matches:
+                self._log(f"   ⚠️ {len(likely_matches)} value(s) found in a different "
+                          f"form — listed for review, not counted as matches")
+
         # Summary
         total_found = len(all_found)
         total_not_found = len(still_not_found)
@@ -531,6 +603,10 @@ class MultiPDFComparator:
             'found_count': total_found,
             'not_found_count': total_not_found,
             'match_percentage': round(match_pct, 2),
+            'likely_matches': likely_matches,
+            'likely_count': len(likely_matches),
+            'excluded': sorted(excluded),
+            'excluded_count': len(excluded),
             'pdf_results': pdf_results,
             'timestamp': datetime.now().isoformat()
         }
@@ -606,6 +682,22 @@ class MultiPDFComparator:
                 'Status': ['✗ Not Found'] * len(not_found_list)
             }) if not_found_list else pd.DataFrame()
             
+            # Values found only in a different form — reviewable, never counted
+            # as matches. Same rules and wording as the chat comparison.
+            likely = result.get('likely_matches', []) or []
+            df_likely = pd.DataFrame([{
+                'Value': item['value'],
+                'Found As': item['matched'],
+                'Why': item['reason'],
+                'PDF File': item.get('pdf_name', ''),
+            } for item in likely]) if likely else pd.DataFrame()
+
+            excluded_list = result.get('excluded', []) or []
+            df_excluded = pd.DataFrame({
+                'Value': list(excluded_list),
+                'Reason': ['Placeholder text, not a part identifier'] * len(excluded_list),
+            }) if excluded_list else pd.DataFrame()
+
             # Write to Excel with formatting
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df_summary.to_excel(writer, sheet_name='Summary', index=False)
@@ -613,8 +705,14 @@ class MultiPDFComparator:
                     df_pdf_summary.to_excel(writer, sheet_name='PDF Summary', index=False)
                 if not df_found.empty:
                     df_found.to_excel(writer, sheet_name='Found Values', index=False)
+                if not df_likely.empty:
+                    df_likely.to_excel(writer, sheet_name='Review - Written Differently',
+                                       index=False)
                 if not df_not_found.empty:
                     df_not_found.to_excel(writer, sheet_name='Not Found', index=False)
+                if not df_excluded.empty:
+                    df_excluded.to_excel(writer, sheet_name='Excluded Placeholders',
+                                         index=False)
                 
                 # Style workbook
                 workbook = writer.book

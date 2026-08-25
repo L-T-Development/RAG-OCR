@@ -223,6 +223,10 @@ def get_thread_files(request, thread_id):
     file_list = [{
         'id': str(d.id),
         'name': d.filename,
+        # `filename` and `status` are what every newer caller uses (the comparison
+        # wizard among them); `name` stays for the existing document panel.
+        'filename': d.filename,
+        'status': d.status,
         'url': d.file.url,
         'category': d.category if hasattr(d, 'category') else 'other',
         'category_label': dict(d.CATEGORY_CHOICES).get(d.category, 'Other') if hasattr(d, 'category') else 'Other',
@@ -469,56 +473,23 @@ def chat_thread(request, thread_id):
                         import traceback
                         traceback.print_exc()
             
-            # Detect comparison query
-            is_comparison = any(keyword in query_lower for keyword in [
-                'compare', 'comparison', 'difference', 'differences', 'common',
-                'not in', 'missing', 'match between', 'vs', 'versus',
-                'found or not found', 'present or not', 'present/not', 'between', 'presence of'
-            ])
-
-            # Strict assessment mode: if user explicitly asks DRG/part presence between two PDFs,
-            # force deterministic comparison flow instead of narrative RAG fallback.
+            # Is this a comparison, and of what? One parse (process/intent.py)
+            # replaces the four overlapping keyword blocks that used to live here —
+            # a comparison list, a "strict assessment" rule, a mention-phrase rule
+            # and an assessment-terms rule, each added to catch a phrasing that had
+            # failed, and none of them agreeing with the other router.
             import re
-            pdf_mentions = re.findall(r'([\w\-. ]+\.pdf)', query, re.IGNORECASE)
-            strict_assessment_query = (
-                len(set(m.strip().lower() for m in pdf_mentions)) >= 2
-                and any(t in query_lower for t in ['drg', 'drawing', 'dwg', 'part', 'nsn'])
-                and any(t in query_lower for t in ['compare', 'between', 'present', 'found', 'assessment', 'confirm', 'whether'])
-            )
+            from process.intent import parse as parse_intent
+            _in_scope = list(_cmp.documents_in_scope(thread).values_list('filename', flat=True))
+            cmp_intent = parse_intent(query, available_files=_in_scope,
+                                      doc_count=len(_in_scope))
+            is_comparison = cmp_intent.is_comparison
+            # Kept for the guard below: when the user clearly pointed at documents,
+            # a failed comparison must say so rather than fall back to a narrative.
+            strict_assessment_query = is_comparison and (
+                cmp_intent.named_two_files or cmp_intent.all_files)
+            print(f"[ROUTING] {cmp_intent.describe()}")
 
-            if strict_assessment_query:
-                is_comparison = True
-
-            # Mention-style intent: "are all the part numbers in A mentioned
-            # anywhere in B / the manual". None of the words above appear, but this
-            # is a comparison — of a column against another document's whole text
-            # (process/comparison.py text mode), not a table-search for one value.
-            if not is_comparison and _cmp.wants_text_mode(query):
-                if len(_cmp.mentioned_files(query)) >= 2 or (
-                    any(t in query_lower for t in ['drg', 'drawing', 'dwg', 'part', 'nsn',
-                                                   'nomenclature', 'spare'])
-                    and _cmp.documents_in_scope(thread).count() >= 2
-                ):
-                    is_comparison = True
-
-            # Assessment-style intent: "confirm whether X is in there or not" across 2 PDFs
-            if not is_comparison:
-                assessment_terms = [
-                    'assessment', 'assess', 'confirm', 'whether', 'in there or not',
-                    'found or not', 'present or not', 'exists or not'
-                ]
-                domain_terms = ['drg', 'drawing', 'dwg', 'part', 'nsn', 'nomenclature']
-                if any(t in query_lower for t in assessment_terms) and any(t in query_lower for t in domain_terms):
-                    ancestor_ids = get_ancestor_thread_ids(thread)
-                    if ancestor_ids:
-                        pdf_count = Document.objects.filter(
-                            Q(thread=thread) | Q(thread_id__in=ancestor_ids),
-                            filename__iendswith='.pdf'
-                        ).count()
-                    else:
-                        pdf_count = Document.objects.filter(thread=thread, filename__iendswith='.pdf').count()
-                    if pdf_count >= 2:
-                        is_comparison = True
             
             if table_search_result:
                 # Already resolved above (e.g. a confirm-match command) — the
@@ -527,7 +498,7 @@ def chat_thread(request, thread_id):
                 pass
             elif is_comparison:
                 # Extract comparison details
-                comparison_result = _extract_comparison_info(query, thread)
+                comparison_result = _extract_comparison_info(query, thread, intent=cmp_intent)
 
                 # Retry once with explicit intent to help natural-language queries route correctly
                 if not comparison_result and strict_assessment_query:
@@ -1045,7 +1016,7 @@ def _extract_confirm_match_info(query: str, thread) -> Optional[dict]:
     }
 
 
-def _extract_comparison_info(query: str, thread) -> Optional[dict]:
+def _extract_comparison_info(query: str, thread, intent=None) -> Optional[dict]:
     """
     Extract comparison parameters from natural language query.
     
@@ -1059,101 +1030,30 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
     """
     
     query_lower = query.lower()
-    
-    # Determine comparison type
-    if any(kw in query_lower for kw in [
-        'present or not', 'present/not', 'found or not found', 'found or not',
-        'similar', 'similarity', 'same', 'assessment', 'assess', 'confirm',
-        'whether', 'in there or not', 'exists or not'
-    ]):
-        comparison_type = 'all'
-    elif any(kw in query_lower for kw in ['difference', 'not in', 'missing', 'only in']):
-        comparison_type = 'difference'
-    elif any(kw in query_lower for kw in ['common', 'both', 'shared', 'in both']):
-        comparison_type = 'common'
-    elif any(kw in query_lower for kw in ['unique', 'unique to each', 'each']):
-        comparison_type = 'unique_both'
-    elif 'all' in query_lower or 'complete' in query_lower:
-        comparison_type = 'all'
-    else:
-        # For generic "compare X between A and B" queries, users typically expect
-        # full two-way assessment: common + missing on both sides.
-        comparison_type = 'all'
-    
-    # Extract column name
-    column_keywords = {
-        'part': ['part number', 'part no', 'p/n', 'part'],
-        'drg': ['drawing number', 'drg', 'drg no', 'drg. no', 'drawing no', 'dwg'],
-        'nomenclature': ['nomenclature', 'name', 'description'],
-        'nsn': ['nsn', 'national stock']
-    }
-    
-    # Quoted column names, e.g.
-    #   compare "Firms Part No." column in @a.pdf with "Part No" column in @b.pdf
-    # The user named the headers outright, so take them verbatim — the keyword
-    # buckets below would collapse both to the single concept "part" and lose the
-    # distinction. Two quoted names map one per file, in the order given.
-    quoted_columns = [
-        q.strip() for q in re.findall(r'["“”]([^"“”]{2,60})["“”]', query)
-    ]
-    quoted_columns = [q for q in quoted_columns if q and not q.lower().endswith('.pdf')]
 
-    column_name = None
-    for col_type, keywords in column_keywords.items():
-        if any(kw in query_lower for kw in keywords):
-            column_name = col_type
-            break
+    # Everything about *what* to compare comes from one parse (process/intent.py).
+    # This function used to re-derive it with its own comparison-type list, its own
+    # column keywords and its own quoted-name regex — a second opinion that could
+    # disagree with the router which had just decided this was a comparison.
+    from process.intent import parse as parse_intent
+    if intent is None:
+        _names = list(_cmp.documents_in_scope(thread).values_list('filename', flat=True))
+        intent = parse_intent(query, available_files=_names, doc_count=len(_names))
 
-    # Generic column parsing for queries like:
-    # "compare firm part no between ..." or "compare column unit price ..."
-    if not column_name:
-        generic_patterns = [
-            r'compare\s+column\s+([a-z0-9\s\./#_-]{2,80}?)\s+(?:between|in|for)\b',
-            r'compare\s+([a-z0-9\s\./#_-]{2,80}?)\s+(?:between|in|for)\b',
-            r'(?:check|assess|confirm)\s+([a-z0-9\s\./#_-]{2,80}?)\s+(?:present|found|between)\b',
-        ]
-        for pattern in generic_patterns:
-            m = re.search(pattern, query_lower)
-            if not m:
-                continue
-            candidate = m.group(1).strip(" .:-_")
-            candidate = re.sub(r'\b(present|found|or|not|whether|exists|existence)\b', ' ', candidate)
-            candidate = re.sub(r'\s+', ' ', candidate).strip()
-            if len(candidate) >= 2 and candidate not in {'the', 'all', 'values', 'value', 'items', 'item'}:
-                column_name = candidate
-                break
-    
-    if not column_name:
-        column_name = 'part'  # Backward-compatible default
+    comparison_type = intent.comparison_type
+    prefer_literal = intent.prefer_literal
+    match_any_column_in_pdf2 = intent.match_any_column
+    column_name = intent.concept
+    column_name_pdf1 = intent.columns[0] or intent.concept
+    column_name_pdf2 = intent.columns[1]
 
-    # Optional cross-column mapping (file1 column -> file2 column)
-    # Example: MRLS "manufacturer part no" vs ISPL "drg no"
-    column_name_pdf1 = column_name
-    column_name_pdf2 = None
-
-    if 'manufacturer part no' in query_lower and any(k in query_lower for k in ['drg', 'drawing', 'dwg']):
+    # One legacy cross-column mapping: an MRLS part number against an ISPL drawing
+    # number. No single concept word can express it, because the two sides differ.
+    if (not intent.prefer_literal and 'manufacturer part no' in query_lower
+            and any(k in query_lower for k in ('drg', 'drawing', 'dwg'))):
         column_name_pdf1 = 'manufacturer part no'
         column_name_pdf2 = 'drg'
 
-    # Quoted names override every guess above, and switch column resolution to
-    # literal matching so the named header cannot be redirected to a different
-    # column of the same canonical field.
-    prefer_literal = bool(quoted_columns)
-    if quoted_columns:
-        column_name = quoted_columns[0]
-        column_name_pdf1 = quoted_columns[0]
-        column_name_pdf2 = quoted_columns[1] if len(quoted_columns) > 1 else None
-
-    # Natural language mode: compare source column against ANY target column in second file.
-    # Examples: "compare this column with contents", "match to any column of other pdf"
-    match_any_column_in_pdf2 = any(
-        phrase in query_lower
-        for phrase in [
-            'any column', 'to any column', 'with contents', 'against contents',
-            'match in any column', 'compare this column'
-        ]
-    )
-    
     # Table-bearing documents in scope (thread + inherited): PDFs, and also
     # xlsx/xls/docx — those have ExtractedTable rows too and compare via the DB.
     docs = _cmp.documents_in_scope(thread)
@@ -1169,8 +1069,28 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
     # Priority 0: Explicit @filename references in query (any table-bearing
     # extension; a bare "ISPL_Vol-I.pdf" without @ also counts).
     mentioned_files = _cmp.mentioned_files(query)
-    if len(mentioned_files) >= 2:
+    if mentioned_files:
         resolved_docs = _cmp.resolve_documents(thread, mentioned_files)
+
+        # A file the user named but we cannot find must be said out loud. Falling
+        # through to the "just use the first two documents" rule below would answer
+        # a different question than the one asked, and look completely authoritative
+        # doing it — the worst failure this report can have.
+        if len(resolved_docs) < len(mentioned_files):
+            found_names = {d.filename.lower() for d in resolved_docs}
+            unresolved = [f for f in mentioned_files
+                          if not any(f.lower() == n or f.lower() in n for n in found_names)]
+            in_scope = [d.filename for d in _cmp.documents_in_scope(thread)]
+            return {
+                'found': True,
+                'formatted_answer': (
+                    "## ❌ File Not Found in This Thread\n\n"
+                    "I could not find: " + ", ".join(f"`{f}`" for f in unresolved) + "\n\n"
+                    + ("**Available here:** " + ", ".join(f"`{n}`" for n in in_scope)
+                       if in_scope else "No documents with tables are uploaded in this thread yet.")
+                    + "\n\nCheck the spelling, or upload the file and let it finish processing."
+                ),
+            }
 
         if len(resolved_docs) >= 3:
             # N-way: first named file is the source, the rest are targets. This
@@ -1179,7 +1099,7 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
                 return _cmp.run_comparison(
                     thread, resolved_docs, column_name_pdf1,
                     prefer_literal=prefer_literal, requested_label=column_name,
-                    text_mode=_cmp.wants_text_mode(query),
+                    text_mode=(intent.mode == "mentions"),
                 )
             except Exception as e:
                 print(f"[COMPARISON] multi-file error: {e}")
@@ -1258,7 +1178,7 @@ def _extract_comparison_info(query: str, thread) -> Optional[dict]:
             match_any_column_in_b=match_any_column_in_pdf2,
             prefer_literal=prefer_literal,
             requested_label=requested,
-            text_mode=_cmp.wants_text_mode(query),
+            text_mode=(intent.mode == "mentions"),
         )
     except Exception as e:
         print(f"[COMPARISON] Error: {e}")
@@ -1895,6 +1815,249 @@ def field_schema_view(request):
     """
     from .field_schema import effective_schema
     return JsonResponse(effective_schema())
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def document_extraction_view(request, doc_id):
+    """
+    How well this document was read: pages that carry no text layer (and whether
+    they are scans or blanks), how many tables were extracted, how many lost their
+    header row, which concepts resolve to which real column, and plain-English
+    warnings for anything that will not be findable.
+
+    Worth checking BEFORE trusting a "missing parts" list.
+    """
+    from .extraction_qa import document_qa
+    doc = get_object_or_404(Document, id=doc_id)
+    return JsonResponse(document_qa(doc))
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def export_decisions_view(request):
+    """
+    Download every decision a person has made here — confirmed matches, pinned
+    columns, and the schema override — as one JSON file.
+
+    These are the only things in the system that cannot be rebuilt by re-uploading
+    a document, and they live in a single SQLite file on one desktop.
+    `?thread=<id>` narrows it; `?download=0` returns it inline instead.
+    """
+    from .portability import export_decisions, summarize
+    payload = export_decisions(thread_id=request.GET.get("thread"))
+
+    if request.GET.get("download") == "0":
+        return JsonResponse(payload)
+
+    from django.http import HttpResponse
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    response = HttpResponse(json.dumps(payload, indent=2, ensure_ascii=False),
+                            content_type="application/json")
+    response["Content-Disposition"] = f'attachment; filename="ragocr_decisions_{stamp}.json"'
+    print(f"[PORTABILITY] exported {summarize(payload)}")
+    return response
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def import_decisions_view(request):
+    """
+    Merge an exported decisions file into this install.
+
+    Additive: an existing decision is kept unless `overwrite` is set. Send
+    `dry_run` first — the response then describes exactly what a real run would
+    change, including documents this machine does not have yet.
+
+    Accepts the JSON directly, or a multipart upload under `file`.
+    """
+    from .portability import import_decisions
+
+    payload = None
+    upload = request.FILES.get("file")
+    if upload:
+        try:
+            payload = json.loads(upload.read().decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            return JsonResponse({"error": f"That file is not valid JSON: {e}"}, status=400)
+        options = request.POST
+    else:
+        try:
+            body = json.loads(request.body or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return JsonResponse({"error": "Invalid JSON body"}, status=400)
+        payload = body.get("payload", body)
+        options = body
+
+    def flag(name):
+        value = options.get(name)
+        return str(value).lower() in ("1", "true", "yes", "on") if value is not None else False
+
+    report = import_decisions(payload, dry_run=flag("dry_run"),
+                              overwrite=flag("overwrite"),
+                              apply_schema=flag("apply_schema"))
+    return JsonResponse(report, status=200 if report.get("ok") else 400)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def backup_data_view(request):
+    """
+    Zip this install's data directory — database, uploads, vectors, schema
+    override — and report where it landed.
+
+    POST {out?, include_media?, include_vectors?}. Leaving the uploads and vectors
+    out gives a small backup that still contains everything irreplaceable, since
+    both can be rebuilt from the original documents.
+    """
+    from .portability import backup_data_dir
+    try:
+        body = json.loads(request.body or "{}")
+    except (json.JSONDecodeError, TypeError):
+        body = {}
+    result = backup_data_dir(
+        body.get("out"),
+        include_media=body.get("include_media", True),
+        include_vectors=body.get("include_vectors", True),
+    )
+    return JsonResponse(result, status=200 if result.get("ok") else 400)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def run_comparison_view(request):
+    """
+    Run a comparison directly, without going through chat.
+
+    The chat router has to *guess* what was meant from a sentence. A UI already
+    knows, so it says so: which documents, which concept, which mode. Same engine
+    (process/comparison.py), same rules, same Excel report — no phrasing involved.
+
+    POST {
+      thread_id:  required
+      doc_ids:    [id, ...]     2+ documents; the first is the source
+      column:     "part"        a concept, or a real header with literal=true
+      column_b:   optional      a real header in the second document
+      literal:    bool          treat column/column_b as exact header names
+      mode:       "columns" | "mentions"
+    }
+    """
+    try:
+        data = json.loads(request.body or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+
+    thread_id = data.get("thread_id")
+    doc_ids = data.get("doc_ids") or []
+    if not thread_id:
+        return JsonResponse({"error": "thread_id is required"}, status=400)
+    if len(doc_ids) < 2:
+        return JsonResponse({"error": "Pick at least two documents to compare"}, status=400)
+
+    thread = get_object_or_404(Thread, id=thread_id)
+    in_scope = {str(d.id): d for d in _cmp.documents_in_scope(thread)}
+    docs, unknown = [], []
+    for raw in doc_ids:
+        key = str(raw).replace("-", "")
+        match = next((d for k, d in in_scope.items() if k.replace("-", "") == key), None)
+        (docs.append(match) if match else unknown.append(str(raw)))
+    if unknown:
+        return JsonResponse(
+            {"error": f"Not in this thread: {', '.join(unknown)}"}, status=400)
+
+    column = (data.get("column") or "part").strip()
+    try:
+        result = _cmp.run_comparison(
+            thread, docs, column,
+            column_b=(data.get("column_b") or None),
+            prefer_literal=bool(data.get("literal")),
+            text_mode=(data.get("mode") == "mentions"),
+        )
+    except Exception as e:
+        print(f"[COMPARISON API] {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({"error": f"{type(e).__name__}: {e}"}, status=500)
+
+    if not result or not result.get("found"):
+        return JsonResponse({"error": "Comparison could not be completed"}, status=422)
+
+    return JsonResponse({
+        "answer": result.get("formatted_answer", ""),
+        "report_job_id": result.get("report_job_id"),
+        "mode": "mentions" if result.get("mode") == "text" else "columns",
+        "column": result.get("column"),
+        # Which tables actually answered: "db" = the stored ExtractedTable rows,
+        # "file" = the PDF was re-read because the stored ones could not supply the
+        # column. The two can yield DIFFERENT headers for the same document, so a
+        # caller previewing columns from the database must say when this happened.
+        "engine_path": result.get("engine_path"),
+        "documents": [{"id": str(d.id), "filename": d.filename, "category": d.category}
+                      for d in docs],
+        "summary": _comparison_summary(result),
+        "warnings": [w for d in docs for w in _extraction_warnings_for(d)],
+    })
+
+
+def _extraction_warnings_for(document):
+    try:
+        from .extraction_qa import warnings_for
+        return warnings_for(document)
+    except Exception:
+        return []
+
+
+def _comparison_summary(result):
+    """The counts a UI needs, flattened out of whichever shape the engine returned."""
+    if result.get("mode") == "text":
+        per = result.get("per_target", {})
+        return {
+            "kind": "mentions",
+            "source_total": result.get("source_total", 0),
+            "mentioned_everywhere": len(result.get("found_everywhere", [])),
+            "variant_matches": len(result.get("near_anywhere", [])),
+            "partial": len(result.get("partial", [])),
+            "missing_everywhere": len(result.get("missing_everywhere", [])),
+            "missing_values": result.get("missing_everywhere", [])[:500],
+            "per_document": per,
+        }
+    if "matrix" in result:
+        return {
+            "kind": "matrix",
+            "source_total": result.get("source_total", 0),
+            "present_everywhere": len(result.get("present_everywhere", [])),
+            "partial": len(result.get("partial", [])),
+            "missing_everywhere": len(result.get("missing_everywhere", [])),
+            "missing_values": result.get("missing_everywhere", [])[:500],
+            "per_document": result.get("per_target", {}),
+        }
+    res = result.get("results", {})
+
+    def _bucket(name):
+        b = res.get(name, {}) or {}
+        return {"count": b.get("count", 0), "values": (b.get("values") or [])[:500]}
+
+    return {
+        "kind": "pairwise",
+        "source_total": result.get("pdf1_total", 0),
+        "target_total": result.get("pdf2_total", 0),
+        "common": _bucket("common"),
+        "missing": _bucket("in_pdf1_only"),
+        "extra": _bucket("in_pdf2_only"),
+        "excluded": _bucket("excluded"),
+        "likely": {
+            "count": res.get("likely_matches", {}).get("count", 0),
+            "pairs": res.get("likely_matches", {}).get("pairs", [])[:500],
+        },
+        "confirmed": {
+            "count": res.get("confirmed_matches", {}).get("count", 0),
+            "pairs": res.get("confirmed_matches", {}).get("pairs", [])[:500],
+        },
+        "modified": {
+            "count": res.get("modified", {}).get("count", 0),
+            "items": res.get("modified", {}).get("items", [])[:500],
+        },
+    }
 
 
 
@@ -3065,8 +3228,13 @@ def download_report(request, job_id):
     report = _comparison_reports.get(job_id)
     
     if not report:
-        # Fallback to old report system
-        from .reports_engine_merge import get_report_job_status, get_report_excel_bytes
+        # ...and Reports-page jobs live in reports_engine's own store.
+        #
+        # This used to import the two lookups from `reports_engine_merge`, a
+        # near-duplicate module with its own (always empty) job dict, shadowing the
+        # module-level imports from `reports_engine` where jobs are actually
+        # registered — so every Reports-page download returned 404. The duplicate
+        # module has been deleted.
         job = get_report_job_status(job_id)
         
         if not job:

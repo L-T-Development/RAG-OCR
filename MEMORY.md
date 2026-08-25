@@ -35,14 +35,15 @@ That splits into four hard requirements, and this document tracks them:
 | 1.2 | Value-shape column detection | ⚠️ **advisory only, by design** (§1.2) |
 | 2.1 | Per-document pinned column roles + API + chat command | ✅ done |
 | 2.2 | Row-level diff — "same part, different details" | ✅ done |
-| 2.3 | Comparison wizard UI on the Workspace page | ❌ not started |
-| 2.4 | Structured comparison intent parser | ❌ not started |
+| 2.3 | **Comparison wizard** — pick documents, review the columns, run, export | ✅ done |
+| 2.4 | **Structured intent parser** — one parse replaces both routers' keyword lists | ✅ done |
 | 2.5 | Whitespace-tolerant value matching | ✅ done |
 | 2.6 | Ingestion performance — 405 s → 165 s on a 582-page file | ✅ done |
-| 3.1 | **Regression suite in the repo** | ❌ **← next step** |
-| 3.2 | Extraction QA surfaced per document | ❌ not started |
+| 3.1 | **Regression suite in the repo** — 107 tests, `manage.py test process` | ✅ done |
+| 3.2 | **Extraction QA** — warns on the comparison itself when a document could not be read | ✅ done |
 | 3.3 | Real OCR | ❌ not started |
-| 3.4 | Reports page unification | ❌ not started |
+| 3.4 | **Reports page** — same value rules as chat; duplicate engine deleted | ✅ done |
+| 4.1 | **Portability** — export/import your corrections, back up the install | ✅ done |
 
 **What is working today:** every comparison question — column vs column, one file vs
 many, column vs a manual's full text, quantity/description discrepancies — through one
@@ -50,11 +51,23 @@ engine, with per-document column pinning and human-confirmed aliases, and an Exc
 for each.
 
 **What is missing:** no UI for any of it beyond chat (2.3), phrasing still matters at the
-edges (2.4), and — most urgently — **none of it is protected by tests in the repo (3.1)**.
+edges (2.4), scanned documents produce nothing at all (3.3), and the Reports page still
+runs its own weaker comparison (3.4).
 
-**Recommended next step: 3.1.** Four phases of behaviour are currently guarded only by
-throwaway scripts in a temporary session scratchpad. See Phase 3 for exactly what they
-cover and must be rebuilt as.
+**Nothing substantive is outstanding.** 3.3 (OCR) is the only unbuilt roadmap item, and
+the corpus measurement demoted it to 0.4% of pages — re-check on the deployed machine with
+`manage.py extraction_report --problems` before spending anything on it.
+
+Deployment is **single-user Electron**, not Docker: the packaged app under
+`standalone-launcher/` is the product, `%APPDATA%\RAG-OCR\data` is the real data home,
+and the Docker single-worker fix (§0.4), while correct, is moot in practice.
+
+OCR was the earlier recommendation and the measurement overturned it: **38 of 10,399
+pages (0.4%) have no text layer**, and every MRLS/ISPL spares list has a complete one.
+The only real scanned content is 11 pages of one SOP. What is missing is not OCR but
+*knowing* when a document is unreadable — hence 3.2, which is cheap and tells you whether
+3.3 is ever worth doing. Re-run the check on the deployed machine before deciding, since
+this measures only the corpus on the dev box.
 
 ---
 
@@ -152,12 +165,11 @@ document. Do not promote it to auto-selection without a stronger signal.
 
 ---
 
-## Phase 2 — Corrections & discrepancies 🟡 PARTIALLY COMPLETE (2026-08-21)
+## Phase 2 — Corrections & discrepancies ✅ COMPLETE (2026-08-21)
 
-**Done:** 2.1 column roles · 2.2 row-level diff · 2.5 whitespace matching · 2.6 ingestion performance.  
-**Remaining:** 2.3 wizard UI · 2.4 intent parser.
+**All done:** 2.1 column roles · 2.2 row-level diff · 2.3 wizard UI · 2.4 intent parser · 2.5 whitespace matching · 2.6 ingestion performance.
 
-### 2.1 Per-document column roles ✅ DONE (backend + API + chat command; no UI panel yet)
+### 2.1 Per-document column roles ✅ DONE (backend + API + chat command; UI in §2.3)
 `backend/process/column_roles.py` + model `ColumnRole` (migration `0013`, additive).
 
 A person who has read the document can pin what a column means, **once**, instead of
@@ -205,17 +217,80 @@ Getting this to be signal rather than noise was the whole job. First cut flagged
 The 2 that survive on the NAMICA pair are real: `S067327-LC-001` described as
 `PKT sight` vs `Night Sight`, and `XL60120` losing its motor specification.
 
-### 2.3 Comparison wizard on the Workspace page ❌ NOT DONE
-Pick documents (or "all") → review each document's detected columns (editable, using the
-`/columns/` API above) → run → tabbed results with "confirm match" buttons (that endpoint
-already exists) → Excel. **All the backend it needs is now in place**; this is frontend
-work in `frontend/src/pages/Workspace.jsx` plus a column-mapping panel in the document
-sidebar.
+### 2.3 Comparison wizard ✅ DONE (2026-08-21)
+`frontend/src/components/workspace/ComparePanel.jsx` (+ `.css`), opened by a **Compare
+documents** button that appears in the document panel once a thread holds two files.
+Backed by a new `POST /api/comparison/run/`.
 
-### 2.4 Structured comparison intent parser ❌ NOT DONE
-Replace the keyword lists with an explicit parse: files (or "all"), concept, direction,
-mode (present / count / diff). Deterministic first, local LLM → JSON only when ambiguous.
-Would kill the remaining "use this exact phrasing" failure mode.
+Three steps, in the order the decisions actually happen:
+
+1. **Pick documents** — checkboxes over the thread's documents (inherited ones included);
+   the first ticked is the source.
+2. **What to compare** — a concept (part number / drawing / NSN / description / quantity)
+   and a mode (*the same column in each document* or *anywhere in the text*, for manuals).
+   Then the part that matters: **the real column each document will be read from**, shown
+   with a badge saying whether that was the schema's choice or a human's, and editable
+   from a dropdown of that document's actual headers. Changing it writes a `ColumnRole`
+   (§2.1), so the correction sticks for that document.
+3. **Result** — count tiles that double as tabs (missing · written differently · details
+   differ · matched · only in target), the extraction warnings from §3.2, the full written
+   report in a disclosure, and the Excel download.
+
+`POST /api/comparison/run/` exists because the chat router has to *guess* the intent from
+a sentence, and a UI already knows it. Same engine, same rules, same Excel — no phrasing.
+It returns flattened counts for whichever shape came back (pairwise, N-way matrix, or
+mention check), the resolved column label, extraction warnings, and the report id.
+Eight tests cover it, including that a document outside the thread is refused.
+
+**Two bugs fell out of building it:**
+
+- The files endpoint returns `name`, with no `status` — the panel had been written
+  against `filename`, so it would have listed rows with blank names. The endpoint now
+  returns `filename` and `status` as well (`name` kept for the existing panel), and the
+  component accepts either.
+- **The preview could disagree with the comparison.** The column preview reads the
+  *stored* tables; when those cannot supply the column, the engine falls back to re-reading
+  the PDF, which can extract different headers — on the real SSBS pair the preview said
+  `PART. NO` while the comparison actually used `FIRMS PART NO.`. The response now carries
+  `engine_path` (`db` / `file`) and the panel says, next to the column it actually read,
+  when the PDF was re-read and why the preview may differ. Showing a column that is not the
+  one used is precisely the failure this panel exists to prevent.
+
+Verified end to end against the real dev database: files list → per-document columns →
+comparison (44 matched / 5 near / 3 details differ / 61 missing / 699 extra) → a 73 KB
+Excel that downloads.
+
+### 2.4 Structured intent parser ✅ DONE (2026-08-21)
+`backend/process/intent.py` — one `parse(query, available_files, doc_count)` returning
+what the question asks for: which documents (or *all* of them), which concept, quoted
+columns if the user named them, the mode (columns vs mentions), the kind of answer, and
+**the evidence it used**.
+
+It replaces four overlapping keyword blocks in `views.chat_thread` (a 17-word comparison
+list, a "strict assessment" rule, a mention-phrase rule, an assessment-terms rule), the
+whole parsing half of `_extract_comparison_info` (**96 lines** of a second comparison-type
+list, its own column keywords and its own quoted-name regex), and Router 2's
+`_is_compare_query` / `_COL_KEYWORDS` / `_resolve_column` / `_QUOTED_COL_RE`. Both routers
+now reach the same conclusion for the same sentence, by construction.
+
+Two properties worth keeping:
+
+- **The concept vocabulary is the schema's.** `_find_concept` scans
+  `field_schema.CANONICAL_FIELDS`, so teaching `field_schema.json` a new word for "part"
+  teaches the router too — there is no second list to update. Matching is whole-word, so
+  "partial" is not "part".
+- **Routing is explainable.** Every decision carries its evidence and is logged:
+  `[ROUTING] comparison=True concept='part no' mode=columns type=all files=[…]
+  because[2 file(s) named, concept=part_no, says 'compare']`.
+
+An LLM pass for ambiguous questions was considered and **left out**: it would make routing
+non-reproducible and slow, and the wizard (§2.3) now covers the case where words fail by
+letting someone point at the documents instead.
+
+Verified by a corpus of 12 phrasings that must route to a comparison (including
+`cross-check the nsn against all the documents` and `reconcile part numbers across every
+document`, neither of which worked before) and 7 ordinary questions that must **not** —
+plus the same phrasings run against the real database through the live chat endpoint.
 
 ### 2.5 Whitespace-tolerant value matching ✅ DONE — *from a user report*
 A catalogue number that wraps inside its cell comes back as `442 071 820394` from one
@@ -279,39 +354,158 @@ on documents that are mostly prose.
 
 ---
 
-## Phase 3 — Trust & coverage ❌ NOT STARTED
+## Phase 4 — Durability (beyond the original roadmap)
 
-### 3.1 is the next thing to build — here is what it must cover
+### 4.1 Portability of the corrections ✅ DONE (2026-08-21)
+`backend/process/portability.py`, `manage.py decisions`, three endpoints, and a
+**Your corrections** panel in Settings.
 
-`backend/process/tests.py` is still 3 lines. Everything in Phases 0–2 is verified only by
-scripts in a **temporary** session scratchpad, which will not survive. They must be
-rewritten as Django tests with **self-contained fixtures** — not real PDFs, because the
-source files for the original baselines have already been deleted from `backend/pdfs/`
-once during development (see *Environment drift* below).
+Everything here can be rebuilt by re-uploading a document — tables, embeddings, the
+mention index — *except* two things, because they are judgments someone made while
+reading: `ConfirmedMatch` ("these two part numbers are the same item") and `ColumnRole`
+("in THIS ISPL the part column is Firms Part No."), plus the `field_schema.json` override.
+They accumulate, they get more valuable with use, and they lived in exactly one SQLite
+file on one desktop with no export and no backup.
 
-| Harness (scratchpad) | What it proves | Rebuild as |
+**Export is keyed by filename, never by document id.** `ColumnRole.doc_id` is a UUID
+minted at upload, so the same PDF has a different id on every install; exporting it would
+produce a file that silently applies to nothing. The import resolves the filename against
+whatever that machine calls the same document, and applies to every copy of it.
+
+- `GET /api/decisions/export/` — a small, readable JSON download.
+- `POST /api/decisions/import/` — **additive**; an existing decision is kept unless
+  `overwrite`. Send `dry_run` first: the response describes exactly what a real run would
+  change, *including documents this machine does not have yet*, which are reported rather
+  than silently dropped.
+- `POST /api/decisions/backup/` — zips the install. Uses an **allowlist** (db, schema
+  override, uploads, vectors), because in development the data directory is the backend
+  source tree and "zip everything except…" would archive the source. `--no-media
+  --no-vectors` gives a small backup that still holds everything irreplaceable.
+- `manage.py decisions export|import|backup` for the same, scriptable.
+
+Verified across two **real** installs: a decision made on the dev database exported,
+dry-run against the packaged app's own database (different ids, no documents) correctly
+reported "1 match would be added, 0 roles — that document is not here", then imported for
+real. Both databases left exactly as found.
+
+---
+
+## Phase 3 — Trust & coverage 🟡 PARTIALLY COMPLETE (2026-08-21)
+
+**Done:** 3.1 regression suite · 3.2 extraction QA · 3.4 Reports page.  
+**Remaining:** 3.3 OCR (measured low priority).
+
+### 3.1 Regression suite ✅ DONE (2026-08-21)
+`backend/process/tests.py` — **55 tests, `python manage.py test process`, under a second.**
+
+```
+python manage.py test process                          # fast, every commit
+python manage.py test process.tests.MatchingRuleTests   # one class
+RAGOCR_CORPUS_TESTS=1 python manage.py test process     # + the real PDFs (~3 min)
+```
+
+**Fixtures are synthetic on purpose.** One MRLS and one ISPL are built in the test
+database, through the real `store_table` path, carrying one row for every rule the engine
+implements: an annotation suffix (`XL17461 NAMICA`), a leading-zero variant, a
+wrapped-cell spacing artefact (`442 071 820394`), an exact match, a genuinely absent
+part, boilerplate on both sides (`Standard Item` / `STANDAR ITEM`), and a part whose
+description changed. One comparison then asserts the whole cascade at once:
+**2 exact · 3 near-match · 1 missing · 2 excluded · 1 changed-detail**.
+
+They deliberately do **not** read `backend/pdfs/` or `backend/db.sqlite3` — during
+development the source PDFs for the original baselines were deleted by ordinary app use,
+which silently disabled the file-based regressions. Tests that can evaporate are not tests.
+
+Covered: header resolution across categories · all four `pair_likely_values` passes and
+their limits · boilerplate vs empty · identifier extraction from prose · value-shape
+advisories · `store_table` round-trip and idempotency · the full comparison cascade ·
+row-level diff (including that `qty` is *not* compared across differently-named columns)
+· ConfirmedMatch · N-way matrix · text mode with page numbers and the variant tier ·
+column-role pin/clear/reject · `field_schema.json` override, hot-reload and bad-file
+tolerance · `/api/field-schema/` · `/api/documents/<id>/columns/` · both chat routers.
+
+`RealCorpusTests` pins the hand-verified baselines (NAMICA 64/7/3/54, SSBS R0 102/9/0/35)
+plus a snapshot of the SSBS P3 ↔ R3 pair that is still on disk (44/5/64/699 — a *different
+revision*, so a large missing count is expected; it resolves the ISPL column to
+`FIRMS PART NO.`, the header Phase 0 was built for). Snapshot baselines are labelled
+`verified=False` in the table: a change there means "look at this", not "bug".
+
+**A bug fell out of writing them.** Asking `compare part no between @A.pdf and @NOPE.pdf`
+did not complain about the missing file — Router 1 fell through to its "just use the first
+two documents in the thread" rule and confidently compared a pair the user never named.
+It now names what it could not find and lists what is available. (Router 2 already did.)
+
+Still worth committing as diagnostics rather than tests: `audit_missing.py` (is every
+reported-missing value really absent?) and `compare_gridders.py` (**run before any
+extractor swap** — see 2.6).
+
+### 3.2 Extraction QA ✅ DONE (2026-08-21)
+`backend/process/extraction_qa.py` + `Document.extraction_stats` (migration `0014`).
+
+Every wrong answer this system can give traces back to something it silently failed to
+read. A scanned page has no text, so every part printed on it is reported as **missing**
+from a document that plainly contains it — and the report looks just as confident as a
+correct one. Neither that nor a table that lost its header row raises an error.
+
+- **Ingestion records what it could not read** (~1 ms/page, PyMuPDF): total pages, pages
+  with no text layer, and — the useful distinction — how many of those carry an image
+  (a scan, where OCR would help) versus none (a blank page, where nothing is recoverable).
+- **The comparison report says so itself.** All three renderers (pairwise, N-way, text
+  mode) are prefixed with a "⚠️ Before trusting this comparison" banner listing anything
+  unreadable in either document. This is the point of the whole item: the warning appears
+  on the artefact that would otherwise mislead, not in a log nobody reads.
+- Warnings also cover **0 tables extracted**, **N of M tables lost their header row**, and
+  **no part-number column resolves** (with the exact chat command to pin one).
+- `GET /api/documents/<id>/extraction/` — coverage, table health, which concept resolves
+  to which real column, and the warnings.
+- `manage.py extraction_report [--problems] [--source X] [--no-rescan]` — the same per
+  document, and back-fills the stats for documents ingested before this existed.
+
+Measured on the current corpus: **10,399 pages, 38 with no text layer (0.4%)**, and every
+MRLS/ISPL spares list has a complete one. That number is why 3.3 (OCR) was demoted — and
+this command is how you re-check it on any machine.
+
+### 3.4 Reports page ✅ DONE (2026-08-21)
+
+**The Excel download was broken.** `download_report` did a *local* import of
+`get_report_job_status` / `get_report_excel_bytes` from `reports_engine_merge` — a
+near-duplicate module with its own, permanently empty, job dict — which shadowed the
+module-level imports from `reports_engine`, where the jobs are actually registered. Every
+Reports-page download returned **404 "Report not found"**. Fixed, covered by a test, and
+`reports_engine_merge.py` (1,470 lines) is deleted.
+
+**The page also disagreed with the chat about the same documents.** It compares *ad-hoc
+uploaded files*, which have no Document rows, no stored tables and no mention index, so it
+cannot use `process/comparison.py`. What it can share — and now does — is the part that
+decides whether two strings are the same item:
+
+- `is_boilerplate_value` excludes placeholder text ("Standard Item", "N/A", footnote
+  markers) up front, so it no longer counts as a missing part;
+- values still unmatched get the same second look via `pair_likely_values` against the
+  target's identifier vocabulary (extracted from the PDF text with the mention index's
+  own tokeniser), reported as a **"Written Differently"** tier — its own tab, its own
+  Excel sheet, never silently counted as found.
+
+Measured on a fixture carrying every awkward case, this run reported **4 not found**
+before and **1** after — matching what the chat says about the same documents:
+
+| | Before | After |
 |---|---|---|
-| `regress.py` | NAMICA / SSBS / TGS bucket counts, file path vs DB path | `RealCorpusTests`, skipped when the PDFs are absent |
-| `e2e_compare.py` | 8 chat-endpoint cases: both routers, 2-file, N-file, column-not-found, unresolved filename, `/api/field-schema/` | `ChatComparisonTests` with synthetic `ExtractedTable` fixtures |
-| `e2e_mentions.py` | 6 cases: text mode, multi-target, near-match tier, column mode unaffected | `TextModeTests` |
-| `e2e_phase2.py` | 10 cases: column roles, row-level diff, API + chat command | `ColumnRoleTests`, `RowDiffTests` |
-| `verify_store.py` | `store_table` bulk rewrite is byte-identical | `StorageTests` (build a table, store, read back, compare hashes) |
-| `verify_words.py` | PyMuPDF vs pdfplumber word boxes give identical anchor tables | `AnchorExtractorTests` on one small fixture PDF |
-| `audit_missing.py` | Every "missing" value really is absent from the target | keep as a diagnostic script, committed under `backend/tools/` |
-| `compare_gridders.py` | Corpus-wide extractor comparison | keep as a diagnostic script — **run it before any extractor swap** |
+| `XL17461 NAMICA` (annotation) | not found | review tier |
+| `01534601` (leading zero) | not found | review tier |
+| `442 071 820394` (wrapped cell) | found | found — the page search already compares a space-free form |
+| `Standard Item` (placeholder) | not found | excluded |
+| `DD901201-1` (genuinely absent) | not found | not found |
 
-Pure-function tests need no fixtures at all and should come first: `resolve_header`
-across categories, all four `pair_likely_values` passes, `normalize_value`,
-`is_boilerplate_value`, `mentions.extract_identifiers`, `column_profile.profile_column`.
+Excel now carries `Review - Written Differently` and `Excluded Placeholders` sheets.
 
 ### The rest of Phase 3
 
 | # | Item | Why it matters |
 |---|---|---|
-| 3.1 | **Regression suite in the repo** | `backend/process/tests.py` is still empty. The harnesses that validate all of the above (`regress.py`, `e2e_compare.py`, `e2e_mentions.py`) live only in a session scratchpad. They should be committed with the NAMICA/SSBS/TGS baselines wired to CI or a single `manage.py test`. |
 | 3.2 | **Extraction QA per document** | Surface "12 tables, 2 headerless, part column unresolved" in the document panel *before* a comparison, so bad extraction is caught up front rather than as a wrong "missing" list. |
-| 3.3 | **Real OCR** | There is **no OCR engine in the codebase** — Docling is imported behind a try/except and is not in `requirements.txt`, so every `use_ocr` flag is a no-op, and the Landing page's "Smart OCR" is marketing only. Scanned PDFs yield no text, no tables **and no mention index**. Cheapest offline route: RapidOCR on `onnxruntime` (already a dependency), triggered only for pages with no text layer, feeding the existing pipeline. Needs model bundling in the standalone launcher. |
-| 3.4 | **Reports page unification** | `reports_engine.py` / `reports_engine_merge.py` still bypass the schema, `ConfirmedMatch`, boilerplate filtering and the mention index. `reports_engine_merge.py` is a near-duplicate (1469 vs 1431 lines) kept alive only by one fallback path in `download_report`. |
+| 3.3 | **Real OCR** — *measured as low priority, see below* | There is **no OCR engine in the codebase**: Docling sits behind a try/except and is not in `requirements.txt`, so every `use_ocr` flag is a no-op and the Landing page's "Smart OCR" is marketing. But **only 0.4% of the corpus needs it** (38 of 10,399 pages, and every MRLS/ISPL spares list has a complete text layer). Route when needed: RapidOCR on `onnxruntime` (already a dependency), gated to pages with no text layer, feeding word boxes into the existing anchor extractor. |
+
 
 ---
 
@@ -325,6 +519,21 @@ python manage.py reextract_tables --all      # structured table store
 python manage.py build_mention_index         # identifier index for text mode
 
 # Useful flags on both: --doc <id> --thread <id> --source <substring> --dry-run
+
+# What could NOT be read — run this before trusting a "missing parts" list
+python manage.py extraction_report --problems
+
+# Carry your corrections to another machine, or back this install up
+python manage.py decisions export --out my-corrections.json
+python manage.py decisions import --in my-corrections.json --dry-run
+python manage.py decisions backup --no-vectors --no-media
+```
+
+**Before committing a change to extraction, matching or storage:**
+
+```bash
+python manage.py test process                       # 107 tests, < 2 s
+RAGOCR_CORPUS_TESTS=1 python manage.py test process # + real PDFs, ~3 min
 ```
 
 **Asking the questions:**
@@ -364,7 +573,7 @@ tested, and is 10–300× faster (NAMICA: 7.9 s → 0.6 s; chat comparisons 8–
 
 ## Known caveats
 
-- **No OCR.** Scanned PDFs produce nothing — no text, no tables, no mention index.
+- **No OCR.** Scanned PDFs produce nothing — no text, no tables, no mention index. Since 3.2 this is at least *reported*: ingestion counts textless pages and the comparison banner names them. Only 0.4% of the current corpus is affected.
 - **The mention index is built at ingest.** Documents ingested earlier answer "not
   mentioned" for everything until `build_mention_index` has run.
 - **Single process assumed.** Job dicts, ingestion threads and BM25 live in process
@@ -399,7 +608,13 @@ tested, and is 10–300× faster (NAMICA: 7.9 s → 0.6 s; chat comparisons 8–
 | Identifier index (prose + cells) | `backend/process/mentions.py` |
 | Value-shape column hints (advisory) | `backend/process/column_profile.py` |
 | Per-document pinned columns | `backend/process/column_roles.py` |
+| What could not be read | `backend/process/extraction_qa.py` |
+| Export / import / backup | `backend/process/portability.py` |
 | Ingestion (3-stage PDF + hooks) | `backend/process/pipeline/ingestion.py` |
+| Comparison wizard (UI) | `frontend/src/components/workspace/ComparePanel.jsx` |
+| Reports page (ad-hoc uploads) | `backend/process/reports_engine.py` |
+| Comparison endpoint (no chat) | `backend/process/views.py` — `run_comparison_view` |
+| What a question asks for | `backend/process/intent.py` |
 | Chat router 1 | `backend/process/views.py` — `chat_thread` |
 | Chat router 2 | `backend/process/pipeline/query.py` — `query_rag` |
 | Back-fill commands | `backend/process/management/commands/` |
